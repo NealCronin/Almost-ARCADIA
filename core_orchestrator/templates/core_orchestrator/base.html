@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Drone Orchestrator{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    {% block extra_css %}{% endblock %}
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <!-- Navigation Bar -->
+    <nav class="bg-gray-800 border-b border-gray-700 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center space-x-6">
+                    <a href="{% url 'core_orchestrator:landing' %}" class="text-xl font-bold text-white hover:text-blue-400 transition-colors">
+                        Drone Orchestrator
+                    </a>
+                    <div class="flex items-center space-x-4">
+                        <a href="{% url 'core_orchestrator:host_portal' %}"
+                           class="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
+                            Host Portal
+                        </a>
+                        <a href="{% url 'core_orchestrator:client_portal' %}"
+                           class="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-medium">
+                            Client Portal
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>
