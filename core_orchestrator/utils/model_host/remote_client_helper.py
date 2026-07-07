@@ -1,13 +1,10 @@
 """
 remote_client_helper.py
 
-Network utility for client-to-host operations.
+Client-side helper for making requests to a remote Host running SAM3/LLM inference.
 
-Responsibilities
-----------------
-* Serialize parameters and frames via HTTP POST to remote Host.
-* Process JSON responses from the Host's inference endpoints.
-* Handle retries and connection errors gracefully.
+This module provides the RemoteClientHelper class for communicating with
+the Host API server over HTTP.
 """
 
 from __future__ import annotations
@@ -23,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------
-DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 REQUEST_TIMEOUT = 60  # seconds
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.0  # seconds
@@ -41,51 +38,68 @@ class RemoteClientError(Exception):
 # ------------------------------------------------------------------
 class RemoteClientHelper:
     """
-    Helper class for communicating with remote Host inference endpoints.
+    Client helper for making requests to a remote Host.
+
+    This class handles HTTP communication with the Host API server,
+    including image encoding, request retries, and error handling.
 
     Attributes
     ----------
     base_url : str
-        Base URL of the remote Host (e.g., "http://192.168.1.100:8000").
+        Base URL of the Host API server.
+    timeout : int
+        Request timeout in seconds.
     """
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: int = REQUEST_TIMEOUT,
+    ) -> None:
+        """
+        Initialize the remote client helper.
+
+        Parameters
+        ----------
+        base_url : str
+            Base URL of the Host API server (e.g., "http://127.0.0.1:8080").
+        timeout : int
+            Request timeout in seconds.
+        """
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self._session = requests.Session()
-        self._session.timeout = REQUEST_TIMEOUT
 
     def _make_request(
         self,
         endpoint: str,
-        json_data: Optional[dict] = None,
-        files: Optional[dict] = None,
-        retries: int = MAX_RETRIES,
+        json_data: Optional[dict[str, Any]] = None,
+        files: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """
-        Make a POST request with retry logic.
+        Make a POST request to the Host API.
 
         Parameters
         ----------
         endpoint : str
-            API endpoint path (e.g., "/api/host/evaluate-llm/").
+            API endpoint (e.g., "/api/host/evaluate-sam3/").
         json_data : dict | None
-            JSON payload to send.
+            JSON payload for the request.
         files : dict | None
-            Files to upload (for frame data).
-        retries : int
-            Number of retry attempts.
+            Files to upload (e.g., image data).
 
         Returns
         -------
         dict[str, Any]
-            Parsed JSON response.
+            Parsed JSON response from the server.
 
         Raises
         ------
         RemoteClientError
-            If all retries fail.
+            If the request fails after retries.
         """
         url = f"{self.base_url}{endpoint}"
+        retries = MAX_RETRIES
 
         for attempt in range(retries):
             try:
@@ -93,7 +107,7 @@ class RemoteClientHelper:
                     url,
                     json=json_data,
                     files=files,
-                    timeout=REQUEST_TIMEOUT,
+                    timeout=self.timeout,
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -165,6 +179,10 @@ class RemoteClientHelper:
         """
         Send a SAM3 segmentation request to the remote Host.
 
+        NOTE: The Host manages its own SAM3 weights path configuration.
+        The client does NOT send weights_path - it is read from the Host's
+        configuration on the server side.
+
         Parameters
         ----------
         image : Any
@@ -193,15 +211,20 @@ class RemoteClientHelper:
         if not success:
             raise RemoteClientError("Failed to encode image")
 
-        files = {"image": ("frame.png", png_bytes.tobytes(), "image/png")}
-        payload = {}
+        # Encode as base64 string for JSON payload
+        frame_b64 = base64.b64encode(png_bytes).decode("utf-8")
+
+        payload = {"frame_b64": frame_b64}
 
         if input_points:
             payload["input_points"] = input_points
         if input_boxes:
             payload["input_boxes"] = input_boxes
 
-        result = self._make_request("/api/host/evaluate-sam3/", json_data=payload, files=files)
+        # NOTE: weights_path is NOT included in payload
+        # The Host reads sam3_weights_path from its own configuration
+
+        result = self._make_request("/api/host/evaluate-sam3/", json_data=payload)
         return result
 
     def get_status(self) -> dict[str, Any]:
@@ -242,18 +265,17 @@ def _get_cv2():
     global _cv2
     if _cv2 is None:
         try:
-            import cv2
-
-            _cv2 = cv2
+            import cv2 as _cv2_module
+            _cv2 = _cv2_module
         except ImportError:
             logger.warning("OpenCV not available")
-            return None
+            _cv2 = None
     return _cv2
 
 
 def cv2_imencode(frame: Any) -> tuple[bool, bytes]:
     """
-    Encode a numpy array as PNG bytes.
+    Encode an image frame to PNG bytes.
 
     Parameters
     ----------
@@ -263,36 +285,39 @@ def cv2_imencode(frame: Any) -> tuple[bool, bytes]:
     Returns
     -------
     tuple[bool, bytes]
-        Success flag and encoded bytes.
+        (success, encoded_bytes). Returns (False, b"") on failure.
     """
     cv2 = _get_cv2()
     if cv2 is None:
         return (False, b"")
-    success, buffer = cv2.imencode(".png", frame)
-    return (success, buffer.tobytes() if success else b"")
+
+    try:
+        success, buffer = cv2.imencode(".png", frame)
+        return (success, buffer.tobytes() if success else b"")
+    except Exception:
+        return (False, b"")
+
 
 def cv2_imdecode(buf: Any) -> Any:
     """
-    Decode PNG bytes to a numpy array.
+    Decode PNG bytes to an image frame.
 
     Parameters
     ----------
     buf : Any
-        Image bytes or array-like.
+        Encoded image bytes.
 
     Returns
     -------
-    Any
+    Any | None
         Decoded image as numpy array, or None on failure.
     """
     cv2 = _get_cv2()
     if cv2 is None:
         return None
+
     try:
-        if isinstance(buf, bytes):
-            arr = np.frombuffer(buf, dtype=np.uint8)
-        else:
-            arr = buf
+        arr = np.frombuffer(buf, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception:
         return None
@@ -300,96 +325,49 @@ def cv2_imdecode(buf: Any) -> Any:
 
 def image_to_base64(
     image: Any,
-    format: str = "PNG",
-    max_dimension: int = 1920,
-    quality: int = 85,
+    format: str = "png",
+    quality: int = 95,
 ) -> str:
     """
-    Convert a numpy array image to base64 string with OOM protection.
-
-    Automatically downscales images exceeding safe dimensional thresholds
-    to prevent memory exhaustion and minimize network payload.
+    Encode an image to a base64 string.
 
     Parameters
     ----------
     image : Any
         Input image as numpy array.
     format : str
-        Image format (PNG, JPEG, etc.).
-    max_dimension : int
-        Maximum allowed dimension (width or height). Default 1920.
+        Image format ("png" or "jpeg").
     quality : int
-        JPEG quality (1-100). Ignored for PNG. Default 85.
+        JPEG quality (1-100). Ignored for PNG.
 
     Returns
     -------
     str
         Base64-encoded image string.
-
-    Raises
-    ------
-    RemoteClientError
-        If OpenCV not available or encoding fails.
     """
     cv2 = _get_cv2()
     if cv2 is None:
         raise RemoteClientError("OpenCV not available")
 
-    # Validate image dimensions and downscale if necessary
-    if not hasattr(image, "shape") or len(image.shape) < 2:
-        raise RemoteClientError("Invalid image format")
+    try:
+        if format.lower() == "png":
+            success, buffer = cv2.imencode(".png", image)
+        else:
+            success, buffer = cv2.imencode(
+                ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality]
+            )
 
-    height, width = image.shape[:2]
-    needs_scaling = False
-    scale_factor = 1.0
+        if not success:
+            raise RemoteClientError("Failed to encode image")
 
-    # Check if either dimension exceeds the threshold
-    if width > max_dimension or height > max_dimension:
-        needs_scaling = True
-        # Calculate proportional scale factor
-        scale_factor = max_dimension / max(width, height)
-
-    # Perform downscaling if needed
-    if needs_scaling:
-        new_width = int(width * scale_factor)
-        new_height = int(height * scale_factor)
-
-        # Use LINEAR interpolation for downscaling (good quality, fast)
-        # Use AREA interpolation for significant downscaling (better quality)
-        interpolation = (
-            cv2.INTER_AREA if scale_factor < 0.5 else cv2.INTER_LINEAR
-        )
-
-        scaled_image = cv2.resize(
-            image,
-            (new_width, new_height),
-            interpolation=interpolation,
-        )
-
-        logger.debug(
-            "Downscaled image from %dx%d to %dx%d (scale: %.2f)",
-            width, height, new_width, new_height, scale_factor,
-        )
-
-        image = scaled_image
-
-    # Encode with format-specific optimization
-    if format.upper() == "JPEG":
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        success, buffer = cv2.imencode(f".{format.lower()}", image, encode_params)
-    else:
-        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 6]
-        success, buffer = cv2.imencode(f".{format.lower()}", image, encode_params)
-
-    if not success:
-        raise RemoteClientError("Failed to encode image")
-
-    return base64.b64encode(buffer).decode("utf-8")
+        return base64.b64encode(buffer).decode("utf-8")
+    except Exception as exc:
+        raise RemoteClientError(f"Image encoding failed: {exc}") from exc
 
 
 def base64_to_image(b64_string: str) -> Optional[Any]:
     """
-    Convert base64 string to numpy array image.
+    Decode a base64 string to an image.
 
     Parameters
     ----------
@@ -404,14 +382,13 @@ def base64_to_image(b64_string: str) -> Optional[Any]:
     try:
         import numpy as np
 
-        data = base64.b64decode(b64_string)
-        arr = np.frombuffer(data, dtype=np.uint8)
+        decoded = base64.b64decode(b64_string)
+        arr = np.frombuffer(decoded, dtype=np.uint8)
+
         cv2 = _get_cv2()
         if cv2 is None:
             return None
+
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception as exc:
-        logger.debug("Failed to decode base64 image: %s", exc)
+    except Exception:
         return None
-
-
