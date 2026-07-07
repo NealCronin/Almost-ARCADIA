@@ -49,7 +49,7 @@
                     </div>
 
                     <!-- SAM3 Weights Path -->
-                    <div>
+                    <div id="sam3WeightsContainer">
                         <label for="sam3_weights_path" class="block text-xs font-medium text-gray-400 mb-1">
                             SAM3 Weights Path (.pt)
                         </label>
@@ -57,6 +57,9 @@
                                value="{{ config.sam3_weights_path|default:'' }}"
                                placeholder="/path/to/sam3/model.pt"
                                class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
+                        <p id="sam3RemoteNote" class="hidden text-xs text-blue-400 mt-1">
+                            Remote Host uses its own configured model weights.
+                        </p>
                     </div>
                 </div>
             </div>
@@ -151,7 +154,21 @@
                 </span>
             </div>
 
-            <div class="flex-1 flex items-center justify-center bg-black p-4">
+            <div class="flex-1 flex items-center justify-center bg-black p-4 relative">
+                <!-- Error overlay -->
+                <div id="streamErrorOverlay" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-10">
+                    <div class="bg-red-900/90 border border-red-500 rounded-lg p-6 max-w-md text-center">
+                        <svg class="w-12 h-12 text-red-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <h3 class="text-lg font-semibold text-red-300 mb-2">Stream Error</h3>
+                        <p class="text-sm text-gray-300 error-message">Failed to load video stream</p>
+                        <button type="button" onclick="hideStreamError()" class="mt-4 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors">
+                            Dismiss
+                        </button>
+                    </div>
+                </div>
+                
                 <img id="streamImage"
                      src="{% url 'core_orchestrator:heatmap_stream' %}?dataset_path={{ config.dataset_path }}&routing_mode={{ config.routing_mode }}&remote_host_ip={{ config.remote_host_ip }}&remote_host_port={{ config.remote_host_port }}&sam3_weights_path={{ config.sam3_weights_path }}"
                      alt="Heatmap Stream"
@@ -171,15 +188,31 @@
 
 {% block extra_js %}
 <script>
-// Update remote host section visibility
+// Update remote host section visibility and SAM3 weights field state
 function updateRemoteSection() {
     const remoteRadio = document.querySelector('input[name="routing_mode"][value="remote"]');
+    const localRadio = document.querySelector('input[name="routing_mode"][value="local"]');
     const remoteSection = document.getElementById('remoteHostSection');
+    const sam3WeightsContainer = document.getElementById('sam3WeightsContainer');
+    const sam3WeightsInput = document.getElementById('sam3_weights_path');
+    const sam3RemoteNote = document.getElementById('sam3RemoteNote');
 
     if (remoteRadio && remoteRadio.checked) {
+        // Remote Host mode selected
         remoteSection.classList.remove('hidden');
+
+        // Disable/hide the local SAM3 weights path and show helper note
+        sam3WeightsInput.disabled = true;
+        sam3WeightsInput.classList.add('opacity-50', 'cursor-not-allowed');
+        sam3RemoteNote.classList.remove('hidden');
     } else {
+        // Local mode selected
         remoteSection.classList.add('hidden');
+
+        // Enable SAM3 weights path and hide helper note
+        sam3WeightsInput.disabled = false;
+        sam3WeightsInput.classList.remove('opacity-50', 'cursor-not-allowed');
+        sam3RemoteNote.classList.add('hidden');
     }
 }
 
@@ -204,6 +237,50 @@ function applySettings() {
     // Update stream image src to reload
     const streamImage = document.getElementById('streamImage');
     streamImage.src = '{% url "core_orchestrator:heatmap_stream" %}' + '?' + params.toString();
+}
+
+// Stream error handling
+let errorDisplayTimeout = null;
+
+// Monitor stream image for errors
+streamImage.addEventListener('error', function(e) {
+    console.error('Stream image failed to load:', e);
+    
+    // Clear any existing timeout
+    if (errorDisplayTimeout) {
+        clearTimeout(errorDisplayTimeout);
+    }
+    
+    // Show error message
+    showStreamError('Failed to load video stream. The server may be unavailable or the video source is invalid.');
+    
+    // Auto-hide after 5 seconds
+    errorDisplayTimeout = setTimeout(hideStreamError, 5000);
+});
+
+streamImage.addEventListener('load', function() {
+    // Hide error when stream loads successfully
+    hideStreamError();
+    if (errorDisplayTimeout) {
+        clearTimeout(errorDisplayTimeout);
+    }
+});
+
+// Show error overlay
+function showStreamError(message) {
+    const overlay = document.getElementById('streamErrorOverlay');
+    if (overlay) {
+        overlay.querySelector('.error-message').textContent = message;
+        overlay.classList.remove('hidden');
+    }
+}
+
+// Hide error overlay
+function hideStreamError() {
+    const overlay = document.getElementById('streamErrorOverlay');
+    if (overlay) {
+        overlay.classList.add('hidden');
+    }
 }
 
 // Toggle model settings dropdown
