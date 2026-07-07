@@ -36,174 +36,190 @@ class _ProcessRecord:
 
 class ProcessManager:
     """
-    Registry + lifecycle manager for background child processes.
+    Thread-safe process lifecycle manager.
 
-    Thread-safe – all public methods acquire an internal lock.
+    Features
+    --------
+    * Spawn background binaries with automatic stdout/stderr streaming.
+    * Track processes by name → one process per name (latest spawn wins).
+    * Safe ``terminate()`` (SIGTERM) and ``kill()`` (SIGKILL) methods.
+    * In-memory stdout/stderr buffers for debugging.
     """
 
     _instance: Optional["ProcessManager"] = None
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._registry: dict[str, _ProcessRecord] = {}
+        self._processes: dict[str, _ProcessRecord] = {}
         self._lock = threading.Lock()
 
-    # ------------------------------------------------------------------
-    # Singleton accessor
-    # ------------------------------------------------------------------
     @classmethod
     def instance(cls) -> "ProcessManager":
-        """Return the global singleton."""
+        """Return the singleton ProcessManager instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls()
+                    cls._instance = ProcessManager()
         return cls._instance
 
-    @classmethod
-    def reset(cls) -> None:
-        """Force-recreate the singleton (useful for testing)."""
-        with cls._lock:
-            cls._instance = None
-
-    # ------------------------------------------------------------------
-    # Core operations
-    # ------------------------------------------------------------------
     def start(
         self,
         name: str,
         cmd: list[str],
-        capture_output: bool = True,
-        **kwargs,
-    ) -> _ProcessRecord:
+        cwd: Optional[str] = None,
+        env: Optional[dict] = None,
+    ) -> int:
         """
-        Spawn a child process and register it.
+        Start a background process and track it by *name*.
 
-        Parameters
-        ----------
-        name : str
-            Human-readable identifier (also used as the dict key).
-        cmd : list[str]
-            Executable + arguments.
-        capture_output : bool
-            If ``True``, pipe stdout/stderr into in-memory buffers.
-        **kwargs
-            Forwarded to ``subprocess.Popen`` (env, cwd, …).
+        Returns the PID of the spawned child.
         """
         with self._lock:
-            if name in self._registry:
-                raise ValueError(f"Process '{name}' already registered")
+            # Stop existing process with same name if any
+            if name in self._processes:
+                logger.warning("Process %s already running, stopping first", name)
+                self._stop_no_lock(name, force=False)
 
-            if capture_output:
-                kwargs.setdefault("stdout", subprocess.PIPE)
-                kwargs.setdefault("stderr", subprocess.PIPE)
+        # Spawn the process
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+            bufsize=1,  # line buffered
+        )
 
-            proc = subprocess.Popen(cmd, **kwargs)
-            record = _ProcessRecord(pid=proc.pid, process=proc, name=name)
-            self._registry[name] = record
-            logger.info("Launched process '%s' (pid=%d) cmd=%s", name, proc.pid, cmd)
-            return record
+        record = _ProcessRecord(proc.pid, proc, name)
 
-    def get(self, name: str) -> Optional[_ProcessRecord]:
+        # Start reader threads
+        t_out = threading.Thread(
+            target=self._read_stream, args=(record, record.stdout_buf, proc.stdout)
+        )
+        t_err = threading.Thread(
+            target=self._read_stream, args=(record, record.stderr_buf, proc.stderr)
+        )
+        t_out.daemon = True
+        t_err.daemon = True
+        t_out.start()
+        t_err.start()
+
         with self._lock:
-            return self._registry.get(name)
+            self._processes[name] = record
 
-    def list_all(self) -> list[_ProcessRecord]:
-        with self._lock:
-            return list(self._registry.values())
+        logger.info("Started process %s (PID %d): %s", name, proc.pid, " ".join(cmd))
+        return proc.pid
+
+    def _read_stream(
+        self, record: _ProcessRecord, buf: list[str], stream: Optional[object]
+    ) -> None:
+        """Thread target to read a stream into buffer."""
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                buf.append(line)
+                logger.debug("[%s] %s", record.name, line.rstrip())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error reading stream for %s: %s", record.name, exc)
+        finally:
+            record.alive = False
 
     def is_running(self, name: str) -> bool:
-        """Return ``True`` if the process is alive and registered."""
-        record = self.get(name)
-        if record is None:
-            return False
-        # Poll updates the ``returncode`` attribute
-        record.process.poll()
-        record.alive = record.process.returncode is None
-        if not record.alive:
-            self._drain(record)
-        return record.alive
-
-    def read_output(self, name: str) -> tuple[str, str]:
-        """Return captured stdout / stderr strings for *name*."""
-        record = self.get(name)
-        if record is None:
-            return "", ""
-        return "\n".join(record.stdout_buf), "\n".join(record.stderr_buf)
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-    def stop(self, name: str, force: bool = False) -> bool:
-        """
-        Gracefully stop a registered process.
-
-        Parameters
-        ----------
-        name : str
-        force : bool
-            If ``True``, call ``kill()`` instead of ``terminate()``.
-
-        Returns
-        -------
-        bool
-            ``True`` if the process was stopped, ``False`` if not found.
-        """
-        record = self.get(name)
-        if record is None:
-            return False
-
-        if not record.alive:
-            self.unregister(name)
+        """Check if a named process is still alive."""
+        with self._lock:
+            if name not in self._processes:
+                return False
+            record = self._processes[name]
+            if record.process.poll() is not None:
+                record.alive = False
+                return False
             return True
 
-        method = record.process.kill if force else record.process.terminate
-        method()
-        # Brief wait for SIGTERM to take effect
-        if not force:
-            import time
-
-            deadline = time.monotonic() + 3
-            while record.process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.1)
-            # If still alive after 3 s, fall back to kill
-            if record.process.poll() is None:
-                logger.warning("Process '%s' did not terminate; forcing kill", name)
-                record.process.kill()
-
-        self._drain(record)
-        self.unregister(name)
-        logger.info("Stopped process '%s' (force=%s)", name, force)
-        return True
-
-    def stop_all(self, force: bool = False) -> None:
-        """Stop every registered process."""
-        names = list(self._registry.keys())
-        for name in names:
-            self.stop(name, force=force)
-
-    def unregister(self, name: str) -> None:
+    def get_pid(self, name: str) -> Optional[int]:
+        """Return the PID for a named process, or None."""
         with self._lock:
-            self._registry.pop(name, None)
+            if name not in self._processes:
+                return None
+            return self._processes[name].pid
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _drain(record: _ProcessRecord) -> None:
-        """Drain pipe buffers into the record's in-memory lists."""
-        proc = record.process
-        if proc.stdout:
+    def stop(self, name: str, force: bool = False) -> bool:
+        """
+        Gracefully terminate a named process.
+
+        If *force* is True, use SIGKILL instead of SIGTERM.
+        Returns True if the process was found and terminated.
+        """
+        with self._lock:
+            return self._stop_no_lock(name, force=force)
+
+    def _stop_no_lock(self, name: str, force: bool) -> bool:
+        """Internal stop without lock (caller must hold lock)."""
+        if name not in self._processes:
+            return False
+
+        record = self._processes[name]
+        if record.process.poll() is not None:
+            # Already dead
+            del self._processes[name]
+            return True
+
+        try:
+            if force:
+                logger.info("Killing process %s (PID %d)", name, record.pid)
+                record.process.kill()
+            else:
+                logger.info("Terminating process %s (PID %d)", name, record.pid)
+                record.process.terminate()
+
+            # Wait briefly for graceful shutdown
             try:
-                out = proc.stdout.read()
-                if out:
-                    record.stdout_buf.append(out.decode("utf-8", errors="replace"))
-            except Exception:
-                pass
-        if proc.stderr:
-            try:
-                err = proc.stderr.read()
-                if err:
-                    record.stderr_buf.append(err.decode("utf-8", errors="replace"))
-            except Exception:
-                pass
+                record.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Process %s did not terminate, killing", name)
+                record.process.kill()
+                record.process.wait()
+
+            record.alive = False
+            del self._processes[name]
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error stopping process %s: %s", name, exc)
+            return False
+
+    def kill(self, name: str) -> bool:
+        """Force-kill a named process (SIGKILL). Returns True if found."""
+        return self.stop(name, force=True)
+
+    def get_output(self, name: str, clear: bool = False) -> tuple[list[str], list[str]]:
+        """
+        Get captured stdout/stderr buffers for a named process.
+
+        If *clear* is True, empty the buffers after reading.
+        """
+        with self._lock:
+            if name not in self._processes:
+                return ([], [])
+            record = self._processes[name]
+            stdout = record.stdout_buf.copy()
+            stderr = record.stderr_buf.copy()
+            if clear:
+                record.stdout_buf.clear()
+                record.stderr_buf.clear()
+            return (stdout, stderr)
+
+    def list_processes(self) -> list[dict]:
+        """Return a list of all tracked processes with status info."""
+        with self._lock:
+            result = []
+            for name, record in self._processes.items():
+                result.append(
+                    {
+                        "name": name,
+                        "pid": record.pid,
+                        "alive": record.alive and record.process.poll() is None,
+                        "returncode": record.process.returncode,
+                    }
+                )
+            return result
