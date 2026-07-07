@@ -452,6 +452,9 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
     Reads from local dataset_path (video or image directory).
     Routes inference based on routing_mode (local vs remote).
     Draws heatmap overlay on detected targets.
+
+    Includes robust client disconnect detection to prevent
+    streaming thread leaks and resource exhaustion.
     """
     # Client-side configuration from request
     dataset_path = request.GET.get("dataset_path", "")
@@ -461,7 +464,7 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
     sam3_weights_path = request.GET.get("sam3_weights_path", "")
 
     def frame_generator() -> Generator[bytes, None, None]:
-        """Generate MJPEG frames from dataset."""
+        """Generate MJPEG frames from dataset with disconnect detection."""
         # Initialize remote client if needed
         remote_client = None
         if routing_mode == "remote":
@@ -475,7 +478,7 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
 
         # Open dataset source
         cap = None
-        frame_list: list[np.ndarray] = []
+        frame_list: list[str] = []
         frame_index = 0
 
         if dataset_path:
@@ -487,7 +490,6 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
             # Check if it's an image directory
             elif os.path.isdir(dataset_path):
                 image_patterns = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif"]
-                frame_list = []
                 for pattern in image_patterns:
                     frame_list.extend(glob.glob(os.path.join(dataset_path, pattern)))
                 frame_list.sort()
@@ -497,6 +499,18 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
 
         try:
             while True:
+                # Check for client disconnect BEFORE processing frame
+                # Django 3.1+ provides is_disconnected() method
+                if hasattr(request, "is_disconnected"):
+                    if request.is_disconnected():
+                        logger.info("Client disconnected, stopping stream")
+                        break
+                else:
+                    # Fallback: check if streaming attribute is set
+                    if hasattr(request, "_stream") and request._stream is None:
+                        logger.info("Request stream terminated, stopping stream")
+                        break
+
                 # Get next frame
                 if cap is not None:
                     ret, frame = cap.read()
@@ -589,19 +603,35 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                 )
 
                 # Encode to JPEG and yield
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                jpeg_bytes = buf.tobytes()
+                try:
+                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    jpeg_bytes = buf.tobytes()
 
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + jpeg_bytes
-                    + b"\r\n"
-                )
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + jpeg_bytes
+                        + b"\r\n"
+                    )
+                except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                    # Client disconnected during frame transmission
+                    logger.info("Connection broken during frame yield: %s", exc)
+                    break
+                except Exception as exc:
+                    # Other encoding errors
+                    logger.error("Frame encoding failed: %s", exc)
+                    break
+
+        except (GeneratorExit, StopIteration):
+            # Generator explicitly terminated
+            logger.info("Stream generator terminated")
+            raise
 
         finally:
+            # CRITICAL: Always release OpenCV resources
             if cap is not None:
                 cap.release()
+                logger.debug("VideoCapture released")
 
     return StreamingHttpResponse(
         frame_generator(),

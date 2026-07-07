@@ -258,44 +258,74 @@ class Sam3ServerHelper:
         return self.predict(image, input_boxes=[box])
 
     def get_target_coordinates(
-        self,
-        image: Any,
-        input_points: Optional[list[list[float]]] = None,
-    ) -> list[tuple[float, float]]:
-        """
-        Extract target pixel coordinates from segmentation.
-
-        Returns the centroid of each detected mask.
-
-        Parameters
-        ----------
-        image : Any
-            Input image as numpy array.
-        input_points : list[list[float]] | None
-            Initial point prompts for detection.
-
-        Returns
-        -------
-        list[tuple[float, float]]
-            List of (x, y) centroid coordinates.
-        """
-        result = self.predict(image, input_points=input_points)
-        masks = result.get("masks", [])
-        centroids = []
-
-        for mask in masks:
-            if isinstance(mask, list) and len(mask) > 0:
+            self,
+            image: Any,
+            input_points: Optional[list[list[float]]] = None,
+        ) -> list[tuple[float, float]]:
+            """
+            Extract target pixel coordinates from segmentation.
+    
+            Returns the centroid of each detected mask.
+    
+            Parameters
+            ----------
+            image : Any
+                Input image as numpy array.
+            input_points : list[list[float]] | None
+                Initial point prompts for detection.
+    
+            Returns
+            -------
+            list[tuple[float, float]]
+                List of (x, y) centroid coordinates. Returns empty list
+                if no valid targets are detected (prevents divide-by-zero).
+            """
+            result = self.predict(image, input_points=input_points)
+            masks = result.get("masks", [])
+            centroids: list[tuple[float, float]] = []
+    
+            # Import numpy once at function level for efficiency
+            import numpy as np
+    
+            for mask in masks:
+                # Validate mask structure
+                if not isinstance(mask, list) or len(mask) == 0:
+                    logger.debug("Skipping empty or invalid mask")
+                    continue
+    
                 # Convert to numpy for easier processing
-                import numpy as np
-
-                mask_arr = np.array(mask)
-                ys, xs = np.where(mask_arr > 0)
-                if len(xs) > 0:
+                try:
+                    mask_arr = np.array(mask)
+    
+                    # CRITICAL: Check if mask is entirely zeros (no targets detected)
+                    # This prevents divide-by-zero errors when computing centroids
+                    if mask_arr.size == 0:
+                        logger.debug("Mask array is empty, skipping")
+                        continue
+    
+                    # Find all non-zero pixel coordinates
+                    ys, xs = np.where(mask_arr > 0)
+    
+                    # Validate that we found at least one valid target pixel
+                    if len(xs) == 0 or len(ys) == 0:
+                        logger.debug("No valid target pixels found in mask")
+                        continue
+    
+                    # Compute centroid safely (now guaranteed to have non-zero elements)
                     centroid_x = float(np.mean(xs))
                     centroid_y = float(np.mean(ys))
                     centroids.append((centroid_x, centroid_y))
-
-        return centroids
+    
+                except (ValueError, TypeError) as exc:
+                    # Handle malformed mask data gracefully
+                    logger.warning("Failed to process mask: %s", exc)
+                    continue
+                except Exception as exc:
+                    # Catch any other unexpected errors to prevent pipeline crash
+                    logger.error("Unexpected error processing mask: %s", exc)
+                    continue
+    
+            return centroids
 
     def status(self) -> dict:
         """Return the current model status."""

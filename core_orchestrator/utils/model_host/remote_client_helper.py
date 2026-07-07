@@ -298,9 +298,17 @@ def cv2_imdecode(buf: Any) -> Any:
         return None
 
 
-def image_to_base64(image: Any, format: str = "PNG") -> str:
+def image_to_base64(
+    image: Any,
+    format: str = "PNG",
+    max_dimension: int = 1920,
+    quality: int = 85,
+) -> str:
     """
-    Convert a numpy array image to base64 string.
+    Convert a numpy array image to base64 string with OOM protection.
+
+    Automatically downscales images exceeding safe dimensional thresholds
+    to prevent memory exhaustion and minimize network payload.
 
     Parameters
     ----------
@@ -308,17 +316,71 @@ def image_to_base64(image: Any, format: str = "PNG") -> str:
         Input image as numpy array.
     format : str
         Image format (PNG, JPEG, etc.).
+    max_dimension : int
+        Maximum allowed dimension (width or height). Default 1920.
+    quality : int
+        JPEG quality (1-100). Ignored for PNG. Default 85.
 
     Returns
     -------
     str
         Base64-encoded image string.
+
+    Raises
+    ------
+    RemoteClientError
+        If OpenCV not available or encoding fails.
     """
     cv2 = _get_cv2()
     if cv2 is None:
         raise RemoteClientError("OpenCV not available")
 
-    success, buffer = cv2.imencode(f".{format.lower()}", image)
+    # Validate image dimensions and downscale if necessary
+    if not hasattr(image, "shape") or len(image.shape) < 2:
+        raise RemoteClientError("Invalid image format")
+
+    height, width = image.shape[:2]
+    needs_scaling = False
+    scale_factor = 1.0
+
+    # Check if either dimension exceeds the threshold
+    if width > max_dimension or height > max_dimension:
+        needs_scaling = True
+        # Calculate proportional scale factor
+        scale_factor = max_dimension / max(width, height)
+
+    # Perform downscaling if needed
+    if needs_scaling:
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+
+        # Use LINEAR interpolation for downscaling (good quality, fast)
+        # Use AREA interpolation for significant downscaling (better quality)
+        interpolation = (
+            cv2.INTER_AREA if scale_factor < 0.5 else cv2.INTER_LINEAR
+        )
+
+        scaled_image = cv2.resize(
+            image,
+            (new_width, new_height),
+            interpolation=interpolation,
+        )
+
+        logger.debug(
+            "Downscaled image from %dx%d to %dx%d (scale: %.2f)",
+            width, height, new_width, new_height, scale_factor,
+        )
+
+        image = scaled_image
+
+    # Encode with format-specific optimization
+    if format.upper() == "JPEG":
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+        success, buffer = cv2.imencode(f".{format.lower()}", image, encode_params)
+    else:
+        encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 6]
+        success, buffer = cv2.imencode(f".{format.lower()}", image, encode_params)
+
     if not success:
         raise RemoteClientError("Failed to encode image")
 
