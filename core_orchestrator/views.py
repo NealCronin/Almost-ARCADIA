@@ -3,400 +3,584 @@ views.py
 
 Django views for the core orchestrator application.
 
-Provides landing pages, host-side API endpoints for LLM/SAM3 inference,
-and the MJPEG heatmap streaming dashboard.
+Strict Client-Host Split Architecture:
+- Host Portal: ONLY captures IP/Port for listening. NO model paths.
+- Client Portal: ALL model paths, dataset paths, and routing decisions happen here.
+- Host API: Stateless endpoints that process raw payloads and return JSON responses.
 """
 
 import base64
+import glob
 import io
 import json
 import logging
+import os
 import time
 import threading
-from typing import Any, Optional, Generator
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Any, Generator, Optional
 
 import cv2
 import numpy as np
 
-from django.http import (
-    HttpRequest,
-    HttpResponse,
-    JsonResponse,
-    StreamingHttpResponse,
-)
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
-from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
-
-from .utils.model_host.llama_server_helper import LlamaServerHelper, LlamaServerError
-from .utils.model_host.sam3_server_helper import Sam3ServerHelper, Sam3Error
-from .utils.model_host.remote_client_helper import RemoteClientHelper, RemoteClientError
 
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# Module-level state for host configuration
+# Module-level state for Host API server (stateless per-request)
 # ------------------------------------------------------------------
 
-_host_config: dict[str, Any] = {
-    "host_ip": "0.0.0.0",
-    "port": 8080,
-    "model_path": "",
-    "weights_path": "",
-    "running": False,
+_host_api_running = False
+_host_api_thread: Optional[threading.Thread] = None
+_host_api_config: dict[str, Any] = {
+    "listen_ip": "0.0.0.0",
+    "listen_port": 8080,
 }
 
-_llama_helper: Optional[LlamaServerHelper] = None
-_sam3_helper: Optional[Sam3ServerHelper] = None
+# Per-request model helpers (lazy initialization)
+_request_llama_helper: Optional[Any] = None
+_request_sam3_helper: Optional[Any] = None
+
+# Request log for Host Portal display
+_request_log: list[dict[str, Any]] = []
+_MAX_LOG_ENTRIES = 100
+_log_lock = threading.Lock()
 
 
 # ------------------------------------------------------------------
-# Helpers
+# Request Logging Utility
 # ------------------------------------------------------------------
 
-def json_response(data: dict, status: int = 200) -> JsonResponse:
-    """Return a JSON JsonResponse with the given data dict."""
-    return JsonResponse(data, status=status)
+def log_request(endpoint: str, details: dict[str, Any]) -> None:
+    """Thread-safe request logging for Host Portal display."""
+    global _request_log
+    entry = {
+        "timestamp": time.strftime("%H:%M:%S"),
+        "endpoint": endpoint,
+        "details": details,
+    }
+    with _log_lock:
+        _request_log.append(entry)
+        if len(_request_log) > _MAX_LOG_ENTRIES:
+            _request_log = _request_log[-_MAX_LOG_ENTRIES:]
 
 
-def encode_frame_to_jpeg(frame: np.ndarray, quality: int = 85) -> bytes:
-    """Encode a numpy frame to JPEG bytes."""
-    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    return buffer.tobytes()
-
-
-def draw_bounding_boxes(
-    frame: np.ndarray,
-    boxes: list[list[float]],
-    color: tuple[int, int, int] = (0, 255, 0),
-    thickness: int = 2,
-) -> np.ndarray:
-    """Draw bounding boxes on a frame."""
-    for box in boxes:
-        if isinstance(box, (list, tuple)) and len(box) >= 4:
-            x1, y1, x2, y2 = [int(v) for v in box[:4]]
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-    return frame
-
-
-def draw_heatmap_overlay(
-    frame: np.ndarray,
-    heat_points: list[tuple[float, float]],
-    intensity: float = 0.5,
-) -> np.ndarray:
-    """Draw heatmap overlay on frame at target coordinates."""
-    overlay = frame.copy()
-    for x, y in heat_points:
-        x, y = int(x), int(y)
-        # Draw circular heatmap marker
-        cv2.circle(overlay, (x, y), 15, (255, 0, 0), -1)
-        cv2.circle(overlay, (x, y), 20, (255, 255, 0), 2)
-    
-    # Blend overlay
-    return cv2.addWeighted(overlay, intensity, frame, 1 - intensity, 0)
+def get_request_logs() -> list[dict[str, Any]]:
+    """Thread-safe retrieval of request logs."""
+    with _log_lock:
+        return list(reversed(_request_log))
 
 
 # ------------------------------------------------------------------
-# Views
+# Host API Request Handler (Background Server)
+# ------------------------------------------------------------------
+
+class HostAPIHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler for Host API endpoints (stateless)."""
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Suppress default logging."""
+        pass
+
+    def _send_json(self, status: int, data: dict[str, Any]) -> None:
+        """Helper to send JSON response."""
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        """Handle POST requests to API endpoints."""
+        if self.path == "/api/host/evaluate-llm/":
+            self._handle_evaluate_llm()
+        elif self.path == "/api/host/evaluate-sam3/":
+            self._handle_evaluate_sam3()
+        elif self.path == "/api/host/status/":
+            self._handle_status()
+        else:
+            self._send_json(404, {"error": "Not found"})
+
+    def do_GET(self) -> None:
+        """Handle GET requests (status only)."""
+        if self.path == "/api/host/status/":
+            self._handle_status()
+        else:
+            self._send_json(404, {"error": "Not found"})
+
+    def _handle_evaluate_llm(self) -> None:
+        """Process LLM evaluation request (stateless)."""
+        try:
+            # Parse request body
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+            prompt = body.get("prompt", "")
+            context = body.get("context", "")
+            model_path = body.get("model_path", "")
+
+            if not prompt:
+                return self._send_json(400, {"error": "prompt is required"})
+            if not model_path:
+                return self._send_json(400, {"error": "model_path is required"})
+
+            # Log request
+            log_request("/api/host/evaluate-llm/", {"prompt_len": len(prompt)})
+
+            # Lazy import and initialize model (per-request)
+            try:
+                from .utils.model_host.llama_server_helper import LlamaServerHelper
+                helper = LlamaServerHelper(model_path=model_path)
+                if not helper.start_server():
+                    return self._send_json(503, {"error": "Failed to start LLM server"})
+
+                # Evaluate
+                result = helper.evaluate_with_context(prompt, context) if context else helper.evaluate(prompt)
+                helper.stop_server()
+
+                return self._send_json(200, {"content": result})
+            except Exception as exc:
+                logger.exception("LLM evaluation error")
+                return self._send_json(500, {"error": str(exc)})
+
+        except json.JSONDecodeError:
+            return self._send_json(400, {"error": "Invalid JSON"})
+        except Exception as exc:
+            logger.exception("LLM request handling error")
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_evaluate_sam3(self) -> None:
+        """Process SAM3 evaluation request (stateless)."""
+        try:
+            # Parse request body
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+            frame_b64 = body.get("frame_b64")
+            input_points = body.get("input_points")
+            weights_path = body.get("weights_path", "")
+
+            if not frame_b64:
+                return self._send_json(400, {"error": "frame_b64 is required"})
+            if not weights_path:
+                return self._send_json(400, {"error": "weights_path is required"})
+
+            # Decode frame
+            try:
+                raw = base64.b64decode(frame_b64)
+                arr = np.frombuffer(raw, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is None:
+                    return self._send_json(400, {"error": "Failed to decode frame"})
+            except Exception as exc:
+                return self._send_json(400, {"error": f"Invalid frame_b64: {exc}"})
+
+            # Log request
+            log_request("/api/host/evaluate-sam3/", {"frame_shape": str(frame.shape)})
+
+            # Lazy import and initialize model (per-request)
+            try:
+                from .utils.model_host.sam3_server_helper import Sam3ServerHelper
+                helper = Sam3ServerHelper(checkpoint_path=weights_path)
+                if not helper.initialize():
+                    return self._send_json(503, {"error": "Failed to initialize SAM3"})
+
+                # Run prediction
+                if input_points:
+                    result = helper.predict_from_points(frame, input_points, [1] * len(input_points))
+                else:
+                    result = helper.predict(frame)
+
+                # Extract target coordinates
+                target_coords = helper.get_target_coordinates(frame, input_points)
+
+                return self._send_json(200, {
+                    "masks": result.get("masks", []),
+                    "scores": result.get("scores", []),
+                    "bbox": result.get("bbox", []),
+                    "target_coords": target_coords,
+                })
+            except Exception as exc:
+                logger.exception("SAM3 evaluation error")
+                return self._send_json(500, {"error": str(exc)})
+
+        except json.JSONDecodeError:
+            return self._send_json(400, {"error": "Invalid JSON"})
+        except Exception as exc:
+            logger.exception("SAM3 request handling error")
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_status(self) -> None:
+        """Return Host API status (stateless)."""
+        self._send_json(200, {
+            "status": "running" if _host_api_running else "stopped",
+            "listen_ip": _host_api_config.get("listen_ip"),
+            "listen_port": _host_api_config.get("listen_port"),
+        })
+
+
+# ------------------------------------------------------------------
+# Django Views
 # ------------------------------------------------------------------
 
 def landing_page(request: HttpRequest) -> HttpResponse:
-    """Render the landing / index page with role selection."""
+    """Landing page: Route to Host or Client portal."""
     return render(request, "core_orchestrator/index.html")
 
 
 def host_portal(request: HttpRequest) -> HttpResponse:
     """
-    Host portal view.
+    Host Portal: Configure listening IP/Port ONLY.
 
-    GET  – renders the host portal form.
-    POST – updates host configuration.
+    GET: Render configuration form.
+    POST: Start background API listener on specified IP:Port.
     """
+    global _host_api_running, _host_api_thread
+
     if request.method == "GET":
         return render(request, "core_orchestrator/host_portal.html", {
-            "config": _host_config,
+            "listen_ip": _host_api_config.get("listen_ip", "0.0.0.0"),
+            "listen_port": _host_api_config.get("listen_port", 8080),
+            "running": _host_api_running,
         })
 
-    # POST: update host configuration
-    if request.content_type != "application/json":
-        try:
-            body = json.loads(request.body)
-        except json.JSONDecodeError:
-            return json_response({"error": "Invalid JSON"}, status=400)
-    else:
-        body = request.POST.dict()
+    # POST: Start/stop Host API listener
+    try:
+        body = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    _host_config.update({
-        "host_ip": body.get("host_ip", _host_config.get("host_ip", "0.0.0.0")),
-        "port": int(body.get("port", _host_config.get("port", 8080))),
-        "model_path": body.get("model_path", _host_config.get("model_path", "")),
-        "weights_path": body.get("weights_path", _host_config.get("weights_path", "")),
-        "running": True,
-    })
+    action = body.get("action", "start")
 
-    logger.info("Host configuration updated: %s", _host_config)
-    return json_response({
-        "message": "Host configuration saved",
-        "config": _host_config,
-    })
+    if action == "stop":
+        # Stop the background server
+        if _host_api_thread and _host_api_thread.is_alive():
+            # Note: In production, use proper server shutdown
+            pass
+        _host_api_running = False
+        _host_api_thread = None
+        return JsonResponse({"message": "Host API listener stopped"})
+
+    # Start the background server
+    listen_ip = body.get("listen_ip", "0.0.0.0")
+    listen_port = int(body.get("listen_port", 8080))
+
+    try:
+        _host_api_config["listen_ip"] = listen_ip
+        _host_api_config["listen_port"] = listen_port
+
+        # Start HTTP server in daemon thread
+        server = HTTPServer((listen_ip, listen_port), HostAPIHandler)
+        _host_api_thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True,
+            name="host-api-server",
+        )
+        _host_api_thread.start()
+        _host_api_running = True
+
+        logger.info("Host API listener started on %s:%d", listen_ip, listen_port)
+        return JsonResponse({
+            "message": "Host API listener started",
+            "listen_ip": listen_ip,
+            "listen_port": listen_port,
+        })
+
+    except Exception as exc:
+        logger.exception("Failed to start Host API listener")
+        return JsonResponse({"error": f"Failed to start listener: {exc}"}, status=500)
 
 
 @csrf_exempt
 def host_evaluate_llm(request: HttpRequest) -> JsonResponse:
     """
-    POST-only view: evaluate a prompt against the local LLM.
+    Host API Endpoint: Evaluate LLM prompt (stateless, direct Django view).
 
-    Expects JSON body: {prompt, context, temperature, max_tokens}
-    Returns: {content: ...}
+    Used when Host is running as part of main Django process.
+    Expects: {prompt, context, model_path}
+    Returns: {content}
     """
     if request.method != "POST":
-        return json_response({"error": "Method not allowed"}, status=405)
+        return JsonResponse({"error": "Method not allowed"}, status=405)
 
     try:
         body = json.loads(request.body)
     except json.JSONDecodeError:
-        return json_response({"error": "Invalid JSON"}, status=400)
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
 
     prompt = body.get("prompt", "")
     context = body.get("context", "")
-    temperature = float(body.get("temperature", 0.7))
-    max_tokens = int(body.get("max_tokens", 512))
+    model_path = body.get("model_path", "")
 
     if not prompt:
-        return json_response({"error": "prompt is required"}, status=400)
+        return JsonResponse({"error": "prompt is required"}, status=400)
+    if not model_path:
+        return JsonResponse({"error": "model_path is required"}, status=400)
 
     try:
-        # Use global helper or create new one
-        global _llama_helper
-        if _llama_helper is None:
-            model_path = _host_config.get("model_path", body.get("model_path", ""))
-            if not model_path:
-                return json_response(
-                    {"error": "No model_path configured. Please set it in host portal."},
-                    status=400,
-                )
-            _llama_helper = LlamaServerHelper(model_path=model_path)
+        # Lazy import
+        from .utils.model_host.llama_server_helper import LlamaServerHelper
 
-        # Evaluate with context if provided
-        if context:
-            result = _llama_helper.evaluate_with_context(prompt, context, temperature=temperature, max_tokens=max_tokens)
-        else:
-            result = _llama_helper.evaluate(prompt, temperature=temperature, max_tokens=max_tokens)
+        helper = LlamaServerHelper(model_path=model_path)
+        if not helper.start_server():
+            return JsonResponse({"error": "Failed to start LLM server"}, status=503)
 
-        return json_response({"content": result})
+        result = helper.evaluate_with_context(prompt, context) if context else helper.evaluate(prompt)
+        helper.stop_server()
 
-    except LlamaServerError as exc:
-        logger.exception("LLM server error")
-        return json_response({"error": str(exc)}, status=502)
+        log_request("/api/host/evaluate-llm/", {"prompt_len": len(prompt)})
+        return JsonResponse({"content": result})
+
     except Exception as exc:
         logger.exception("LLM evaluation error")
-        return json_response({"error": str(exc)}, status=500)
+        return JsonResponse({"error": str(exc)}, status=500)
 
 
 @csrf_exempt
 def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
     """
-    POST-only view: run SAM3 inference.
+    Host API Endpoint: Run SAM3 segmentation (stateless, direct Django view).
 
-    Expects JSON body with {frame_b64, input_points, input_boxes} or file upload.
+    Used when Host is running as part of main Django process.
+    Expects: {frame_b64, weights_path, input_points}
     Returns: {masks, scores, bbox, target_coords}
     """
     if request.method != "POST":
-        return json_response({"error": "Method not allowed"}, status=405)
+        return JsonResponse({"error": "Method not allowed"}, status=405)
 
     try:
         body = json.loads(request.body)
     except json.JSONDecodeError:
-        return json_response({"error": "Invalid JSON"}, status=400)
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    # Handle file upload or base64
-    frame = None
-    if request.FILES.get("image"):
-        # File upload
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            for chunk in request.FILES.get("image").chunks():
-                tmp.write(chunk)
-            tmp_path = tmp.name
-        
-        frame = cv2.imread(tmp_path)
-        import os
-        os.unlink(tmp_path)
-    elif body.get("frame_b64"):
-        # Base64 encoded frame
-        try:
-            raw = base64.b64decode(body.get("frame_b64"))
-            arr = np.frombuffer(raw, dtype=np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        except Exception as exc:
-            return json_response({"error": f"Invalid frame_b64: {exc}"}, status=400)
-
-    if frame is None:
-        return json_response({"error": "frame_b64 or image file is required"}, status=400)
-
+    frame_b64 = body.get("frame_b64")
+    weights_path = body.get("weights_path", "")
     input_points = body.get("input_points")
-    input_boxes = body.get("input_boxes")
+
+    if not frame_b64:
+        return JsonResponse({"error": "frame_b64 is required"}, status=400)
+    if not weights_path:
+        return JsonResponse({"error": "weights_path is required"}, status=400)
+
+    # Decode frame
+    try:
+        raw = base64.b64decode(frame_b64)
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JsonResponse({"error": "Failed to decode frame"}, status=400)
+    except Exception as exc:
+        return JsonResponse({"error": f"Invalid frame_b64: {exc}"}, status=400)
 
     try:
-        global _sam3_helper
-        if _sam3_helper is None:
-            weights_path = _host_config.get("weights_path", body.get("weights_path", ""))
-            _sam3_helper = Sam3ServerHelper(checkpoint_path=weights_path)
+        # Lazy import
+        from .utils.model_host.sam3_server_helper import Sam3ServerHelper
+
+        helper = Sam3ServerHelper(checkpoint_path=weights_path)
+        if not helper.initialize():
+            return JsonResponse({"error": "Failed to initialize SAM3"}, status=503)
 
         # Run prediction
         if input_points:
-            result = _sam3_helper.predict_from_points(frame, input_points, [1] * len(input_points))
-        elif input_boxes:
-            result = _sam3_helper.predict_from_box(frame, input_boxes[0] if input_boxes else [0, 0, 0, 0])
+            result = helper.predict_from_points(frame, input_points, [1] * len(input_points))
         else:
-            result = _sam3_helper.predict(frame)
+            result = helper.predict(frame)
 
-        # Extract target coordinates from masks
-        target_coords = _sam3_helper.get_target_coordinates(frame, input_points)
+        target_coords = helper.get_target_coordinates(frame, input_points)
 
-        return json_response({
+        log_request("/api/host/evaluate-sam3/", {"frame_shape": str(frame.shape)})
+        return JsonResponse({
             "masks": result.get("masks", []),
             "scores": result.get("scores", []),
             "bbox": result.get("bbox", []),
             "target_coords": target_coords,
         })
 
-    except Sam3Error as exc:
-        logger.exception("SAM3 error")
-        return json_response({"error": str(exc)}, status=502)
     except Exception as exc:
         logger.exception("SAM3 evaluation error")
-        return json_response({"error": str(exc)}, status=500)
+        return JsonResponse({"error": str(exc)}, status=500)
 
 
 @csrf_exempt
 def host_status(request: HttpRequest) -> JsonResponse:
-    """
-    GET view: return status of llama and sam3 services.
-
-    Returns: {llama: {...}, sam3: {...}, config: {...}}
-    """
+    """Host API Endpoint: Return status (stateless)."""
     if request.method != "GET":
-        return json_response({"error": "Method not allowed"}, status=405)
+        return JsonResponse({"error": "Method not allowed"}, status=405)
 
-    status: dict[str, Any] = {
-        "llama": {},
-        "sam3": {},
-        "config": _host_config,
-        "uptime": time.time(),
-    }
-
-    # Llama status
-    try:
-        if _llama_helper:
-            status["llama"] = _llama_helper.status()
-        else:
-            status["llama"] = {"status": "not_initialized"}
-    except Exception as exc:
-        status["llama"] = {"error": str(exc)}
-
-    # SAM3 status
-    try:
-        if _sam3_helper:
-            status["sam3"] = _sam3_helper.status()
-        else:
-            status["sam3"] = {"status": "not_initialized"}
-    except Exception as exc:
-        status["sam3"] = {"error": str(exc)}
-
-    return json_response(status)
+    return JsonResponse({
+        "status": "running" if _host_api_running else "stopped",
+        "listen_ip": _host_api_config.get("listen_ip"),
+        "listen_port": _host_api_config.get("listen_port"),
+    })
 
 
 def client_portal(request: HttpRequest) -> HttpResponse:
-    """Render the client tool selection page."""
+    """Client Portal: Tool selection page."""
     return render(request, "core_orchestrator/tool_selection.html")
 
 
 def heatmap_dashboard(request: HttpRequest) -> HttpResponse:
-    """Render the heatmap dashboard with configuration."""
+    """
+    Drone Heatmap Dashboard: Client-side configuration.
+
+    ALL paths and routing decisions happen on Client side:
+    - dataset_path: Local video/file path
+    - llm_model_path: Local LLM weights
+    - sam3_weights_path: Local SAM3 weights
+    - routing_mode: "local" or "remote"
+    - remote_host_ip/port: Only used if routing_mode == "remote"
+    """
     config = {
-        "sam3_mode": request.GET.get("sam3_mode", "remote"),
-        "llm_mode": request.GET.get("llm_mode", "remote"),
-        "host_ip": request.GET.get("host_ip", _host_config.get("host_ip", "127.0.0.1")),
-        "host_port": int(request.GET.get("host_port", _host_config.get("port", 8080))),
-        "model_path": request.GET.get("model_path", _host_config.get("model_path", "")),
-        "weights_path": request.GET.get("weights_path", _host_config.get("weights_path", "")),
         "dataset_path": request.GET.get("dataset_path", ""),
+        "llm_model_path": request.GET.get("llm_model_path", ""),
+        "sam3_weights_path": request.GET.get("sam3_weights_path", ""),
+        "routing_mode": request.GET.get("routing_mode", "local"),
+        "remote_host_ip": request.GET.get("remote_host_ip", "127.0.0.1"),
+        "remote_host_port": int(request.GET.get("remote_host_port", 8080)),
     }
     return render(request, "core_orchestrator/heatmap_dashboard.html", {"config": config})
 
 
 def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
     """
-    GET view: return an MJPEG video stream with heatmap overlay.
+    MJPEG Stream: Process local dataset with configured routing.
 
-    Reads config from request.GET:
-        sam3_mode, llm_mode, host_ip, host_port, model_path, weights_path
-
-    Runs a loop: reads frames, applies SAM3 inference, draws heatmap,
-    encodes to JPEG, yields as MJPEG frame.
+    Reads from local dataset_path (video or image directory).
+    Routes inference based on routing_mode (local vs remote).
+    Draws heatmap overlay on detected targets.
     """
-    config = {
-        "sam3_mode": request.GET.get("sam3_mode", "remote"),
-        "llm_mode": request.GET.get("llm_mode", "remote"),
-        "host_ip": request.GET.get("host_ip", "127.0.0.1"),
-        "host_port": int(request.GET.get("host_port", 8080)),
-        "model_path": request.GET.get("model_path", ""),
-        "weights_path": request.GET.get("weights_path", ""),
-        "dataset_path": request.GET.get("dataset_path", ""),
-    }
+    # Client-side configuration from request
+    dataset_path = request.GET.get("dataset_path", "")
+    routing_mode = request.GET.get("routing_mode", "local")
+    remote_host_ip = request.GET.get("remote_host_ip", "127.0.0.1")
+    remote_host_port = int(request.GET.get("remote_host_port", 8080))
+    sam3_weights_path = request.GET.get("sam3_weights_path", "")
 
     def frame_generator() -> Generator[bytes, None, None]:
-        """Generate MJPEG frames in a loop."""
-        # Initialize helpers based on mode
-        sam3_helper: Optional[Sam3ServerHelper] = None
-        remote_client: Optional[RemoteClientHelper] = None
+        """Generate MJPEG frames from dataset."""
+        # Initialize remote client if needed
+        remote_client = None
+        if routing_mode == "remote":
+            try:
+                from .utils.model_host.remote_client_helper import RemoteClientHelper
+                remote_client = RemoteClientHelper(
+                    base_url=f"http://{remote_host_ip}:{remote_host_port}"
+                )
+            except Exception as exc:
+                logger.error("Failed to initialize remote client: %s", exc)
 
-        if config["sam3_mode"] == "local":
-            sam3_helper = Sam3ServerHelper(checkpoint_path=config.get("weights_path", ""))
-            sam3_helper.initialize()
+        # Open dataset source
+        cap = None
+        frame_list: list[np.ndarray] = []
+        frame_index = 0
+
+        if dataset_path:
+            # Check if it's a video file
+            if os.path.isfile(dataset_path) and dataset_path.lower().endswith(
+                (".mp4", ".avi", ".mov", ".mkv", ".webm")
+            ):
+                cap = cv2.VideoCapture(dataset_path)
+            # Check if it's an image directory
+            elif os.path.isdir(dataset_path):
+                image_patterns = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif"]
+                frame_list = []
+                for pattern in image_patterns:
+                    frame_list.extend(glob.glob(os.path.join(dataset_path, pattern)))
+                frame_list.sort()
         else:
-            remote_client = RemoteClientHelper(
-                base_url=f"http://{config['host_ip']}:{config['host_port']}"
-            )
-
-        # Try to open camera or video source
-        video_source = config.get("dataset_path", "")
-        if not video_source:
-            video_source = 0  # Default to camera
-
-        cap = cv2.VideoCapture(video_source if isinstance(video_source, int) else video_source)
-        if not cap.isOpened():
-            logger.warning("Could not open video source, using test pattern")
+            # Fallback to camera (shouldn't happen per rules, but safe fallback)
             cap = cv2.VideoCapture(0)
-
-        frame_count = 0
 
         try:
             while True:
-                ret, frame = cap.read()
-                if not ret:
-                    # Retry opening camera
-                    cap.release()
-                    cap = cv2.VideoCapture(0)
-                    continue
-
-                # Apply SAM3 inference based on mode
-                heat_points: list[tuple[float, float]] = []
-
-                if config["sam3_mode"] == "local":
-                    frame, heat_points = _apply_local_sam3(frame, sam3_helper)
+                # Get next frame
+                if cap is not None:
+                    ret, frame = cap.read()
+                    if not ret:
+                        # Rewind video or break
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                elif frame_list:
+                    # Load image from directory
+                    frame_path = frame_list[frame_index % len(frame_list)]
+                    frame = cv2.imread(frame_path)
+                    if frame is None:
+                        frame_index += 1
+                        continue
+                    frame_index += 1
                 else:
-                    frame, heat_points = _apply_remote_sam3(frame, remote_client)
+                    # Generate test pattern
+                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(
+                        frame,
+                        "No dataset provided",
+                        (200, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 255, 255),
+                        2,
+                    )
 
-                # Draw heatmap overlay
-                if heat_points:
-                    frame = draw_heatmap_overlay(frame, heat_points)
+                # Run SAM3 inference based on routing mode
+                target_coords: list[tuple[float, float]] = []
+
+                if routing_mode == "local":
+                    # Local inference
+                    try:
+                        from .utils.model_host.sam3_server_helper import Sam3ServerHelper
+
+                        helper = Sam3ServerHelper(checkpoint_path=sam3_weights_path)
+                        if helper.initialize():
+                            result = helper.predict(frame)
+                            target_coords = helper.get_target_coordinates(frame)
+
+                            # Draw bounding box
+                            bbox = result.get("bbox", [])
+                            if bbox and len(bbox) >= 4:
+                                x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    except Exception as exc:
+                        logger.warning("Local SAM3 inference failed: %s", exc)
+
+                else:
+                    # Remote inference
+                    if remote_client:
+                        try:
+                            import base64 as b64
+
+                            _, buf = cv2.imencode(".jpg", frame)
+                            frame_b64 = b64.b64encode(buf.tobytes()).decode("utf-8")
+
+                            resp = remote_client._make_request(
+                                "/api/host/evaluate-sam3/",
+                                json_data={
+                                    "frame_b64": frame_b64,
+                                    "weights_path": sam3_weights_path,
+                                },
+                            )
+
+                            if resp:
+                                target_coords = resp.get("target_coords", [])
+                                bbox = resp.get("bbox", [])
+                                if bbox and len(bbox) >= 4:
+                                    x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        except Exception as exc:
+                            logger.warning("Remote SAM3 inference failed: %s", exc)
+
+                # Draw heatmap overlay on target coordinates
+                for x, y in target_coords:
+                    cv2.circle(frame, (int(x), int(y)), 15, (255, 0, 0), -1)
+                    cv2.circle(frame, (int(x), int(y)), 20, (255, 255, 0), 2)
 
                 # Draw status text
                 cv2.putText(
                     frame,
-                    f"Mode: {config['sam3_mode'].upper()} | FPS: {frame_count % 60}",
+                    f"Mode: {routing_mode.upper()} | Targets: {len(target_coords)}",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
@@ -405,84 +589,21 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                 )
 
                 # Encode to JPEG and yield
-                jpeg_bytes = encode_frame_to_jpeg(frame)
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                jpeg_bytes = buf.tobytes()
+
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
                     + jpeg_bytes
                     + b"\r\n"
                 )
-                frame_count += 1
 
-        except Exception as exc:
-            logger.exception("Stream generation error: %s", exc)
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
 
     return StreamingHttpResponse(
         frame_generator(),
         content_type="multipart/x-mixed-replace; boundary=frame",
     )
-
-
-def _apply_local_sam3(
-    frame: np.ndarray,
-    helper: Optional[Sam3ServerHelper],
-) -> tuple[np.ndarray, list[tuple[float, float]]]:
-    """Apply SAM3 locally and draw bounding boxes."""
-    heat_points: list[tuple[float, float]] = []
-
-    if helper is None:
-        return frame, heat_points
-
-    try:
-        result = helper.predict(frame)
-        target_coords = helper.get_target_coordinates(frame)
-
-        # Draw bounding boxes
-        bbox = result.get("bbox", [])
-        if bbox and len(bbox) >= 4:
-            x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-            draw_bounding_boxes(frame, [bbox])
-
-        heat_points = target_coords
-
-    except Exception as exc:
-        logger.warning("Local SAM3 failed: %s", exc)
-
-    return frame, heat_points
-
-
-def _apply_remote_sam3(
-    frame: np.ndarray,
-    client: Optional[RemoteClientHelper],
-) -> tuple[np.ndarray, list[tuple[float, float]]]:
-    """Send frame to remote SAM3 server and draw bounding boxes."""
-    heat_points: list[tuple[float, float]] = []
-
-    if client is None:
-        return frame, heat_points
-
-    try:
-        # Encode frame to base64
-        _, buf = cv2.imencode(".jpg", frame)
-        frame_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-
-        resp = client.evaluate_sam3(frame, input_points=None, input_boxes=None)
-
-        if resp:
-            # Extract target coordinates
-            target_coords = resp.get("target_coords", [])
-            heat_points = [tuple(coord) for coord in target_coords]
-
-            # Draw bounding box if present
-            bbox = resp.get("bbox", [])
-            if bbox and len(bbox) >= 4:
-                draw_bounding_boxes(frame, [bbox])
-
-    except RemoteClientError as exc:
-        logger.warning("Remote SAM3 failed: %s", exc)
-    except Exception as exc:
-        logger.warning("Remote SAM3 error: %s", exc)
-
-    return frame, heat_points

@@ -1,138 +1,145 @@
 {% extends "core_orchestrator/base.html" %}
 
-{% block title %}Heatmap Dashboard — Drone Orchestrator{% endblock %}
+{% block title %}Drone Heatmap — Client Portal{% endblock %}
 
 {% block content %}
 <div class="h-[calc(100vh-8rem)] flex flex-col">
-    <h1 class="text-2xl font-bold text-white mb-6 flex-shrink-0">Drone Heatmap Dashboard</h1>
+    <h1 class="text-2xl font-bold text-white mb-4 flex-shrink-0">Drone Heatmap Dashboard</h1>
 
     <div class="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6 min-h-0">
-        <!-- Left Panel: Controls (1 column) -->
+        <!-- LEFT PANEL: Settings (1 column) -->
         <div class="lg:col-span-1 bg-gray-800 rounded-xl p-5 shadow-lg border border-gray-700 overflow-y-auto">
-            <h2 class="text-lg font-semibold text-green-400 mb-5">Configuration</h2>
+            <h2 class="text-lg font-semibold text-green-400 mb-5">Dataset Settings</h2>
 
-            <form id="heatmapConfig" class="space-y-5">
-                {% csrf_token %}
+            <!-- Dataset Path -->
+            <div class="mb-6">
+                <label for="dataset_path" class="block text-sm font-medium text-gray-300 mb-2">
+                    Local Dataset Path
+                </label>
+                <input type="text" id="dataset_path" name="dataset_path"
+                       value="{{ config.dataset_path|default:'' }}"
+                       placeholder="/path/to/drone/video.mp4 or /path/to/frame_directory/"
+                       class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
+                <p class="text-xs text-gray-500 mt-1">
+                    Enter path to video file or directory containing image frames
+                </p>
+            </div>
 
-                <!-- Dataset Path -->
-                <div>
-                    <label for="dataset_path" class="block text-sm font-medium text-gray-300 mb-1">Dataset / Video Path</label>
-                    <input type="text" id="dataset_path" name="dataset_path"
-                           value="{{ config.dataset_path|default:'' }}"
-                           placeholder="Leave empty for camera or /path/to/video.mp4"
-                           class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                </div>
+            <!-- Model Settings Section -->
+            <div class="mb-6">
+                <button type="button"
+                        onclick="document.getElementById('modelSettings').classList.toggle('hidden')"
+                        class="w-full flex items-center justify-between px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors">
+                    <span class="text-sm font-medium text-gray-300">Model Settings</span>
+                    <svg id="modelSettingsToggle" class="w-4 h-4 text-gray-400 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                    </svg>
+                </button>
 
-                <!-- Model Paths Section -->
-                <div>
-                    <h3 class="text-sm font-medium text-gray-300 mb-2 border-b border-gray-700 pb-1">Model Paths</h3>
-                    <div class="space-y-3">
-                        <div>
-                            <label for="model_path" class="block text-xs text-gray-400 mb-1">LLM Model Path (.gguf)</label>
-                            <input type="text" id="model_path" name="model_path"
-                                   value="{{ config.model_path|default:'' }}"
-                                   placeholder="/path/to/model.gguf"
-                                   class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                        </div>
-                        <div>
-                            <label for="weights_path" class="block text-xs text-gray-400 mb-1">SAM3 Weights Path (.pt)</label>
-                            <input type="text" id="weights_path" name="weights_path"
-                                   value="{{ config.weights_path|default:'' }}"
-                                   placeholder="/path/to/sam3.pt"
-                                   class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                        </div>
+                <div id="modelSettings" class="hidden mt-4 space-y-4">
+                    <!-- LLM Model Path -->
+                    <div>
+                        <label for="llm_model_path" class="block text-xs font-medium text-gray-400 mb-1">
+                            LLM Model Path (.gguf)
+                        </label>
+                        <input type="text" id="llm_model_path" name="llm_model_path"
+                               value="{{ config.llm_model_path|default:'' }}"
+                               placeholder="/path/to/llama/model.gguf"
+                               class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+
+                    <!-- SAM3 Weights Path -->
+                    <div>
+                        <label for="sam3_weights_path" class="block text-xs font-medium text-gray-400 mb-1">
+                            SAM3 Weights Path (.pt)
+                        </label>
+                        <input type="text" id="sam3_weights_path" name="sam3_weights_path"
+                               value="{{ config.sam3_weights_path|default:'' }}"
+                               placeholder="/path/to/sam3/model.pt"
+                               class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
+            </div>
+
+            <!-- Inference Routing Mode -->
+            <div class="mb-6">
+                <h3 class="text-sm font-medium text-gray-300 mb-3">Inference Routing</h3>
 
                 <!-- SAM3 Mode Toggle -->
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">SAM3 Inference Mode</label>
+                <div class="mb-4">
+                    <label class="block text-xs text-gray-400 mb-2">SAM3 Inference Mode</label>
                     <div class="flex rounded-lg overflow-hidden border border-gray-600">
                         <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.sam3_mode == 'local' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="sam3_mode" value="local"
-                                   {% if config.sam3_mode == 'local' %}checked{% endif %}
-                                   class="sr-only" onchange="document.getElementById('heatmapConfig').submit()">
+                            {% if config.routing_mode == 'local' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
+                            <input type="radio" name="routing_mode" value="local"
+                                   {% if config.routing_mode == 'local' %}checked{% endif %}
+                                   class="sr-only" onchange="updateRemoteSection()">
                             Local
                         </label>
                         <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.sam3_mode == 'remote' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="sam3_mode" value="remote"
-                                   {% if config.sam3_mode == 'remote' %}checked{% endif %}
-                                   class="sr-only" onchange="document.getElementById('heatmapConfig').submit()">
+                            {% if config.routing_mode == 'remote' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
+                            <input type="radio" name="routing_mode" value="remote"
+                                   {% if config.routing_mode == 'remote' %}checked{% endif %}
+                                   class="sr-only" onchange="updateRemoteSection()">
                             Remote Host
                         </label>
                     </div>
                 </div>
 
-                <!-- LLM Mode Toggle -->
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">LLM Inference Mode</label>
-                    <div class="flex rounded-lg overflow-hidden border border-gray-600">
-                        <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.llm_mode == 'local' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="llm_mode" value="local"
-                                   {% if config.llm_mode == 'local' %}checked{% endif %}
-                                   class="sr-only" onchange="document.getElementById('heatmapConfig').submit()">
-                            Local
-                        </label>
-                        <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.llm_mode == 'remote' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="llm_mode" value="remote"
-                                   {% if config.llm_mode == 'remote' %}checked{% endif %}
-                                   class="sr-only" onchange="document.getElementById('heatmapConfig').submit()">
-                            Remote Host
-                        </label>
-                    </div>
-                </div>
-
-                <!-- Remote Host Connection (shown when remote mode selected) -->
-                <div id="remoteHostSection" class="{% if config.sam3_mode != 'remote' and config.llm_mode != 'remote' %}hidden{% endif %}">
-                    <h3 class="text-sm font-medium text-gray-300 mb-2 border-b border-gray-700 pb-1">Remote Host Connection</h3>
-                    <div class="space-y-3">
+                <!-- Remote Host Settings (shown when remote selected) -->
+                <div id="remoteHostSection" class="{% if config.routing_mode != 'remote' %}hidden{% endif %} mt-4 p-4 bg-gray-700/50 rounded-lg border border-gray-600">
+                    <h4 class="text-xs font-medium text-gray-300 mb-2">Remote Host Configuration</h4>
+                    <div class="space-y-2">
                         <div>
-                            <label for="host_ip" class="block text-xs text-gray-400 mb-1">Host IP Address</label>
-                            <input type="text" id="host_ip" name="host_ip"
-                                   value="{{ config.host_ip|default:'127.0.0.1' }}"
+                            <label for="remote_host_ip" class="block text-xs text-gray-400 mb-1">Host IP</label>
+                            <input type="text" id="remote_host_ip" name="remote_host_ip"
+                                   value="{{ config.remote_host_ip|default:'127.0.0.1' }}"
                                    placeholder="192.168.1.100"
                                    class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
                         </div>
                         <div>
-                            <label for="host_port" class="block text-xs text-gray-400 mb-1">Host Port</label>
-                            <input type="number" id="host_port" name="host_port"
-                                   value="{{ config.host_port|default:'8080' }}"
+                            <label for="remote_host_port" class="block text-xs text-gray-400 mb-1">Host Port</label>
+                            <input type="number" id="remote_host_port" name="remote_host_port"
+                                   value="{{ config.remote_host_port|default:'8080' }}"
                                    placeholder="8080"
                                    class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
                         </div>
                     </div>
                 </div>
+            </div>
 
-                <!-- Connection Status -->
-                <div id="connectionStatus" class="hidden">
-                    <div class="flex items-center justify-between p-3 rounded-lg bg-green-900/30 border border-green-700">
-                        <span class="text-green-400 text-sm">Connected to remote host</span>
-                        <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-                    </div>
-                </div>
-            </form>
+            <!-- Apply Button -->
+            <button type="button"
+                    onclick="applySettings()"
+                    class="w-full px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors shadow-md">
+                Apply Settings & Restart Stream
+            </button>
 
             <!-- Stream Info -->
             <div class="mt-8 pt-5 border-t border-gray-700">
-                <h3 class="text-sm font-medium text-gray-300 mb-2">Stream Info</h3>
+                <h3 class="text-sm font-medium text-gray-300 mb-3">Current Stream Status</h3>
                 <div class="space-y-2 text-xs text-gray-400">
                     <div class="flex justify-between">
-                        <span>Mode:</span>
-                        <span class="text-white">{{ config.sam3_mode|upper }}</span>
+                        <span>Dataset:</span>
+                        <span class="text-white truncate ml-2 max-w-[200px]" title="{{ config.dataset_path|default:'None' }}">
+                            {{ config.dataset_path|default:"Camera" }}
+                        </span>
                     </div>
                     <div class="flex justify-between">
-                        <span>Source:</span>
-                        <span class="text-white">{{ config.dataset_path|default:"Camera" }}</span>
+                        <span>Mode:</span>
+                        <span class="text-white">{{ config.routing_mode|upper }}</span>
                     </div>
+                    {% if config.routing_mode == 'remote' %}
+                    <div class="flex justify-between">
+                        <span>Remote Host:</span>
+                        <span class="text-white">{{ config.remote_host_ip }}:{{ config.remote_host_port }}</span>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
 
-        <!-- Right Panel: MJPEG Stream (3 columns) -->
+        <!-- RIGHT PANEL: MJPEG Stream (3 columns) -->
         <div class="lg:col-span-3 bg-gray-800 rounded-xl shadow-lg border border-gray-700 flex flex-col overflow-hidden">
             <div class="p-3 border-b border-gray-700 flex items-center justify-between">
                 <h2 class="text-lg font-semibold text-green-400">Live Heatmap Stream</h2>
@@ -143,14 +150,18 @@
                     LIVE
                 </span>
             </div>
+
             <div class="flex-1 flex items-center justify-center bg-black p-4">
-                <img src="{% url 'core_orchestrator:heatmap_stream' %}?sam3_mode={{ config.sam3_mode }}&llm_mode={{ config.llm_mode }}&host_ip={{ config.host_ip }}&host_port={{ config.host_port }}&model_path={{ config.model_path }}&weights_path={{ config.weights_path }}&dataset_path={{ config.dataset_path }}"
+                <img id="streamImage"
+                     src="{% url 'core_orchestrator:heatmap_stream' %}?dataset_path={{ config.dataset_path }}&routing_mode={{ config.routing_mode }}&remote_host_ip={{ config.remote_host_ip }}&remote_host_port={{ config.remote_host_port }}&sam3_weights_path={{ config.sam3_weights_path }}"
                      alt="Heatmap Stream"
                      class="max-w-full max-h-full object-contain rounded-lg shadow-2xl">
             </div>
+
             <div class="p-3 border-t border-gray-700 bg-gray-850">
                 <p class="text-xs text-gray-500 text-center">
-                    Blue markers indicate detected targets. Green boxes show bounding regions.
+                    <span class="text-blue-400">●</span> Blue markers indicate detected targets.
+                    <span class="text-green-400 ml-2">▢</span> Green boxes show bounding regions.
                 </p>
             </div>
         </div>
@@ -160,23 +171,54 @@
 
 {% block extra_js %}
 <script>
-// Show/hide remote host section based on radio selection
-document.querySelectorAll('input[name="sam3_mode"], input[name="llm_mode"]').forEach(radio => {
-    radio.addEventListener('change', updateRemoteSection);
-});
-
+// Update remote host section visibility
 function updateRemoteSection() {
-    const sam3Remote = document.querySelector('input[name="sam3_mode"][value="remote"]')?.checked;
-    const llmRemote = document.querySelector('input[name="llm_mode"][value="remote"]')?.checked;
+    const remoteRadio = document.querySelector('input[name="routing_mode"][value="remote"]');
     const remoteSection = document.getElementById('remoteHostSection');
-    const connStatus = document.getElementById('connectionStatus');
-    
-    if (sam3Remote || llmRemote) {
+
+    if (remoteRadio && remoteRadio.checked) {
         remoteSection.classList.remove('hidden');
     } else {
         remoteSection.classList.add('hidden');
     }
 }
+
+// Apply settings and reload stream
+function applySettings() {
+    const datasetPath = document.getElementById('dataset_path').value;
+    const llmModelPath = document.getElementById('llm_model_path').value;
+    const sam3WeightsPath = document.getElementById('sam3_weights_path').value;
+    const routingMode = document.querySelector('input[name="routing_mode"]:checked')?.value || 'local';
+    const remoteHostIp = document.getElementById('remote_host_ip').value;
+    const remoteHostPort = document.getElementById('remote_host_port').value;
+
+    // Build query string
+    const params = new URLSearchParams();
+    params.set('dataset_path', datasetPath);
+    params.set('llm_model_path', llmModelPath);
+    params.set('sam3_weights_path', sam3WeightsPath);
+    params.set('routing_mode', routingMode);
+    params.set('remote_host_ip', remoteHostIp);
+    params.set('remote_host_port', remoteHostPort);
+
+    // Update stream image src to reload
+    const streamImage = document.getElementById('streamImage');
+    streamImage.src = '{% url "core_orchestrator:heatmap_stream" %}' + '?' + params.toString();
+}
+
+// Toggle model settings dropdown
+document.getElementById('modelSettingsToggle').addEventListener('click', function() {
+    const modelSettings = document.getElementById('modelSettings');
+    const isHidden = modelSettings.classList.contains('hidden');
+
+    if (isHidden) {
+        modelSettings.classList.remove('hidden');
+        this.style.transform = 'rotate(180deg)';
+    } else {
+        modelSettings.classList.add('hidden');
+        this.style.transform = 'rotate(0deg)';
+    }
+});
 
 // Initialize on page load
 updateRemoteSection();
