@@ -38,6 +38,16 @@
                 </div>
                 <ul id="file-list" class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-400"></ul>
             </div>
+
+            <div id="upload-progress" class="hidden mt-5 border-t border-gray-700 pt-5">
+                <div class="flex items-center justify-between gap-4 mb-2">
+                    <p id="upload-progress-label" class="text-sm font-medium text-gray-300">Preparing upload...</p>
+                    <p id="upload-progress-percent" class="text-sm text-gray-400">0%</p>
+                </div>
+                <div class="h-3 rounded-full bg-gray-700 overflow-hidden">
+                    <div id="upload-progress-bar" class="h-full rounded-full bg-blue-500 transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
         </section>
 
         <section class="rounded-lg bg-gray-800 border border-gray-700 p-6">
@@ -97,9 +107,58 @@
 
         <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
             <p id="form-status" class="text-sm text-gray-400">Select source data and at least one tool to begin.</p>
-            <button type="submit" class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-semibold">Run Selected Tools</button>
+            <div class="flex flex-col sm:flex-row gap-3 sm:justify-end">
+                <button type="submit" class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-semibold">Run Selected Tools</button>
+                <button type="button" id="advanced-settings-open" class="px-5 py-3 rounded-lg bg-gray-700 text-white hover:bg-gray-600 transition-colors font-semibold">Advanced Settings</button>
+            </div>
         </div>
     </form>
+</div>
+
+<div id="advanced-settings-modal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/70 px-4 py-6">
+    <div class="w-full max-w-3xl rounded-lg border border-gray-700 bg-gray-800 shadow-2xl">
+        <div class="flex items-start justify-between gap-4 border-b border-gray-700 px-6 py-5">
+            <div>
+                <h2 class="text-2xl font-bold text-white">Advanced Settings</h2>
+                <p class="mt-1 text-sm text-gray-400">Choose the default model parameters to use during this run.</p>
+            </div>
+            <button type="button" id="advanced-settings-close" class="rounded-md px-3 py-1 text-2xl leading-none text-gray-400 hover:bg-gray-700 hover:text-white" aria-label="Close advanced settings">&times;</button>
+        </div>
+
+        <div class="max-h-[70vh] overflow-y-auto px-6 py-5">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="object-confidence" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">Object Confidence</span><span class="block text-sm text-gray-400">Use confidence thresholds when accepting detections.</span></span>
+                </label>
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="spatial-filtering" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">Spatial Filtering</span><span class="block text-sm text-gray-400">Filter predictions by location and scene geometry.</span></span>
+                </label>
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="temporal-smoothing" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">Temporal Smoothing</span><span class="block text-sm text-gray-400">Smooth model outputs across neighboring frames.</span></span>
+                </label>
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="metadata-extraction" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">Metadata Extraction</span><span class="block text-sm text-gray-400">Read timestamps, filenames, and available capture metadata.</span></span>
+                </label>
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="high-resolution-processing" class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">High Resolution Processing</span><span class="block text-sm text-gray-400">Prefer higher quality outputs when processing time allows.</span></span>
+                </label>
+                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
+                    <input type="checkbox" name="advanced_parameters" value="save-intermediate-results" class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
+                    <span><span class="block font-semibold text-white">Save Intermediate Results</span><span class="block text-sm text-gray-400">Keep temporary outputs for debugging and review.</span></span>
+                </label>
+            </div>
+        </div>
+
+        <div class="flex flex-col sm:flex-row sm:justify-end gap-3 border-t border-gray-700 px-6 py-5">
+            <button type="button" id="advanced-settings-cancel" class="px-5 py-3 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-semibold">Cancel</button>
+            <button type="button" id="advanced-settings-confirm" class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-semibold">Confirm Settings</button>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -110,8 +169,19 @@
     const fileList = document.getElementById("file-list");
     const uploadSummary = document.getElementById("upload-summary");
     const clearFiles = document.getElementById("clear-files");
+    const uploadProgress = document.getElementById("upload-progress");
+    const uploadProgressLabel = document.getElementById("upload-progress-label");
+    const uploadProgressPercent = document.getElementById("upload-progress-percent");
+    const uploadProgressBar = document.getElementById("upload-progress-bar");
     const formStatus = document.getElementById("form-status");
+    const advancedSettingsOpen = document.getElementById("advanced-settings-open");
+    const advancedSettingsModal = document.getElementById("advanced-settings-modal");
+    const advancedSettingsClose = document.getElementById("advanced-settings-close");
+    const advancedSettingsCancel = document.getElementById("advanced-settings-cancel");
+    const advancedSettingsConfirm = document.getElementById("advanced-settings-confirm");
     let selectedFiles = [];
+    let uploadProgressTimer = null;
+    let confirmedAdvancedParameters = Array.from(document.querySelectorAll("input[name='advanced_parameters']:checked")).map((parameter) => parameter.value);
 
     function formatBytes(bytes) {
         if (!bytes) return "0 B";
@@ -120,12 +190,49 @@
         return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
     }
 
+    function resetUploadProgress() {
+        window.clearInterval(uploadProgressTimer);
+        uploadProgressTimer = null;
+        uploadProgress.classList.add("hidden");
+        uploadProgressLabel.textContent = "Preparing upload...";
+        uploadProgressPercent.textContent = "0%";
+        uploadProgressBar.style.width = "0%";
+        uploadProgressBar.className = "h-full rounded-full bg-blue-500 transition-all duration-300";
+    }
+
+    function simulateUploadProgress(totalSize) {
+        window.clearInterval(uploadProgressTimer);
+        let progress = 0;
+        const sizeFactor = Math.min(Math.max(totalSize / (25 * 1024 * 1024), 1), 8);
+        const increment = Math.max(2, Math.round(14 / sizeFactor));
+
+        uploadProgress.classList.remove("hidden");
+        uploadProgressLabel.textContent = "Uploading selected source data...";
+        uploadProgressPercent.textContent = "0%";
+        uploadProgressBar.style.width = "0%";
+        uploadProgressBar.className = "h-full rounded-full bg-blue-500 transition-all duration-300";
+
+        uploadProgressTimer = window.setInterval(() => {
+            progress = Math.min(progress + increment, 100);
+            uploadProgressBar.style.width = `${progress}%`;
+            uploadProgressPercent.textContent = `${progress}%`;
+
+            if (progress >= 100) {
+                window.clearInterval(uploadProgressTimer);
+                uploadProgressTimer = null;
+                uploadProgressLabel.textContent = "Source data ready";
+                uploadProgressBar.className = "h-full rounded-full bg-green-500 transition-all duration-300";
+            }
+        }, 220);
+    }
+
     function renderFiles(files) {
         selectedFiles = Array.from(files);
         fileList.innerHTML = "";
         if (!selectedFiles.length) {
             uploadSummary.textContent = "No files selected";
             clearFiles.classList.add("hidden");
+            resetUploadProgress();
             return;
         }
         const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
@@ -143,6 +250,7 @@
             li.textContent = `+ ${selectedFiles.length - 8} more`;
             fileList.appendChild(li);
         }
+        simulateUploadProgress(totalSize);
     }
 
     fileInput.addEventListener("change", (event) => renderFiles(event.target.files));
@@ -161,6 +269,44 @@
             button.textContent = expanded ? "+" : "-";
             panel.classList.toggle("hidden", expanded);
         });
+    });
+
+    function openAdvancedSettings() {
+        advancedSettingsModal.classList.remove("hidden");
+        advancedSettingsModal.classList.add("flex");
+    }
+
+    function closeAdvancedSettings() {
+        advancedSettingsModal.classList.add("hidden");
+        advancedSettingsModal.classList.remove("flex");
+    }
+
+    function restoreConfirmedAdvancedSettings() {
+        document.querySelectorAll("input[name='advanced_parameters']").forEach((parameter) => {
+            parameter.checked = confirmedAdvancedParameters.includes(parameter.value);
+        });
+    }
+
+    advancedSettingsOpen.addEventListener("click", openAdvancedSettings);
+    advancedSettingsClose.addEventListener("click", () => {
+        restoreConfirmedAdvancedSettings();
+        closeAdvancedSettings();
+    });
+    advancedSettingsCancel.addEventListener("click", () => {
+        restoreConfirmedAdvancedSettings();
+        closeAdvancedSettings();
+    });
+    advancedSettingsConfirm.addEventListener("click", () => {
+        confirmedAdvancedParameters = Array.from(document.querySelectorAll("input[name='advanced_parameters']:checked")).map((parameter) => parameter.value);
+        formStatus.textContent = "Advanced settings saved for this run.";
+        formStatus.className = "text-sm text-green-400";
+        closeAdvancedSettings();
+    });
+    advancedSettingsModal.addEventListener("click", (event) => {
+        if (event.target === advancedSettingsModal) {
+            restoreConfirmedAdvancedSettings();
+            closeAdvancedSettings();
+        }
     });
 
     document.getElementById("client-tool-form").addEventListener("submit", (event) => {
@@ -187,6 +333,9 @@
                 params.set(group, values.join(","));
             }
         });
+        if (confirmedAdvancedParameters.length) {
+            params.set("advanced_parameters", confirmedAdvancedParameters.join(","));
+        }
 
         window.location.href = `{% url 'core_orchestrator:client_run_workspace' %}?${params.toString()}`;
     });
