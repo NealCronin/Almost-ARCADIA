@@ -373,6 +373,50 @@ def client_portal(request: HttpRequest) -> HttpResponse:  # noqa: ARG001
     return render(request, "core_orchestrator/tool_selection.html")
 
 
+def client_run_workspace(request: HttpRequest) -> HttpResponse:
+    """Render a shared progress workspace for selected client tools."""
+    tool_catalog = {
+        "drone-heatmap": {
+            "label": "Drone Heatmap",
+            "description": "Generating heatmap views from selected drone captures.",
+            "steps": ["Load source media", "Run heatmap inference", "Build selected views", "Publish results"],
+            "settings_key": "heatmap_views",
+        },
+        "knowledge-graph": {
+            "label": "Knowledge Graph",
+            "description": "Extracting entities, relationships, and scene context.",
+            "steps": ["Scan source media", "Detect objects", "Map relationships", "Export graph"],
+            "settings_key": "graph_settings",
+        },
+        "3d-reconstruction": {
+            "label": "3D Reconstruction",
+            "description": "Building a spatial reconstruction from selected captures.",
+            "steps": ["Index frames", "Match features", "Estimate scene geometry", "Render reconstruction"],
+            "settings_key": "reconstruction_settings",
+        },
+    }
+
+    requested_tools = [
+        tool for tool in request.GET.get("tools", "").split(",") if tool in tool_catalog
+    ]
+    if not requested_tools:
+        requested_tools = ["drone-heatmap"]
+
+    selected_tools = []
+    for tool_key in requested_tools:
+        tool = dict(tool_catalog[tool_key])
+        tool["key"] = tool_key
+        tool["settings"] = request.GET.get(tool["settings_key"], "")
+        tool["file_count"] = request.GET.get("file_count", "0")
+        selected_tools.append(tool)
+
+    return render(
+        request,
+        "core_orchestrator/client_run_workspace.html",
+        {"selected_tools": selected_tools},
+    )
+
+
 def heatmap_dashboard(request: HttpRequest) -> HttpResponse:  # noqa: ARG001
     """Render the heatmap dashboard with default configuration."""
     default_config = {

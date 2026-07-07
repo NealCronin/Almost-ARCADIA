@@ -20,6 +20,7 @@ urlpatterns = [
 
     # --- Client Portal ---
     path("client/", views.client_portal, name="client_portal"),
+    path("client/run/", views.client_run_workspace, name="client_run_workspace"),
     path("client/heatmap/", views.heatmap_dashboard, name="heatmap_dashboard"),
     path("stream/heatmap/", views.heatmap_stream, name="heatmap_stream"),
 ]

@@ -1,49 +1,194 @@
 {% extends "core_orchestrator/base.html" %}
 
-{% block title %}Client Portal — Drone Orchestrator{% endblock %}
+{% block title %}Client Portal - Drone Orchestrator{% endblock %}
 
 {% block content %}
-<div class="max-w-4xl mx-auto">
-    <h1 class="text-3xl font-bold text-white mb-8">Client Portal</h1>
-    <p class="text-gray-400 mb-10 text-lg">Select a tool to get started.</p>
-
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-        <!-- Drone Heatmap Tool -->
-        <a href="{% url 'core_orchestrator:heatmap_dashboard' %}"
-           class="group block p-8 rounded-xl bg-gray-800 border border-gray-700 hover:border-green-500 hover:bg-gray-750 shadow-lg hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
-            <div class="flex flex-col items-center text-center">
-                <div class="w-16 h-16 mb-5 rounded-full bg-green-900 flex items-center justify-center group-hover:bg-green-800 transition-colors">
-                    <svg class="w-8 h-8 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                              d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-                    </svg>
-                </div>
-                <h2 class="text-xl font-semibold text-white mb-2 group-hover:text-green-400 transition-colors">
-                    Drone Heatmap
-                </h2>
-                <p class="text-gray-400 text-sm">
-                    Visualize drone inference results as real-time heatmaps from live video streams.
-                </p>
-            </div>
-        </a>
-
-        <!-- Placeholder for future tools -->
-        <div class="block p-8 rounded-xl bg-gray-800 border border-gray-700 border-dashed opacity-50">
-            <div class="flex flex-col items-center text-center">
-                <div class="w-16 h-16 mb-5 rounded-full bg-gray-700 flex items-center justify-center">
-                    <svg class="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                              d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                    </svg>
-                </div>
-                <h2 class="text-xl font-semibold text-gray-500 mb-2">
-                    More Tools
-                </h2>
-                <p class="text-gray-500 text-sm">
-                    Additional tools coming soon.
-                </p>
-            </div>
-        </div>
+<div class="max-w-5xl mx-auto">
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-white mb-3">Client Portal</h1>
+        <p class="text-gray-400 text-lg">Upload imagery, video, or a project folder, then choose the processing tools to run.</p>
     </div>
+
+    <form id="client-tool-form" class="space-y-8">
+        <section class="rounded-lg bg-gray-800 border border-gray-700 p-6">
+            <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+                <div>
+                    <h2 class="text-xl font-semibold text-white mb-2">Source Data</h2>
+                    <p class="text-sm text-gray-400">Choose individual image/video files, or select a whole folder of drone captures.</p>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <label class="cursor-pointer px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
+                        Upload Files
+                        <input id="file-input" class="sr-only" type="file" multiple accept="image/*,video/*">
+                    </label>
+                    <label class="cursor-pointer px-4 py-2 rounded-lg bg-gray-700 text-white hover:bg-gray-600 transition-colors font-medium">
+                        Upload Folder
+                        <input id="folder-input" class="sr-only" type="file" multiple webkitdirectory directory>
+                    </label>
+                </div>
+            </div>
+
+            <div class="mt-6 rounded-lg border border-dashed border-gray-600 bg-gray-900/60 p-5">
+                <div class="flex items-center justify-between gap-4">
+                    <div>
+                        <p id="upload-summary" class="font-medium text-gray-200">No files selected</p>
+                        <p class="text-sm text-gray-500 mt-1">Accepted sources include images, video clips, and folders.</p>
+                    </div>
+                    <button type="button" id="clear-files" class="hidden px-3 py-2 rounded-md bg-gray-700 text-sm text-gray-200 hover:bg-gray-600">Clear</button>
+                </div>
+                <ul id="file-list" class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-400"></ul>
+            </div>
+        </section>
+
+        <section class="rounded-lg bg-gray-800 border border-gray-700 p-6">
+            <div class="mb-5">
+                <h2 class="text-xl font-semibold text-white mb-2">Tools</h2>
+                <p class="text-sm text-gray-400">Select one or more tools. Use the plus button to reveal extra settings.</p>
+            </div>
+
+            <div class="space-y-4">
+                <div class="rounded-lg border border-gray-700 bg-gray-900/50 p-4">
+                    <div class="flex items-center justify-between gap-4">
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" name="tools" value="drone-heatmap" class="h-5 w-5 rounded border-gray-600 bg-gray-800 text-green-500 focus:ring-green-500">
+                            <span><span class="block font-semibold text-white">Drone Heatmap</span><span class="block text-sm text-gray-400">Generate heatmap views from drone imagery or video.</span></span>
+                        </label>
+                        <button type="button" class="settings-toggle shrink-0 h-9 w-9 rounded-full bg-gray-700 text-xl leading-none text-gray-200 hover:bg-green-700" aria-expanded="false" aria-controls="heatmap-settings">+</button>
+                    </div>
+                    <div id="heatmap-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view1" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 1</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view2" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 2</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view3" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 3</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-gray-700 bg-gray-900/50 p-4">
+                    <div class="flex items-center justify-between gap-4">
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" name="tools" value="knowledge-graph" class="h-5 w-5 rounded border-gray-600 bg-gray-800 text-green-500 focus:ring-green-500">
+                            <span><span class="block font-semibold text-white">Knowledge Graph</span><span class="block text-sm text-gray-400">Extract entities, relationships, and scene context.</span></span>
+                        </label>
+                        <button type="button" class="settings-toggle shrink-0 h-9 w-9 rounded-full bg-gray-700 text-xl leading-none text-gray-200 hover:bg-green-700" aria-expanded="false" aria-controls="graph-settings">+</button>
+                    </div>
+                    <div id="graph-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="object-detection" class="rounded bg-gray-800 border-gray-600 text-green-500"> Object detection</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="relationship-mapping" class="rounded bg-gray-800 border-gray-600 text-green-500"> Relationship mapping</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-gray-700 bg-gray-900/50 p-4">
+                    <div class="flex items-center justify-between gap-4">
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" name="tools" value="3d-reconstruction" class="h-5 w-5 rounded border-gray-600 bg-gray-800 text-green-500 focus:ring-green-500">
+                            <span><span class="block font-semibold text-white">3D Reconstruction</span><span class="block text-sm text-gray-400">Build a spatial reconstruction from captures.</span></span>
+                        </label>
+                        <button type="button" class="settings-toggle shrink-0 h-9 w-9 rounded-full bg-gray-700 text-xl leading-none text-gray-200 hover:bg-green-700" aria-expanded="false" aria-controls="reconstruction-settings">+</button>
+                    </div>
+                    <div id="reconstruction-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
+                        <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="reconstruction_settings" value="live-view" class="rounded bg-gray-800 border-gray-600 text-green-500"> Live View</label>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+            <p id="form-status" class="text-sm text-gray-400">Select source data and at least one tool to begin.</p>
+            <button type="submit" class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-semibold">Run Selected Tools</button>
+        </div>
+    </form>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const fileInput = document.getElementById("file-input");
+    const folderInput = document.getElementById("folder-input");
+    const fileList = document.getElementById("file-list");
+    const uploadSummary = document.getElementById("upload-summary");
+    const clearFiles = document.getElementById("clear-files");
+    const formStatus = document.getElementById("form-status");
+    let selectedFiles = [];
+
+    function formatBytes(bytes) {
+        if (!bytes) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+        return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+    }
+
+    function renderFiles(files) {
+        selectedFiles = Array.from(files);
+        fileList.innerHTML = "";
+        if (!selectedFiles.length) {
+            uploadSummary.textContent = "No files selected";
+            clearFiles.classList.add("hidden");
+            return;
+        }
+        const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+        uploadSummary.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected (${formatBytes(totalSize)})`;
+        clearFiles.classList.remove("hidden");
+        selectedFiles.slice(0, 8).forEach((file) => {
+            const li = document.createElement("li");
+            li.className = "truncate rounded-md bg-gray-800 px-3 py-2";
+            li.textContent = file.webkitRelativePath || file.name;
+            fileList.appendChild(li);
+        });
+        if (selectedFiles.length > 8) {
+            const li = document.createElement("li");
+            li.className = "rounded-md bg-gray-800 px-3 py-2 text-gray-500";
+            li.textContent = `+ ${selectedFiles.length - 8} more`;
+            fileList.appendChild(li);
+        }
+    }
+
+    fileInput.addEventListener("change", (event) => renderFiles(event.target.files));
+    folderInput.addEventListener("change", (event) => renderFiles(event.target.files));
+    clearFiles.addEventListener("click", () => {
+        fileInput.value = "";
+        folderInput.value = "";
+        renderFiles([]);
+    });
+
+    document.querySelectorAll(".settings-toggle").forEach((button) => {
+        button.addEventListener("click", () => {
+            const panel = document.getElementById(button.getAttribute("aria-controls"));
+            const expanded = button.getAttribute("aria-expanded") === "true";
+            button.setAttribute("aria-expanded", String(!expanded));
+            button.textContent = expanded ? "+" : "-";
+            panel.classList.toggle("hidden", expanded);
+        });
+    });
+
+    document.getElementById("client-tool-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const tools = Array.from(document.querySelectorAll("input[name='tools']:checked")).map((tool) => tool.value);
+        if (!selectedFiles.length) {
+            formStatus.textContent = "Choose files or a folder before running tools.";
+            formStatus.className = "text-sm text-yellow-400";
+            return;
+        }
+        if (!tools.length) {
+            formStatus.textContent = "Select at least one tool to run.";
+            formStatus.className = "text-sm text-yellow-400";
+            return;
+        }
+        const params = new URLSearchParams();
+        params.set("tools", tools.join(","));
+        params.set("file_count", String(selectedFiles.length));
+
+        const settingGroups = ["heatmap_views", "graph_settings", "reconstruction_settings"];
+        settingGroups.forEach((group) => {
+            const values = Array.from(document.querySelectorAll(`input[name='${group}']:checked`)).map((setting) => setting.value);
+            if (values.length) {
+                params.set(group, values.join(","));
+            }
+        });
+
+        window.location.href = `{% url 'core_orchestrator:client_run_workspace' %}?${params.toString()}`;
+    });
+</script>
 {% endblock %}
