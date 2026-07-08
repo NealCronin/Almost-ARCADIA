@@ -7,6 +7,7 @@ Django view functions for the Drone Target Tracking framework.
 import base64
 import json
 import logging
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Optional
@@ -30,20 +31,96 @@ logger = logging.getLogger(__name__)
 
 _host_api_running = False
 _host_api_thread: Optional[threading.Thread] = None
+_host_api_server: Optional[HTTPServer] = None
 _host_api_config: dict[str, Any] = {
-    "listen_ip": "0.0.0.0",
+    "listen_ip": "127.0.0.1",
     "listen_port": 8080,
     "sam3_weights_path": "",  # Host-managed SAM3 weights path
 }
-
-# Per-request model helpers (lazy initialization)
-_request_llama_helper: Optional[Any] = None
-_request_sam3_helper: Optional[Any] = None
 
 # Request log for Host Portal display
 _request_log: list[dict[str, Any]] = []
 _MAX_LOG_ENTRIES = 100
 _log_lock = threading.Lock()
+_config_lock = threading.Lock()
+
+
+# ------------------------------------------------------------------
+# Model Validation Utilities
+# ------------------------------------------------------------------
+
+def validate_sam3_model(weights_path: str) -> tuple[bool, str]:
+    """
+    Validate that SAM3 model file exists and is accessible.
+    
+    Returns:
+        tuple: (is_valid: bool, message: str)
+    """
+    if not weights_path:
+        return False, "SAM3 model path not configured"
+    
+    if not os.path.exists(weights_path):
+        return False, (
+            f"SAM3 model not found at '{weights_path}'.\n\n"
+            "To set up SAM3:\n"
+            "1. Download the model from: https://huggingface.co/facebook/sam3\n"
+            "2. Place it in your project directory or set SAM3_MODEL_PATH environment variable\n"
+            "3. Configure the path in Host Portal settings"
+        )
+    
+    if not os.path.isfile(weights_path):
+        return False, f"SAM3 path '{weights_path}' is not a file"
+    
+    # Check file size (should be at least a few hundred MB for SAM3)
+    file_size = os.path.getsize(weights_path)
+    if file_size < 100 * 1024 * 1024:  # Less than 100MB
+        logger.warning("SAM3 model file seems unusually small: %s (%.2f MB)", 
+                      weights_path, file_size / (1024 * 1024))
+    
+    return True, f"SAM3 model found ({file_size / (1024 * 1024):.2f} MB)"
+
+
+def validate_llm_model(model_path: str) -> tuple[bool, str]:
+    """
+    Validate that LLM model file exists and is accessible.
+    
+    Returns:
+        tuple: (is_valid: bool, message: str)
+    """
+    if not model_path:
+        return False, "LLM model path not configured"
+    
+    if not os.path.exists(model_path):
+        return False, (
+            f"LLM model not found at '{model_path}'.\n\n"
+            "To set up LLM (llama.cpp):\n"
+            "1. Install llama-cpp-python: pip install llama-cpp-python\n"
+            "2. Download a GGUF model (e.g., from HuggingFace)\n"
+            "3. Place it in your project directory or set LLM_MODEL_PATH environment variable\n"
+            "4. Configure the path in Host Portal settings\n\n"
+            "Recommended models:\n"
+            "- Llama 2/3: https://huggingface.co/meta-llama\n"
+            "- Mistral: https://huggingface.co/mistralai"
+        )
+    
+    if not os.path.isfile(model_path):
+        return False, f"LLM model path '{model_path}' is not a file"
+    
+    return True, f"LLM model found"
+
+
+def validate_opencv() -> tuple[bool, str]:
+    """
+    Validate that OpenCV is properly installed.
+    
+    Returns:
+        tuple: (is_valid: bool, message: str)
+    """
+    try:
+        import cv2
+        return True, f"OpenCV {cv2.__version__} is available"
+    except ImportError:
+        return False, "OpenCV is not installed. Run: pip install opencv-python"
 
 
 # ------------------------------------------------------------------
@@ -59,7 +136,7 @@ def log_request(endpoint: str, details: dict[str, Any]) -> None:
         })
         # Keep only the last N entries
         if len(_request_log) > _MAX_LOG_ENTRIES:
-            _request_log = _request_log[-_MAX_LOG_ENTRIES:]
+            del _request_log[: -_MAX_LOG_ENTRIES]
 
 
 def get_request_logs() -> list[dict[str, Any]]:
@@ -109,28 +186,28 @@ class HostAPIHandler(BaseHTTPRequestHandler):
 
     def _handle_evaluate_llm(self, data: dict[str, Any]) -> None:
         """Handle LLM evaluation request."""
+        from .utils.model_host.llama_server_helper import LlamaServerHelper
+
+        prompt = data.get("prompt", "")
+        model_path = data.get("model_path", "")
+
+        if not prompt:
+            self._send_json_response({"error": "prompt is required"}, status=400)
+            return
+
+        helper = LlamaServerHelper(model_path=model_path)
         try:
-            from .utils.model_host.llm_request_helper import LlmRequestHelper
-
-            prompt = data.get("prompt", "")
-            model_path = data.get("model_path", "")
-
-            if not prompt:
-                self._send_json_response({"error": "prompt is required"}, status=400)
-                return
-
-            helper = LlmRequestHelper(model_path=model_path)
-            if not helper.initialize():
+            if not helper.start_server():
                 self._send_json_response({"error": "Failed to initialize LLM"}, status=503)
                 return
-
-            result = helper.generate(prompt)
+            result = helper.evaluate(prompt)
             log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
             self._send_json_response(result)
-
         except Exception as exc:
             logger.exception("LLM evaluation error")
             self._send_json_response({"error": str(exc)}, status=500)
+        finally:
+            helper.stop_server()
 
     def _handle_evaluate_sam3(self, data: dict[str, Any]) -> None:
         """Handle SAM3 segmentation request (stateless, uses host config)."""
@@ -159,7 +236,8 @@ class HostAPIHandler(BaseHTTPRequestHandler):
                 return
 
             # Use host-configured weights path (not from client)
-            weights_path = _host_api_config.get("sam3_weights_path", "")
+            with _config_lock:
+                weights_path = _host_api_config.get("sam3_weights_path", "")
             if not weights_path:
                 self._send_json_response(
                     {"error": "SAM3 weights path not configured on Host"},
@@ -205,6 +283,7 @@ def landing_page(request: HttpRequest) -> HttpResponse:
     return render(request, "core_orchestrator/index.html")
 
 
+@csrf_exempt
 def host_portal(request: HttpRequest) -> HttpResponse:
     """
     Host Portal: Configure listener IP/Port and SAM3 weights path.
@@ -212,13 +291,15 @@ def host_portal(request: HttpRequest) -> HttpResponse:
     GET: Render configuration form.
     POST: Start background API listener on specified IP:Port with weights path.
     """
-    global _host_api_running, _host_api_thread
+    global _host_api_running, _host_api_thread, _host_api_server
 
     if request.method == "GET":
+        with _config_lock:
+            config_snapshot = dict(_host_api_config)
         return render(request, "core_orchestrator/host_portal.html", {
-            "listen_ip": _host_api_config.get("listen_ip", "0.0.0.0"),
-            "listen_port": _host_api_config.get("listen_port", 8080),
-            "sam3_weights_path": _host_api_config.get("sam3_weights_path", ""),
+            "listen_ip": config_snapshot.get("listen_ip", "0.0.0.0"),
+            "listen_port": config_snapshot.get("listen_port", 8080),
+            "sam3_weights_path": config_snapshot.get("sam3_weights_path", ""),
             "running": _host_api_running,
         })
 
@@ -231,26 +312,45 @@ def host_portal(request: HttpRequest) -> HttpResponse:
     action = body.get("action", "start")
 
     if action == "stop":
-        # Stop the background server
-        if _host_api_thread and _host_api_thread.is_alive():
-            # Note: In production, use proper server shutdown
-            pass
+        if not _host_api_running:
+            return JsonResponse({"error": "Listener is not running"}, status=409)
+        if _host_api_server is not None:
+            try:
+                _host_api_server.shutdown()
+                _host_api_server.server_close()
+            except Exception as exc:
+                logger.warning("Error shutting down HTTP server: %s", exc)
+        # Wait for the serve_forever thread to exit so the port is fully released
+        if _host_api_thread is not None:
+            _host_api_thread.join(timeout=5)
+            if _host_api_thread.is_alive():
+                logger.error("Host API server thread did not stop within 5s")
         _host_api_running = False
         _host_api_thread = None
+        _host_api_server = None
         return JsonResponse({"message": "Host API listener stopped"})
 
-    # Start the background server
-    listen_ip = body.get("listen_ip", "0.0.0.0")
+    if _host_api_running:
+        return JsonResponse({"error": "Listener is already running"}, status=409)
+    listen_ip = body.get("listen_ip", "127.0.0.1")
     listen_port = int(body.get("listen_port", 8080))
     sam3_weights_path = body.get("sam3_weights_path", "")
 
     try:
-        _host_api_config["listen_ip"] = listen_ip
-        _host_api_config["listen_port"] = listen_port
-        _host_api_config["sam3_weights_path"] = sam3_weights_path
+        with _config_lock:
+            _host_api_config["listen_ip"] = listen_ip
+            _host_api_config["listen_port"] = listen_port
+            _host_api_config["sam3_weights_path"] = sam3_weights_path
+
+        # Validate SAM3 model if path is provided
+        if sam3_weights_path:
+            is_valid, message = validate_sam3_model(sam3_weights_path)
+            if not is_valid:
+                return JsonResponse({"error": message}, status=400)
 
         # Start HTTP server in daemon thread
         server = HTTPServer((listen_ip, listen_port), HostAPIHandler)
+        _host_api_server = server
         _host_api_thread = threading.Thread(
             target=server.serve_forever,
             daemon=True,
@@ -280,7 +380,7 @@ def host_evaluate_llm(request: HttpRequest) -> JsonResponse:
 
     Used when Host is running as part of main Django process.
     Expects: {prompt, model_path}
-    Returns: {generated_text, tokens_used}
+    Returns: {content}
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -299,23 +399,23 @@ def host_evaluate_llm(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "model_path is required"}, status=400)
 
     try:
-        # Lazy import
-        from .utils.model_host.llm_request_helper import LlmRequestHelper
+        from .utils.model_host.llama_server_helper import LlamaServerHelper
 
-        helper = LlmRequestHelper(model_path=model_path)
-        if not helper.initialize():
-            return JsonResponse({"error": "Failed to initialize LLM"}, status=503)
-
-        result = helper.generate(prompt)
-        log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
-        return JsonResponse(result)
+        helper = LlamaServerHelper(model_path=model_path)
+        try:
+            if not helper.start_server():
+                return JsonResponse({"error": "Failed to start LLM server"}, status=503)
+            result = helper.evaluate(prompt)
+            log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
+            return JsonResponse({"content": result})
+        finally:
+            helper.stop_server()
 
     except Exception as exc:
         logger.exception("LLM evaluation error")
         return JsonResponse({"error": str(exc)}, status=500)
 
 
-@csrf_exempt
 def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
     """
     Host API Endpoint: Run SAM3 segmentation (stateless, direct Django view).
@@ -353,7 +453,8 @@ def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": f"Invalid frame_b64: {exc}"}, status=400)
 
     # Use host-configured weights path (NOT from client payload)
-    weights_path = _host_api_config.get("sam3_weights_path", "")
+    with _config_lock:
+        weights_path = _host_api_config.get("sam3_weights_path", "")
     if not weights_path:
         return JsonResponse(
             {"error": "SAM3 weights path not configured on Host. Please set sam3_weights_path in Host Portal."},
@@ -395,17 +496,63 @@ def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
 @csrf_exempt
 def host_status(request: HttpRequest) -> JsonResponse:
     """Host API Endpoint: Return status (stateless)."""
+    with _config_lock:
+        config_snapshot = dict(_host_api_config)
     return JsonResponse({
         "status": "running" if _host_api_running else "stopped",
-        "listen_ip": _host_api_config.get("listen_ip", "0.0.0.0"),
-        "listen_port": _host_api_config.get("listen_port", 8080),
-        "sam3_weights_path": _host_api_config.get("sam3_weights_path", ""),
+        "listen_ip": config_snapshot.get("listen_ip", "0.0.0.0"),
+        "listen_port": config_snapshot.get("listen_port", 8080),
+        "sam3_weights_path": config_snapshot.get("sam3_weights_path", ""),
     })
 
 
 def client_portal(request: HttpRequest) -> HttpResponse:
     """Client Portal: Tool selection page."""
     return render(request, "core_orchestrator/tool_selection.html")
+
+
+def client_run_workspace(request: HttpRequest) -> HttpResponse:
+    """Render a shared progress workspace for selected client tools."""
+    tool_catalog = {
+        "drone-heatmap": {
+            "label": "Drone Heatmap",
+            "description": "Generating heatmap views from selected drone captures.",
+            "steps": ["Load source media", "Run heatmap inference", "Build selected views", "Publish results"],
+            "settings_key": "heatmap_views",
+        },
+        "knowledge-graph": {
+            "label": "Knowledge Graph",
+            "description": "Extracting entities, relationships, and scene context.",
+            "steps": ["Scan source media", "Detect objects", "Map relationships", "Export graph"],
+            "settings_key": "graph_settings",
+        },
+        "3d-reconstruction": {
+            "label": "3D Reconstruction",
+            "description": "Building a spatial reconstruction from selected captures.",
+            "steps": ["Index frames", "Match features", "Estimate scene geometry", "Render reconstruction"],
+            "settings_key": "reconstruction_settings",
+        },
+    }
+
+    requested_tools = [
+        tool for tool in request.GET.get("tools", "").split(",") if tool in tool_catalog
+    ]
+    if not requested_tools:
+        requested_tools = ["drone-heatmap"]
+
+    selected_tools = []
+    for tool_key in requested_tools:
+        tool = dict(tool_catalog[tool_key])
+        tool["key"] = tool_key
+        tool["settings"] = request.GET.get(tool["settings_key"], "")
+        tool["file_count"] = request.GET.get("file_count", "0")
+        selected_tools.append(tool)
+
+    return render(
+        request,
+        "core_orchestrator/client_run_workspace.html",
+        {"selected_tools": selected_tools},
+    )
 
 
 def heatmap_dashboard(request: HttpRequest) -> HttpResponse:
@@ -502,14 +649,33 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                 )
                 return
         else:
-            # Try to open default camera
-            cap = cv2_local.VideoCapture(0)
-            if not cap.isOpened():
-                logger.error("Failed to open default camera")
-                error_bytes = create_error_frame("No camera available\nPlease specify dataset path")
+            # No dataset provided - show blank placeholder (no camera access)
+            logger.info("No dataset path provided, showing placeholder")
+            # Create a blank placeholder frame with instructions
+            placeholder_frame = np.full((480, 640, 3), (50, 50, 60), dtype=np.uint8)
+            cv2_local.putText(
+                placeholder_frame,
+                "No video source configured",
+                (180, 200),
+                cv2_local.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (200, 200, 200),
+                2
+            )
+            cv2_local.putText(
+                placeholder_frame,
+                "Set dataset path in Heatmap Dashboard",
+                (140, 240),
+                cv2_local.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (150, 150, 150),
+                1
+            )
+            _, buffer = cv2_local.imencode(".jpg", placeholder_frame, [cv2_local.IMWRITE_JPEG_QUALITY, 85])
+            while True:
                 yield (
                     b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
                 )
                 return
 
