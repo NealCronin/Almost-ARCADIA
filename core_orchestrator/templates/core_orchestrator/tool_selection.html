@@ -16,23 +16,19 @@
                     <h2 class="text-xl font-semibold text-white mb-2">Source Data</h2>
                     <p class="text-sm text-gray-400">Choose individual image/video files, or select a whole folder of drone captures.</p>
                 </div>
-                <div class="flex flex-wrap gap-3">
-                    <label class="cursor-pointer px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
-                        Upload Files
+                <div>
+                    <label class="block cursor-pointer px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
+                        Upload Dataset
                         <input id="file-input" class="sr-only" type="file" multiple accept="image/*,video/*">
-                    </label>
-                    <label class="cursor-pointer px-4 py-2 rounded-lg bg-gray-700 text-white hover:bg-gray-600 transition-colors font-medium">
-                        Upload Folder
-                        <input id="folder-input" class="sr-only" type="file" multiple webkitdirectory directory>
                     </label>
                 </div>
             </div>
 
-            <div class="mt-6 rounded-lg border border-dashed border-gray-600 bg-gray-900/60 p-5">
+            <div id="upload-dropzone" class="mt-6 rounded-lg border border-dashed border-gray-600 bg-gray-900/60 p-5">
                 <div class="flex items-center justify-between gap-4">
                     <div>
                         <p id="upload-summary" class="font-medium text-gray-200">No files selected</p>
-                        <p class="text-sm text-gray-500 mt-1">Accepted sources include images, video clips, and folders.</p>
+                        <p class="text-sm text-gray-500 mt-1">Accepted sources include images, folders of images, or one video.</p>
                     </div>
                     <button type="button" id="clear-files" class="hidden px-3 py-2 rounded-md bg-gray-700 text-sm text-gray-200 hover:bg-gray-600">Clear</button>
                 </div>
@@ -67,9 +63,9 @@
                     </div>
                     <div id="heatmap-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view1" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 1</label>
-                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view2" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 2</label>
-                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view3" class="rounded bg-gray-800 border-gray-600 text-green-500"> View 3</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view1" class="rounded bg-gray-800 border-gray-600 text-green-500"> View1</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view2" class="rounded bg-gray-800 border-gray-600 text-green-500"> View2</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="heatmap_views" value="view3" class="rounded bg-gray-800 border-gray-600 text-green-500"> View3</label>
                         </div>
                     </div>
                 </div>
@@ -84,8 +80,8 @@
                     </div>
                     <div id="graph-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="object-detection" class="rounded bg-gray-800 border-gray-600 text-green-500"> Object detection</label>
-                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="relationship-mapping" class="rounded bg-gray-800 border-gray-600 text-green-500"> Relationship mapping</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="param1" class="rounded bg-gray-800 border-gray-600 text-green-500">param1</label>
+                            <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="graph_settings" value="param2" class="rounded bg-gray-800 border-gray-600 text-green-500">param2</label>
                         </div>
                     </div>
                 </div>
@@ -99,7 +95,16 @@
                         <button type="button" class="settings-toggle shrink-0 h-9 w-9 rounded-full bg-gray-700 text-xl leading-none text-gray-200 hover:bg-green-700" aria-expanded="false" aria-controls="reconstruction-settings">+</button>
                     </div>
                     <div id="reconstruction-settings" class="settings-panel hidden mt-4 border-t border-gray-700 pt-4">
-                        <label class="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" name="reconstruction_settings" value="live-view" class="rounded bg-gray-800 border-gray-600 text-green-500"> Live View</label>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <label class="flex items-center gap-3 rounded-md px-3 py-3 text-sm text-gray-300 cursor-pointer">
+                                <input type="radio" name="reconstruction_settings" value="live-reconstruction" class="border-gray-600 bg-gray-800 text-green-500 focus:ring-green-500">
+                                <span>Live Reconstruction</span>
+                            </label>
+                            <label class="flex items-center gap-3 rounded-md px-3 py-3 text-sm text-gray-300 cursor-pointer">
+                                <input type="radio" name="reconstruction_settings" value="high-quality-live-reconstruction" class="border-gray-600 bg-gray-800 text-green-500 focus:ring-green-500">
+                                <span>High-Quality Live Reconstruction</span>
+                            </label>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -126,34 +131,9 @@
         </div>
 
         <div class="max-h-[70vh] overflow-y-auto px-6 py-5">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="object-confidence" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">Object Confidence</span><span class="block text-sm text-gray-400">Use confidence thresholds when accepting detections.</span></span>
-                </label>
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="spatial-filtering" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">Spatial Filtering</span><span class="block text-sm text-gray-400">Filter predictions by location and scene geometry.</span></span>
-                </label>
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="temporal-smoothing" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">Temporal Smoothing</span><span class="block text-sm text-gray-400">Smooth model outputs across neighboring frames.</span></span>
-                </label>
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="metadata-extraction" checked class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">Metadata Extraction</span><span class="block text-sm text-gray-400">Read timestamps, filenames, and available capture metadata.</span></span>
-                </label>
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="high-resolution-processing" class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">High Resolution Processing</span><span class="block text-sm text-gray-400">Prefer higher quality outputs when processing time allows.</span></span>
-                </label>
-                <label class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4 cursor-pointer">
-                    <input type="checkbox" name="advanced_parameters" value="save-intermediate-results" class="mt-1 rounded bg-gray-800 border-gray-600 text-green-500">
-                    <span><span class="block font-semibold text-white">Save Intermediate Results</span><span class="block text-sm text-gray-400">Keep temporary outputs for debugging and review.</span></span>
-                </label>
-            </div>
+            <label>Settings Will Go Here</label>
         </div>
-
+    
         <div class="flex flex-col sm:flex-row sm:justify-end gap-3 border-t border-gray-700 px-6 py-5">
             <button type="button" id="advanced-settings-cancel" class="px-5 py-3 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-semibold">Cancel</button>
             <button type="button" id="advanced-settings-confirm" class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-semibold">Confirm Settings</button>
@@ -165,7 +145,7 @@
 {% block extra_js %}
 <script>
     const fileInput = document.getElementById("file-input");
-    const folderInput = document.getElementById("folder-input");
+    const uploadDropzone = document.getElementById("upload-dropzone");
     const fileList = document.getElementById("file-list");
     const uploadSummary = document.getElementById("upload-summary");
     const clearFiles = document.getElementById("clear-files");
@@ -179,8 +159,10 @@
     const advancedSettingsClose = document.getElementById("advanced-settings-close");
     const advancedSettingsCancel = document.getElementById("advanced-settings-cancel");
     const advancedSettingsConfirm = document.getElementById("advanced-settings-confirm");
+    const reconstructionOptions = document.querySelectorAll("input[name='reconstruction_settings']");
     let selectedFiles = [];
     let uploadProgressTimer = null;
+    let checkedReconstructionOption = null;
     let confirmedAdvancedParameters = Array.from(document.querySelectorAll("input[name='advanced_parameters']:checked")).map((parameter) => parameter.value);
 
     function formatBytes(bytes) {
@@ -226,8 +208,49 @@
         }, 220);
     }
 
+    function isImageFile(file) {
+        return file.type.startsWith("image/");
+    }
+
+    function isVideoFile(file) {
+        return file.type.startsWith("video/");
+    }
+
+    function getDatasetError(files) {
+        const imageFiles = files.filter(isImageFile);
+        const videoFiles = files.filter(isVideoFile);
+        const unsupportedFiles = files.filter((file) => !isImageFile(file) && !isVideoFile(file));
+
+        if (unsupportedFiles.length) {
+            return "Upload images, a folder of images, or a video.";
+        }
+        if (videoFiles.length && imageFiles.length) {
+            return "Choose images or one video, not both in the same dataset.";
+        }
+        if (videoFiles.length > 1) {
+            return "Only one video can be uploaded per dataset.";
+        }
+
+        return "";
+    }
+
     function renderFiles(files) {
-        selectedFiles = Array.from(files);
+        const incomingFiles = Array.from(files);
+        const datasetError = getDatasetError(incomingFiles);
+
+        if (datasetError) {
+            fileInput.value = "";
+            selectedFiles = [];
+            fileList.innerHTML = "";
+            uploadSummary.textContent = "No files selected";
+            clearFiles.classList.add("hidden");
+            resetUploadProgress();
+            formStatus.textContent = datasetError;
+            formStatus.className = "text-sm text-yellow-400";
+            return;
+        }
+
+        selectedFiles = incomingFiles;
         fileList.innerHTML = "";
         if (!selectedFiles.length) {
             uploadSummary.textContent = "No files selected";
@@ -253,11 +276,67 @@
         simulateUploadProgress(totalSize);
     }
 
+    function readDirectoryEntries(directoryReader) {
+        return new Promise((resolve, reject) => {
+            directoryReader.readEntries(resolve, reject);
+        });
+    }
+
+    function getEntryFile(entry) {
+        return new Promise((resolve, reject) => {
+            entry.file(resolve, reject);
+        });
+    }
+
+    async function collectFilesFromEntry(entry) {
+        if (entry.isFile) {
+            return [await getEntryFile(entry)];
+        }
+
+        if (!entry.isDirectory) {
+            return [];
+        }
+
+        const directoryReader = entry.createReader();
+        const files = [];
+        let entries = await readDirectoryEntries(directoryReader);
+
+        while (entries.length) {
+            const nestedFiles = await Promise.all(entries.map(collectFilesFromEntry));
+            files.push(...nestedFiles.flat());
+            entries = await readDirectoryEntries(directoryReader);
+        }
+
+        return files;
+    }
+
+    async function getDroppedFiles(dataTransfer) {
+        const items = Array.from(dataTransfer.items || []);
+        const entries = items.map((item) => item.webkitGetAsEntry && item.webkitGetAsEntry()).filter(Boolean);
+
+        if (!entries.length) {
+            return Array.from(dataTransfer.files || []);
+        }
+
+        const files = await Promise.all(entries.map(collectFilesFromEntry));
+        return files.flat();
+    }
+
     fileInput.addEventListener("change", (event) => renderFiles(event.target.files));
-    folderInput.addEventListener("change", (event) => renderFiles(event.target.files));
+    uploadDropzone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        uploadDropzone.classList.add("border-blue-500", "bg-gray-900");
+    });
+    uploadDropzone.addEventListener("dragleave", () => {
+        uploadDropzone.classList.remove("border-blue-500", "bg-gray-900");
+    });
+    uploadDropzone.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        uploadDropzone.classList.remove("border-blue-500", "bg-gray-900");
+        renderFiles(await getDroppedFiles(event.dataTransfer));
+    });
     clearFiles.addEventListener("click", () => {
         fileInput.value = "";
-        folderInput.value = "";
         renderFiles([]);
     });
 
@@ -268,6 +347,21 @@
             button.setAttribute("aria-expanded", String(!expanded));
             button.textContent = expanded ? "+" : "-";
             panel.classList.toggle("hidden", expanded);
+        });
+    });
+
+    reconstructionOptions.forEach((option) => {
+        const optionLabel = option.closest("label");
+
+        optionLabel.addEventListener("pointerdown", () => {
+            checkedReconstructionOption = option.checked ? option : null;
+        });
+
+        option.addEventListener("click", () => {
+            if (checkedReconstructionOption === option) {
+                option.checked = false;
+                checkedReconstructionOption = null;
+            }
         });
     });
 
