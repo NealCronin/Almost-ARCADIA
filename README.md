@@ -1,226 +1,216 @@
-# Drone Orchestrator
+# Almost ARCADIA
 
-A distributed orchestration interface for drone target tracking pipelines. The framework splits compute load between a **Client** device (coordinates the pipeline, reads datasets locally) and a **Host** device (stateless compute box evaluating LLM or SAM3 inferences over LAN/VPN).
+A distributed orchestration interface for drone target tracking and inference workloads. The framework splits compute between a **Client** device (coordinates the pipeline, reads datasets locally) and a **Host** device (inference compute over LAN/VPN).
 
 ## Architecture
 
 ```
-┌─────────────────┐                    ┌─────────────────┐
-│   Client        │                    │   Host          │
-│   Device        │◄──────LAN/VPN─────►│   Device        │
-│                 │                    │                 │
-│ - Dataset Reader│   HTTP POST        │ - LLM Server    │
-│ - Stream Viewer │   Inference        │ - SAM3 Model    │
-│ - UI Controls   │   Requests         │ - Stateless API │
-└─────────────────┘                    └─────────────────┘
++-----------------------+                    +-----------------------+
+|   Client              |                    |   Host                |
+|   Device              |<------LAN/VPN----->|   Device              |
+|                       |  HTTP (GET/POST)   |                       |
+| - Dataset Reader      |  Inference         | - LLM Server          |
+| - Stream Viewer       |  Requests          | - SAM3 Model          |
+| - UI Controls         |                    | - Stateless API       |
+| - Optional local LLM  |                    | - Managed services    |
+| - Optional local SAM  |                    | - External services   |
++-----------------------+                    +-----------------------+
 ```
 
-## Phase 1: Environment Setup
+### Key Design Decisions
 
-Create an isolated Conda environment with all dependencies:
-
-```bash
-# Create and activate environment
-conda create -n drone_orchestrator python=3.10 -y
-conda activate drone_orchestrator
-
-# Install dependencies
-pip install django requests opencv-python pandas numpy python-dotenv llama-cpp-python torch torchvision
-
-# Optional: Install segment-anything for SAM3 support
-pip install segment-anything
-```
-
-## Phase 2: Project Structure
-
-```
-Almost-ARCADIA/
-├── manage.py
-├── drone_orchestrator/           # Project settings
-│   ├── settings.py
-│   ├── urls.py
-│   ├── wsgi.py
-│   └── asgi.py
-├── core_orchestrator/            # Main application
-│   ├── views.py                  # Django views & streaming
-│   ├── urls.py                   # URL routing
-│   ├── apps.py
-│   ├── utils/
-│   │   ├── model_host/
-│   │   │   ├── process_manager.py       # Background process management
-│   │   │   ├── llama_server_helper.py   # LLM inference helper
-│   │   │   ├── sam3_server_helper.py    # SAM3 segmentation helper
-│   │   │   ├── vpn_tunnel_helper.py     # Network connectivity checks
-│   │   │   └── remote_client_helper.py  # Client-to-host HTTP calls
-│   │   └── __init__.py
-│   └── templates/
-│       └── core_orchestrator/
-│           ├── base.html                # Base template with TailwindCSS
-│           ├── index.html               # Landing page (role selection)
-│           ├── host_portal.html         # Host configuration dashboard
-│           ├── tool_selection.html      # Client tool launcher
-│           └── heatmap_dashboard.html   # Live stream dashboard
-└── README.md
-```
-
-## Phase 3: Running the Server
-
-### Starting the Development Server
-
-```bash
-# Activate environment
-conda activate drone_orchestrator
-
-# Run Django development server
-python manage.py runserver 0.0.0.0:8000
-```
-
-The server will start at `http://localhost:8000`
-
-### Accessing the Portals
-
-1. **Landing Page** (`/`) - Choose between Host Portal or Client Portal
-2. **Host Portal** (`/host/`) - Configure model paths and monitor services
-3. **Client Portal** (`/client/`) - Access available tools
-4. **Heatmap Dashboard** (`/client/heatmap/`) - View live video stream with target tracking
-
-## Core Components
-
-### Process Manager (`process_manager.py`)
-
-Thread-safe utility for managing background binaries:
-- Start/stop processes with PID tracking
-- Capture stdout/stderr streams
-- Safe termination (SIGTERM) and forced kill (SIGKILL)
-
-### Llama Server Helper (`llama_server_helper.py`)
-
-LLM inference wrapper using `llama-cpp-python`:
-- Load GGUF model weights from path
-- Start background `llama-server` process
-- Synchronous `evaluate(prompt, context)` method
-
-### SAM3 Server Helper (`sam3_server_helper.py`)
-
-Segment Anything Model 3 wrapper:
-- Load `sam3.pt` checkpoint
-- Predict masks from points or boxes
-- Extract target coordinates from segmentation
-
-### VPN Tunnel Helper (`vpn_tunnel_helper.py`)
-
-Network diagnostics:
-- Check host reachability via TCP socket
-- Enumerate VPN interfaces
-- Verify tunnel connectivity
-
-### Remote Client Helper (`remote_client_helper.py`)
-
-Client-to-host communication:
-- Serialize frames via HTTP POST
-- Retry logic with exponential backoff
-- Base64 image encoding/decoding
-
-## API Endpoints
-
-### Host API (Stateless)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/host/evaluate-llm/` | POST | Evaluate LLM prompt |
-| `/api/host/evaluate-sam3/` | POST | Run SAM3 segmentation |
-| `/api/host/status/` | GET | Get service status |
-
-#### LLM Evaluation Request
-
-```json
-{
-  "prompt": "Your question here",
-  "context": "Optional context",
-  "temperature": 0.7,
-  "max_tokens": 512
-}
-```
-
-#### SAM3 Evaluation Request
-
-```json
-{
-  "frame_b64": "base64-encoded JPEG",
-  "input_points": [[x1, y1], [x2, y2]],
-  "input_boxes": [[x1, y1, x2, y2]]
-}
-```
-
-### Streaming Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/stream/heatmap/` | GET | MJPEG video stream with heatmap overlay |
+- **Explicit Client/Host architecture** — the user chooses which computer runs each workload.
+- **Independent LLM and SAM routing** — LLM and SAM can run locally or remotely independently.
+- **Persistent JSON settings** — all configuration is saved to a JSON file outside the repository.
+- **Managed and external services** — the application can either manage the process lifecycle or connect to an already-running server.
+- **No hard-coded model families** — users can select any compatible model file without source changes.
+- **Raw argument support** — advanced users can supply arbitrary backend flags.
 
 ## Configuration
 
-### Host Configuration
+### Settings File Location
 
-Set via Host Portal form or environment variables:
+Settings are persisted to a versioned JSON file. The location depends on the platform:
 
-- `HOST_LISTEN_HOST` (default: `0.0.0.0`)
-- `HOST_LISTEN_PORT` (default: `8080`)
-- `model_path` - Path to LLM GGUF file
-- `weights_path` - Path to SAM3 checkpoint
+| Platform | Path |
+|----------|------|
+| Windows  | `%APPDATA%\AlmostARCADIA\settings.json` |
+| macOS    | `~/Library/Application Support/AlmostARCADIA/settings.json` |
+| Linux    | `$XDG_CONFIG_HOME/almost-arcadia/settings.json` or `~/.config/almost-arcadia/settings.json` |
 
-### Client Configuration
+Override with the `ALMOST_ARCADIA_CONFIG_DIR` environment variable:
 
-Set via Heatmap Dashboard controls:
-
-- **Dataset Path**: Video file path or leave empty for camera
-- **SAM3 Mode**: `local` or `remote`
-- **LLM Mode**: `local` or `remote`
-- **Host IP/Port**: Remote server address (when using remote mode)
-
-## MJPEG Streaming
-
-The heatmap dashboard uses Django's `StreamingHttpResponse` to serve MJPEG frames:
-
-1. Camera/video source is opened with OpenCV
-2. Each frame is processed through SAM3 inference
-3. Target coordinates are extracted and drawn as heatmap overlays
-4. Frames are encoded as JPEG and sent with `multipart/x-mixed-replace` boundary
-
-Stream URL format:
-```
-/stream/heatmap/?sam3_mode=remote&host_ip=192.168.1.100&host_port=8080
+```bash
+export ALMOST_ARCADIA_CONFIG_DIR=/path/to/custom/config
 ```
 
-## Security Notes
+### Settings Precedence
 
-- CSRF protection is enabled for all POST endpoints
-- Use `@csrf_exempt` only for API endpoints that receive external requests
-- In production, configure `ALLOWED_HOSTS` and use HTTPS
+1. Explicit JSON settings file (saved via UI or API)
+2. Environment variables (when no saved value exists)
+3. Hard-coded application defaults
 
-## Troubleshooting
+Saved configuration is NOT overwritten by environment variables on restart.
 
-### Model Loading Failures
+### Settings Schema (version 1)
 
-- Ensure model paths are absolute and files exist
-- Check file permissions
-- Verify model format (GGUF for LLM, PT for SAM3)
+```json
+{
+  "version": 1,
+  "client": {
+    "llm_mode": "local",
+    "sam3_mode": "remote",
+    "dataset_path": "",
+    "remote_host": {
+      "host": "127.0.0.1",
+      "port": 8080,
+      "scheme": "http"
+    },
+    "local_llm": {
+      "service_mode": "managed",
+      "executable": "llama-server",
+      "model_path": "/path/to/model.gguf",
+      "base_url": "",
+      "api_format": "llama-completion",
+      "port": 8081,
+      "arguments": []
+    },
+    "local_sam3": {
+      "service_mode": "managed",
+      "weights_path": "/path/to/sam3.pt",
+      "arguments": []
+    }
+  },
+  "host": {
+    "listen_ip": "0.0.0.0",
+    "listen_port": 8080,
+    "llm": { "...same shape as client LLM..." },
+    "sam3": { "...same shape as client SAM..." }
+  }
+}
+```
 
-### Stream Not Loading
+## Routing
 
-- Verify camera/video source is accessible
-- Check firewall settings for MJPEG port
-- Ensure OpenCV is properly installed
+LLM and SAM each have an independent execution mode. All four combinations are supported:
 
-### Remote Host Unreachable
+| LLM Mode | SAM Mode | Behavior |
+|----------|----------|----------|
+| local    | local    | Both run on this machine |
+| local    | remote   | LLM local, SAM sent to Host |
+| remote   | local    | LLM sent to Host, SAM local |
+| remote   | remote   | Both sent to Host |
 
-- Verify VPN/LAN connectivity
-- Check host IP and port configuration
-- Test with `vpn_tunnel_helper.verify_tunnel()`
+Legacy `routing_mode` (single global value) is automatically migrated on first load.
 
-## Future Enhancements
+## Service Modes
 
-- WebSocket support for real-time bidirectional communication
-- Multi-drone tracking with individual heatmaps
-- Persistent logging and analytics dashboard
-- Authentication and access control
+### Managed by Almost ARCADIA
+The application launches and controls the backend process:
+- **Start / Stop / Restart** buttons in the UI
+- Configurable executable, model path, host, port, and raw arguments
+- Startup timeout and health checks
+- Bounded log output (2000 lines max)
+- Process status visible in the UI
+- Command preview shows the generated launch command
+
+### Connect to Existing Server
+The user manages the backend independently:
+- Only need to configure the base URL and model ID
+- Almost ARCADIA does not start or stop the process
+- Health checks verify connectivity
+
+Toggling between modes preserves the configuration for both.
+
+## Managed Service Lifecycle
+
+Services have unique identities: `client:llm`, `client:sam3`, `host:llm`, `host:sam3`.
+
+- **Start**: spawns the process, waits for health check, reports status
+- **Stop**: terminates the process gracefully (SIGTERM, then SIGKILL after 5s)
+- **Restart**: stops then starts
+- **Status**: reports state (stopped, starting, running, unhealthy, stopping, failed, external)
+- **Logs**: recent output (up to 2000 lines)
+
+Inference requests use the already-running service. Starting a service per request is no longer done.
+
+## Host API
+
+The Host API uses **correct HTTP methods**:
+- `GET /api/host/status/` — listener and service status
+- `POST /api/host/evaluate-llm/` — LLM inference (uses Host's own configuration)
+- `POST /api/host/evaluate-sam3/` — SAM3 inference (uses Host's own weights path)
+
+The Host listener uses `ThreadingHTTPServer` for concurrent request handling. Status requests work while inference is running.
+
+## Raw Arguments
+
+Raw arguments are stored as a JSON array and appended after structured arguments. The backend's normal last-flag-wins precedence applies. The generated command is built as a `list[str]` for `subprocess.Popen` with `shell=False`.
+
+## Settings API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/settings/` | GET | Return current normalized settings |
+| `/api/settings/` | PUT | Merge request body and save |
+| `/api/settings/reset/` | POST | Reset to factory defaults |
+
+## Running
+
+```bash
+# Create environment
+conda create -n almost_arcadia python=3.10 -y
+conda activate almost_arcadia
+
+# Install
+pip install django requests opencv-python numpy python-dotenv
+
+# Run
+python manage.py runserver 0.0.0.0:8000
+```
+
+## Tests
+
+```bash
+# Run all tests
+python -m unittest discover -s core_orchestrator/tests -p "test_*.py" -v
+
+# Django system checks
+python manage.py check
+
+# Syntax validation
+python -m compileall .
+```
+
+Tests do not require model files, GPU, or a remote computer. All heavyweight components are mocked.
+
+## Recovering from Malformed Settings
+
+If the settings JSON file becomes malformed:
+1. The application logs the parsing failure
+2. It attempts to load the last valid backup (`settings.json.bak`)
+3. If backup is also malformed, factory defaults are loaded
+4. The malformed file is preserved as `settings.json.malformed` for inspection
+5. A warning is logged so the admin can investigate
+
+## API Endpoints
+
+### Host API (Background Listener)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/host/status/` | GET | Listener + service status |
+| `/api/host/evaluate-llm/` | POST | LLM inference (Host-owned config) |
+| `/api/host/evaluate-sam3/` | POST | SAM3 segmentation (Host-owned weights) |
+
+### Django Views
+
+| URL | View | Description |
+|-----|------|-------------|
+| `/` | `landing_page` | Landing page with role selection |
+| `/host/` | `host_portal` | Host configuration and service management |
+| `/client/` | `client_portal` | Client tool selection |
+| `/client/heatmap/` | `heatmap_dashboard` | Heatmap stream with routing config |
+| `/stream/heatmap/` | `heatmap_stream` | MJPEG video stream with overlays |
+| `/api/settings/` | `settings_view` | Settings GET/PUT |
+| `/api/settings/reset/` | `settings_reset` | Settings reset |

@@ -1,303 +1,282 @@
 {% extends "core_orchestrator/base.html" %}
 
-{% block title %}Drone Heatmap — Client Portal{% endblock %}
+{% block title %}Heatmap Dashboard — Almost ARCADIA{% endblock %}
 
 {% block content %}
-<div class="h-[calc(100vh-8rem)] flex flex-col">
-    <h1 class="text-2xl font-bold text-white mb-4 flex-shrink-0">Drone Heatmap Dashboard</h1>
+<div class="max-w-6xl mx-auto">
+    <h1 class="text-3xl font-bold text-white mb-4">Heatmap Dashboard</h1>
+    <p class="text-gray-400 mb-8">
+        Configure routing and model execution for heatmap streaming.
+        LLM and SAM can run independently as local or remote.
+    </p>
 
-    <div class="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6 min-h-0">
-        <!-- LEFT PANEL: Settings (1 column) -->
-        <div class="lg:col-span-1 bg-gray-800 rounded-xl p-5 shadow-lg border border-gray-700 overflow-y-auto">
-            <h2 class="text-lg font-semibold text-green-400 mb-5">Dataset Settings</h2>
-
-            <!-- Dataset Path -->
-            <div class="mb-6">
-                <label for="dataset_path" class="block text-sm font-medium text-gray-300 mb-2">
-                    Local Dataset Path
-                </label>
-                <input type="text" id="dataset_path" name="dataset_path"
-                       value="{{ config.dataset_path|default:'' }}"
-                       placeholder="/path/to/drone/video.mp4 or /path/to/frame_directory/"
-                       class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                <p class="text-xs text-gray-500 mt-1">
-                    Enter path to video file or directory containing image frames
-                </p>
-            </div>
-
-            <!-- Model Settings Section -->
-            <div class="mb-6">
-                <button type="button"
-                        onclick="document.getElementById('modelSettings').classList.toggle('hidden')"
-                        class="w-full flex items-center justify-between px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors">
-                    <span class="text-sm font-medium text-gray-300">Model Settings</span>
-                    <svg id="modelSettingsToggle" class="w-4 h-4 text-gray-400 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-                    </svg>
-                </button>
-
-                <div id="modelSettings" class="hidden mt-4 space-y-4">
-                    <!-- LLM Model Path -->
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <!-- Left: Configuration Panel -->
+        <div class="xl:col-span-1 space-y-6">
+            <!-- Dataset Configuration -->
+            <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
+                <h2 class="text-lg font-semibold text-green-400 mb-4">Dataset</h2>
+                <form id="configForm" class="space-y-4">
                     <div>
-                        <label for="llm_model_path" class="block text-xs font-medium text-gray-400 mb-1">
-                            LLM Model Path (.gguf)
-                        </label>
-                        <input type="text" id="llm_model_path" name="llm_model_path"
-                               value="{{ config.llm_model_path|default:'' }}"
-                               placeholder="/path/to/llama/model.gguf"
-                               class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Dataset Path</label>
+                        <input type="text" id="datasetPath" value="{{ config.dataset_path }}"
+                               placeholder="Video file path or leave empty"
+                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm">
                     </div>
 
-                    <!-- SAM3 Weights Path -->
-                    <div id="sam3WeightsContainer">
-                        <label for="sam3_weights_path" class="block text-xs font-medium text-gray-400 mb-1">
-                            SAM3 Weights Path (.pt)
-                        </label>
-                        <input type="text" id="sam3_weights_path" name="sam3_weights_path"
-                               value="{{ config.sam3_weights_path|default:'' }}"
-                               placeholder="/path/to/sam3/model.pt"
-                               class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                        <p id="sam3RemoteNote" class="hidden text-xs text-blue-400 mt-1">
-                            Remote Host uses its own configured model weights.
-                        </p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Inference Routing Mode -->
-            <div class="mb-6">
-                <h3 class="text-sm font-medium text-gray-300 mb-3">Inference Routing</h3>
-
-                <!-- SAM3 Mode Toggle -->
-                <div class="mb-4">
-                    <label class="block text-xs text-gray-400 mb-2">SAM3 Inference Mode</label>
-                    <div class="flex rounded-lg overflow-hidden border border-gray-600">
-                        <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.routing_mode == 'local' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="routing_mode" value="local"
-                                   {% if config.routing_mode == 'local' %}checked{% endif %}
-                                   class="sr-only" onchange="updateRemoteSection()">
-                            Local
-                        </label>
-                        <label class="flex-1 text-center cursor-pointer transition-colors py-2 text-sm font-medium
-                            {% if config.routing_mode == 'remote' %}bg-green-600 text-white{% else %}bg-gray-700 text-gray-400 hover:bg-gray-600{% endif %}">
-                            <input type="radio" name="routing_mode" value="remote"
-                                   {% if config.routing_mode == 'remote' %}checked{% endif %}
-                                   class="sr-only" onchange="updateRemoteSection()">
-                            Remote Host
-                        </label>
-                    </div>
-                </div>
-
-                <!-- Remote Host Settings (shown when remote selected) -->
-                <div id="remoteHostSection" class="{% if config.routing_mode != 'remote' %}hidden{% endif %} mt-4 p-4 bg-gray-700/50 rounded-lg border border-gray-600">
-                    <h4 class="text-xs font-medium text-gray-300 mb-2">Remote Host Configuration</h4>
-                    <div class="space-y-2">
-                        <div>
-                            <label for="remote_host_ip" class="block text-xs text-gray-400 mb-1">Host IP</label>
-                            <input type="text" id="remote_host_ip" name="remote_host_ip"
-                                   value="{{ config.remote_host_ip|default:'127.0.0.1' }}"
-                                   placeholder="192.168.1.100"
-                                   class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
-                        </div>
-                        <div>
-                            <label for="remote_host_port" class="block text-xs text-gray-400 mb-1">Host Port</label>
-                            <input type="number" id="remote_host_port" name="remote_host_port"
-                                   value="{{ config.remote_host_port|default:'8080' }}"
-                                   placeholder="8080"
-                                   class="w-full px-3 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500">
+                    <!-- LLM Mode -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">LLM Execution</label>
+                        <div class="flex space-x-4">
+                            <label class="flex items-center space-x-2">
+                                <input type="radio" name="llmMode" value="local"
+                                       {% if config.llm_mode == "local" %}checked{% endif %}
+                                       class="form-radio text-green-500">
+                                <span class="text-gray-300">Local</span>
+                            </label>
+                            <label class="flex items-center space-x-2">
+                                <input type="radio" name="llmMode" value="remote"
+                                       {% if config.llm_mode == "remote" %}checked{% endif %}
+                                       class="form-radio text-blue-500">
+                                <span class="text-gray-300">Remote (Host)</span>
+                            </label>
                         </div>
                     </div>
-                </div>
+
+                    <!-- SAM Mode -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">SAM Execution</label>
+                        <div class="flex space-x-4">
+                            <label class="flex items-center space-x-2">
+                                <input type="radio" name="samMode" value="local"
+                                       {% if config.sam3_mode == "local" %}checked{% endif %}
+                                       class="form-radio text-green-500">
+                                <span class="text-gray-300">Local</span>
+                            </label>
+                            <label class="flex items-center space-x-2">
+                                <input type="radio" name="samMode" value="remote"
+                                       {% if config.sam3_mode == "remote" %}checked{% endif %}
+                                       class="form-radio text-blue-500">
+                                <span class="text-gray-300">Remote (Host)</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Remote Host Configuration -->
+                    <div id="remoteConfigSection"
+                         class="p-4 bg-gray-900 rounded-lg border border-gray-600
+                                {% if config.llm_mode != "remote" and config.sam3_mode != "remote" %}hidden{% endif %}">
+                        <h3 class="text-sm font-medium text-blue-400 mb-3">Remote Host</h3>
+                        <div class="space-y-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-400 mb-1">Host IP</label>
+                                <input type="text" id="remoteHostIp" value="{{ config.remote_host_ip }}"
+                                       class="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-white text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-400 mb-1">Port</label>
+                                <input type="number" id="remoteHostPort" value="{{ config.remote_host_port }}"
+                                       class="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-white text-sm">
+                            </div>
+                            <button type="button" id="testConnectionBtn"
+                                    class="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
+                                Test Connection
+                            </button>
+                            <div id="connectionResult" class="text-xs text-gray-400"></div>
+                        </div>
+                    </div>
+
+                    <div class="flex space-x-3 pt-2">
+                        <button type="button" id="saveConfigBtn"
+                                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors text-sm">
+                            Save Settings
+                        </button>
+                        <a href="{% url 'core_orchestrator:heatmap_dashboard' %}"
+                           class="px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg font-medium transition-colors text-sm">
+                            Reset
+                        </a>
+                    </div>
+                </form>
             </div>
 
-            <!-- Apply Button -->
-            <button type="button"
-                    onclick="applySettings()"
-                    class="w-full px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors shadow-md">
-                Apply Settings & Restart Stream
-            </button>
-
-            <!-- Stream Info -->
-            <div class="mt-8 pt-5 border-t border-gray-700">
-                <h3 class="text-sm font-medium text-gray-300 mb-3">Current Stream Status</h3>
-                <div class="space-y-2 text-xs text-gray-400">
+            <!-- Status Panel -->
+            <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700" id="statusPanel">
+                <h2 class="text-lg font-semibold text-gray-300 mb-3">Status</h2>
+                <div class="space-y-2 text-sm">
                     <div class="flex justify-between">
-                        <span>Dataset:</span>
-                        <span class="text-white truncate ml-2 max-w-[200px]" title="{{ config.dataset_path|default:'None' }}">
-                            {{ config.dataset_path|default:"Camera" }}
-                        </span>
+                        <span class="text-gray-400">LLM Mode:</span>
+                        <span id="statusLlmMode" class="text-white font-medium">{{ config.llm_mode }}</span>
                     </div>
                     <div class="flex justify-between">
-                        <span>Mode:</span>
-                        <span class="text-white">{{ config.routing_mode|upper }}</span>
+                        <span class="text-gray-400">SAM Mode:</span>
+                        <span id="statusSamMode" class="text-white font-medium">{{ config.sam3_mode }}</span>
                     </div>
-                    {% if config.routing_mode == 'remote' %}
                     <div class="flex justify-between">
-                        <span>Remote Host:</span>
-                        <span class="text-white">{{ config.remote_host_ip }}:{{ config.remote_host_port }}</span>
+                        <span class="text-gray-400">Stream:</span>
+                        <span id="statusStream" class="text-yellow-400">Idle</span>
                     </div>
-                    {% endif %}
                 </div>
             </div>
         </div>
 
-        <!-- RIGHT PANEL: MJPEG Stream (3 columns) -->
-        <div class="lg:col-span-3 bg-gray-800 rounded-xl shadow-lg border border-gray-700 flex flex-col overflow-hidden">
-            <div class="p-3 border-b border-gray-700 flex items-center justify-between">
-                <h2 class="text-lg font-semibold text-green-400">Live Heatmap Stream</h2>
-                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-900 text-green-300">
-                    <svg class="w-2 h-2 mr-1.5 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
-                        <circle cx="4" cy="4" r="3" />
-                    </svg>
-                    LIVE
-                </span>
-            </div>
-
-            <div class="flex-1 flex items-center justify-center bg-black p-4 relative">
-                <!-- Error overlay -->
-                <div id="streamErrorOverlay" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-10">
-                    <div class="bg-red-900/90 border border-red-500 rounded-lg p-6 max-w-md text-center">
-                        <svg class="w-12 h-12 text-red-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        <h3 class="text-lg font-semibold text-red-300 mb-2">Stream Error</h3>
-                        <p class="text-sm text-gray-300 error-message">Failed to load video stream</p>
-                        <button type="button" onclick="hideStreamError()" class="mt-4 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors">
-                            Dismiss
+        <!-- Right: Stream Viewer -->
+        <div class="xl:col-span-2">
+            <div class="bg-gray-800 rounded-xl shadow-lg border border-gray-700 overflow-hidden">
+                <div class="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-700">
+                    <h2 class="text-lg font-semibold text-white">Live Stream</h2>
+                    <div class="flex items-center space-x-3">
+                        <button id="startStreamBtn"
+                                class="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors text-sm">
+                            Start Stream
+                        </button>
+                        <button id="stopStreamBtn"
+                                class="px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors text-sm"
+                                disabled>
+                            Stop
                         </button>
                     </div>
                 </div>
-                
-                <img id="streamImage"
-                     src="{% url 'core_orchestrator:heatmap_stream' %}?dataset_path={{ config.dataset_path }}&routing_mode={{ config.routing_mode }}&remote_host_ip={{ config.remote_host_ip }}&remote_host_port={{ config.remote_host_port }}&sam3_weights_path={{ config.sam3_weights_path }}"
-                     alt="Heatmap Stream"
-                     class="max-w-full max-h-full object-contain rounded-lg shadow-2xl">
-            </div>
 
-            <div class="p-3 border-t border-gray-700 bg-gray-850">
-                <p class="text-xs text-gray-500 text-center">
-                    <span class="text-blue-400">●</span> Blue markers indicate detected targets.
-                    <span class="text-green-400 ml-2">▢</span> Green boxes show bounding regions.
-                </p>
+                <div class="bg-black relative" style="min-height: 480px;">
+                    <img id="streamImage" src="" alt="Stream"
+                         class="w-full"
+                         style="display: none;">
+                    <div id="streamPlaceholder"
+                         class="absolute inset-0 flex items-center justify-center">
+                        <div class="text-center">
+                            <svg class="w-16 h-16 mx-auto mb-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                      d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                            <p class="text-gray-500 text-lg">Configure settings and click Start Stream</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="px-4 py-2 bg-gray-900 text-xs text-gray-500 flex justify-between">
+                    <span>Stream URL: /stream/heatmap/</span>
+                    <span id="streamDimensions">—</span>
+                </div>
             </div>
         </div>
     </div>
 </div>
+
+<script id="settingsData" type="application/json">{{ config.settings_json|safe }}</script>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-// Update remote host section visibility and SAM3 weights field state
-function updateRemoteSection() {
-    const remoteRadio = document.querySelector('input[name="routing_mode"][value="remote"]');
-    const localRadio = document.querySelector('input[name="routing_mode"][value="local"]');
-    const remoteSection = document.getElementById('remoteHostSection');
-    const sam3WeightsContainer = document.getElementById('sam3WeightsContainer');
-    const sam3WeightsInput = document.getElementById('sam3_weights_path');
-    const sam3RemoteNote = document.getElementById('sam3RemoteNote');
+let currentStreamUrl = null;
+let streamActive = false;
 
-    if (remoteRadio && remoteRadio.checked) {
-        // Remote Host mode selected
-        remoteSection.classList.remove('hidden');
-
-        // Disable/hide the local SAM3 weights path and show helper note
-        sam3WeightsInput.disabled = true;
-        sam3WeightsInput.classList.add('opacity-50', 'cursor-not-allowed');
-        sam3RemoteNote.classList.remove('hidden');
+// Toggle remote config visibility based on routing selections
+function updateRemoteVisibility() {
+    const llmRemote = document.querySelector('input[name="llmMode"]:checked')?.value === 'remote';
+    const samRemote = document.querySelector('input[name="samMode"]:checked')?.value === 'remote';
+    const section = document.getElementById('remoteConfigSection');
+    if (llmRemote || samRemote) {
+        section.classList.remove('hidden');
     } else {
-        // Local mode selected
-        remoteSection.classList.add('hidden');
-
-        // Enable SAM3 weights path and hide helper note
-        sam3WeightsInput.disabled = false;
-        sam3WeightsInput.classList.remove('opacity-50', 'cursor-not-allowed');
-        sam3RemoteNote.classList.add('hidden');
+        section.classList.add('hidden');
     }
 }
 
-// Apply settings and reload stream
-function applySettings() {
-    const datasetPath = document.getElementById('dataset_path').value;
-    const llmModelPath = document.getElementById('llm_model_path').value;
-    const sam3WeightsPath = document.getElementById('sam3_weights_path').value;
-    const routingMode = document.querySelector('input[name="routing_mode"]:checked')?.value || 'local';
-    const remoteHostIp = document.getElementById('remote_host_ip').value;
-    const remoteHostPort = document.getElementById('remote_host_port').value;
+document.querySelectorAll('input[name="llmMode"], input[name="samMode"]').forEach(radio => {
+    radio.addEventListener('change', updateRemoteVisibility);
+});
+updateRemoteVisibility();
 
-    // Build query string
+// Save configuration
+document.getElementById('saveConfigBtn').addEventListener('click', async () => {
+    const clientSettings = {
+        llm_mode: document.querySelector('input[name="llmMode"]:checked')?.value || 'local',
+        sam3_mode: document.querySelector('input[name="samMode"]:checked')?.value || 'local',
+        dataset_path: document.getElementById('datasetPath').value,
+        remote_host: {
+            host: document.getElementById('remoteHostIp').value,
+            port: parseInt(document.getElementById('remoteHostPort').value) || 8080,
+            scheme: 'http',
+        },
+    };
+    try {
+        const resp = await fetch('/api/settings/', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({client: clientSettings}),
+        });
+        const result = await resp.json();
+        if (result.client) {
+            alert('Settings saved.');
+            document.getElementById('statusLlmMode').textContent = result.client.llm_mode;
+            document.getElementById('statusSamMode').textContent = result.client.sam3_mode;
+        } else {
+            alert('Failed to save: ' + JSON.stringify(result));
+        }
+    } catch(e) {
+        alert('Failed to save: ' + e.message);
+    }
+});
+
+// Test connection
+document.getElementById('testConnectionBtn').addEventListener('click', async () => {
+    const ip = document.getElementById('remoteHostIp').value;
+    const port = document.getElementById('remoteHostPort').value;
+    const resultEl = document.getElementById('connectionResult');
+    resultEl.textContent = 'Testing...';
+    try {
+        const resp = await fetch(`http://${ip}:${port}/api/host/status/`);
+        const data = await resp.json();
+        resultEl.textContent = `Connected — Status: ${data.status || 'unknown'}`;
+        resultEl.className = 'text-xs text-green-400';
+    } catch(e) {
+        resultEl.textContent = `Connection failed: ${e.message}`;
+        resultEl.className = 'text-xs text-red-400';
+    }
+});
+
+// Stream control
+document.getElementById('startStreamBtn').addEventListener('click', () => {
+    const datasetPath = document.getElementById('datasetPath').value;
+    const llmMode = document.querySelector('input[name="llmMode"]:checked')?.value || 'local';
+    const samMode = document.querySelector('input[name="samMode"]:checked')?.value || 'local';
+    const remoteHostIp = document.getElementById('remoteHostIp').value;
+    const remoteHostPort = document.getElementById('remoteHostPort').value;
+
     const params = new URLSearchParams();
-    params.set('dataset_path', datasetPath);
-    params.set('llm_model_path', llmModelPath);
-    params.set('sam3_weights_path', sam3WeightsPath);
-    params.set('routing_mode', routingMode);
+    if (datasetPath) params.set('dataset_path', datasetPath);
+    params.set('llm_mode', llmMode);
+    params.set('sam3_mode', samMode);
     params.set('remote_host_ip', remoteHostIp);
     params.set('remote_host_port', remoteHostPort);
 
-    // Update stream image src to reload
-    const streamImage = document.getElementById('streamImage');
-    streamImage.src = '{% url "core_orchestrator:heatmap_stream" %}' + '?' + params.toString();
-}
+    const streamUrl = `/stream/heatmap/?${params.toString()}`;
+    currentStreamUrl = streamUrl;
 
-// Stream error handling
-let errorDisplayTimeout = null;
-
-// Monitor stream image for errors
-streamImage.addEventListener('error', function(e) {
-    console.error('Stream image failed to load:', e);
-    
-    // Clear any existing timeout
-    if (errorDisplayTimeout) {
-        clearTimeout(errorDisplayTimeout);
-    }
-    
-    // Show error message
-    showStreamError('Failed to load video stream. The server may be unavailable or the video source is invalid.');
-    
-    // Auto-hide after 5 seconds
-    errorDisplayTimeout = setTimeout(hideStreamError, 5000);
+    const img = document.getElementById('streamImage');
+    img.src = streamUrl;
+    img.style.display = 'block';
+    document.getElementById('streamPlaceholder').style.display = 'none';
+    document.getElementById('startStreamBtn').disabled = true;
+    document.getElementById('stopStreamBtn').disabled = false;
+    document.getElementById('statusStream').textContent = 'Streaming';
+    document.getElementById('statusStream').className = 'text-green-400';
+    streamActive = true;
 });
 
-streamImage.addEventListener('load', function() {
-    // Hide error when stream loads successfully
-    hideStreamError();
-    if (errorDisplayTimeout) {
-        clearTimeout(errorDisplayTimeout);
+document.getElementById('stopStreamBtn').addEventListener('click', () => {
+    const img = document.getElementById('streamImage');
+    if (currentStreamUrl) {
+        img.src = '';
     }
+    img.style.display = 'none';
+    document.getElementById('streamPlaceholder').style.display = 'flex';
+    document.getElementById('startStreamBtn').disabled = false;
+    document.getElementById('stopStreamBtn').disabled = true;
+    document.getElementById('statusStream').textContent = 'Stopped';
+    document.getElementById('statusStream').className = 'text-yellow-400';
+    streamActive = false;
+    currentStreamUrl = null;
 });
-
-// Show error overlay
-function showStreamError(message) {
-    const overlay = document.getElementById('streamErrorOverlay');
-    if (overlay) {
-        overlay.querySelector('.error-message').textContent = message;
-        overlay.classList.remove('hidden');
-    }
-}
-
-// Hide error overlay
-function hideStreamError() {
-    const overlay = document.getElementById('streamErrorOverlay');
-    if (overlay) {
-        overlay.classList.add('hidden');
-    }
-}
-
-// Toggle model settings dropdown
-document.getElementById('modelSettingsToggle').addEventListener('click', function() {
-    const modelSettings = document.getElementById('modelSettings');
-    const isHidden = modelSettings.classList.contains('hidden');
-
-    if (isHidden) {
-        modelSettings.classList.remove('hidden');
-        this.style.transform = 'rotate(180deg)';
-    } else {
-        modelSettings.classList.add('hidden');
-        this.style.transform = 'rotate(0deg)';
-    }
-});
-
-// Initialize on page load
-updateRemoteSection();
 </script>
 {% endblock %}

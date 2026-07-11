@@ -5,16 +5,22 @@ Tracks local background child-process lifecycles via ``subprocess.Popen``.
 Provides PID mapping, safe stdout/stderr capture, and graceful / forced
 cleanup so zombie processes never accumulate.
 
-Designed as a **singleton-registry** – call ``ProcessManager.instance()``
+Designed as a **singleton-registry** -- call ``ProcessManager.instance()``
 from anywhere in the app.
 """
+
+from __future__ import annotations
 
 import logging
 import subprocess
 import threading
+from collections import deque
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of log lines to retain per process
+MAX_LOG_LINES = 2000
 
 
 class _ProcessRecord:
@@ -26,8 +32,8 @@ class _ProcessRecord:
         self.pid = pid
         self.process = process
         self.name = name
-        self.stdout_buf: list[str] = []
-        self.stderr_buf: list[str] = []
+        self.stdout_buf: deque[str] = deque(maxlen=MAX_LOG_LINES)
+        self.stderr_buf: deque[str] = deque(maxlen=MAX_LOG_LINES)
         self.alive = True
 
     def __repr__(self) -> str:  # noqa: D401
@@ -41,13 +47,17 @@ class ProcessManager:
     Features
     --------
     * Spawn background binaries with automatic stdout/stderr streaming.
-    * Track processes by name → one process per name (latest spawn wins).
-    * Safe ``terminate()`` (SIGTERM) and ``kill()`` (SIGKILL) methods.
-    * In-memory stdout/stderr buffers for debugging.
+    * Track processes by name -- one process per name (latest spawn wins).
+    * Safe ``terminate()`` (SIGTERM) and ``kill()`` (SIGKILL) methods
+      with fallback to force kill after 5-second grace period.
+    * Bounded stdout/stderr buffers (``deque(maxlen=2000)``) to prevent
+      unbounded memory growth.
+    * ``process.poll()`` is the source of truth for process-alive status;
+      EOF on a single stream does NOT mark the process dead.
     """
 
     _instance: Optional["ProcessManager"] = None
-    _lock = threading.Lock()
+    _init_lock = threading.Lock()
 
     def __init__(self) -> None:
         self._processes: dict[str, _ProcessRecord] = {}
@@ -57,9 +67,9 @@ class ProcessManager:
     def instance(cls) -> "ProcessManager":
         """Return the singleton ProcessManager instance."""
         if cls._instance is None:
-            with cls._lock:
+            with cls._init_lock:
                 if cls._instance is None:
-                    cls._instance = ProcessManager()
+                    cls._instance = cls()
         return cls._instance
 
     def start(
@@ -80,7 +90,6 @@ class ProcessManager:
                 logger.warning("Process %s already running, stopping first", name)
                 self._stop_no_lock(name, force=False)
 
-        # Spawn the process
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -112,22 +121,23 @@ class ProcessManager:
         return proc.pid
 
     def _read_stream(
-        self, record: _ProcessRecord, buf: list[str], stream: Optional[object]
+        self, record: _ProcessRecord, buf: deque[str], stream: Optional[object]
     ) -> None:
-        """Thread target to read a stream into buffer."""
+        """Thread target to read a stream into a bounded buffer."""
         if stream is None:
             return
         try:
             for line in stream:
-                buf.append(line)
+                buf.append(line.rstrip("\n"))
                 logger.debug("[%s] %s", record.name, line.rstrip())
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error reading stream for %s: %s", record.name, exc)
-        finally:
-            record.alive = False
+        except Exception:  # noqa: BLE001
+            logger.exception("Error reading stream for %s", record.name)
+        # NOTE: DO NOT set record.alive = False here.
+        # EOF on one stream does not mean the process is dead --
+        # use process.poll() as the source of truth.
 
     def is_running(self, name: str) -> bool:
-        """Check if a named process is still alive."""
+        """Check if a named process is still alive via poll()."""
         with self._lock:
             if name not in self._processes:
                 return False
@@ -184,8 +194,8 @@ class ProcessManager:
             record.alive = False
             del self._processes[name]
             return True
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error stopping process %s: %s", name, exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("Error stopping process %s", name)
             return False
 
     def kill(self, name: str) -> bool:
@@ -202,8 +212,8 @@ class ProcessManager:
             if name not in self._processes:
                 return ([], [])
             record = self._processes[name]
-            stdout = record.stdout_buf.copy()
-            stderr = record.stderr_buf.copy()
+            stdout = list(record.stdout_buf)
+            stderr = list(record.stderr_buf)
             if clear:
                 record.stdout_buf.clear()
                 record.stderr_buf.clear()

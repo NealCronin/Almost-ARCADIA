@@ -12,6 +12,10 @@ urlpatterns = [
     # --- Public / Landing ---
     path("", views.landing_page, name="landing"),
 
+    # --- Settings API ---
+    path("api/settings/", views.settings_view, name="settings"),
+    path("api/settings/reset/", views.settings_reset, name="settings_reset"),
+
     # --- Host Portal ---
     path("host/", views.host_portal, name="host_portal"),
     path("api/host/evaluate-llm/", views.host_evaluate_llm, name="host_evaluate_llm"),

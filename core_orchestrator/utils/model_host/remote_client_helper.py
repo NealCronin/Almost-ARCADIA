@@ -2,7 +2,6 @@
 remote_client_helper.py
 
 Client-side helper for making requests to a remote Host running SAM3/LLM inference.
-
 This module provides the RemoteClientHelper class for communicating with
 the Host API server over HTTP.
 """
@@ -13,6 +12,7 @@ import base64
 import logging
 from typing import Any, Optional
 
+import numpy as np
 import requests
 
 logger = logging.getLogger(__name__)
@@ -56,37 +56,90 @@ class RemoteClientHelper:
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = REQUEST_TIMEOUT,
     ) -> None:
-        """
-        Initialize the remote client helper.
-
-        Parameters
-        ----------
-        base_url : str
-            Base URL of the Host API server (e.g., "http://127.0.0.1:8080").
-        timeout : int
-            Request timeout in seconds.
-        """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._session = requests.Session()
 
+    # -- Public methods -----------------------------------------------------
+
+    def evaluate_llm(
+        self,
+        prompt: str,
+        context: Optional[str] = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Send an LLM evaluation request to the remote Host (POST)."""
+        payload = {"prompt": prompt}
+        if context:
+            payload["context"] = context
+        payload.update({k: v for k, v in kwargs.items() if v is not None})
+        return self._make_request("POST", "/api/host/evaluate-llm/", json_data=payload)
+
+    def evaluate_sam3(
+        self,
+        image: Any,
+        input_points: Optional[list[list[float]]] = None,
+        input_boxes: Optional[list[list[float]]] = None,
+    ) -> dict[str, Any]:
+        """
+        Send a SAM3 segmentation request to the remote Host (POST).
+
+        NOTE: The Host manages its own SAM3 weights path configuration.
+        The client does NOT send weights_path - it is read from the Host's
+        configuration on the server side.
+        """
+        cv2 = _get_cv2()
+        if cv2 is None:
+            raise RemoteClientError("OpenCV not available for image encoding")
+
+        success, png_bytes = cv2.imencode(".png", image)
+        if not success:
+            raise RemoteClientError("Failed to encode image")
+
+        frame_b64 = base64.b64encode(png_bytes).decode("utf-8")
+
+        payload = {"frame_b64": frame_b64}
+        if input_points:
+            payload["input_points"] = input_points
+        if input_boxes:
+            payload["input_boxes"] = input_boxes
+
+        return self._make_request("POST", "/api/host/evaluate-sam3/", json_data=payload)
+
+    def get_status(self) -> dict[str, Any]:
+        """Get the remote Host status (GET)."""
+        return self._make_request("GET", "/api/host/status/")
+
+    def check_connection(self) -> bool:
+        """Check if the remote Host is reachable."""
+        try:
+            status = self.get_status()
+            return "status" in status or "running" in status
+        except RemoteClientError:
+            return False
+
+    # -- Internal helpers ---------------------------------------------------
+
     def _make_request(
         self,
+        method: str,
         endpoint: str,
         json_data: Optional[dict[str, Any]] = None,
         files: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """
-        Make a POST request to the Host API.
+        Make an HTTP request to the Host API with retries.
 
         Parameters
         ----------
+        method : str
+            HTTP method ("GET" or "POST").
         endpoint : str
-            API endpoint (e.g., "/api/host/evaluate-sam3/").
+            API endpoint path.
         json_data : dict | None
             JSON payload for the request.
         files : dict | None
-            Files to upload (e.g., image data).
+            Files to upload.
 
         Returns
         -------
@@ -99,159 +152,39 @@ class RemoteClientHelper:
             If the request fails after retries.
         """
         url = f"{self.base_url}{endpoint}"
-        retries = MAX_RETRIES
 
-        for attempt in range(retries):
+        for attempt in range(MAX_RETRIES):
             try:
-                resp = self._session.post(
-                    url,
-                    json=json_data,
-                    files=files,
-                    timeout=self.timeout,
-                )
+                if method.upper() == "GET":
+                    resp = self._session.get(url, timeout=self.timeout)
+                else:
+                    resp = self._session.post(
+                        url,
+                        json=json_data,
+                        files=files,
+                        timeout=self.timeout,
+                    )
                 resp.raise_for_status()
                 return resp.json()
 
             except requests.RequestException as exc:
-                if attempt < retries - 1:
+                if attempt < MAX_RETRIES - 1:
                     delay = RETRY_BACKOFF * (2**attempt)
                     logger.warning(
                         "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                         attempt + 1,
-                        retries,
+                        MAX_RETRIES,
                         delay,
                         exc,
                     )
                     import time
-
                     time.sleep(delay)
                 else:
                     raise RemoteClientError(
-                        f"Failed after {retries} attempts: {exc}"
+                        f"Failed after {MAX_RETRIES} attempts: {exc}"
                     ) from exc
 
         raise RemoteClientError("Unexpected retry loop exit")
-
-    def evaluate_llm(
-        self,
-        prompt: str,
-        context: Optional[str] = None,
-        **kwargs,
-    ) -> dict[str, Any]:
-        """
-        Send an LLM evaluation request to the remote Host.
-
-        Parameters
-        ----------
-        prompt : str
-            The input prompt.
-        context : str | None
-            Optional context for the evaluation.
-        **kwargs
-            Additional parameters (max_tokens, temperature, etc.).
-
-        Returns
-        -------
-        dict[str, Any]
-            Response containing the generated text.
-
-        Raises
-        ------
-        RemoteClientError
-            If the request fails.
-        """
-        payload = {"prompt": prompt}
-        if context:
-            payload["context"] = context
-
-        # Add generation parameters
-        payload.update({k: v for k, v in kwargs.items() if v is not None})
-
-        result = self._make_request("/api/host/evaluate-llm/", json_data=payload)
-        return result
-
-    def evaluate_sam3(
-        self,
-        image: Any,
-        input_points: Optional[list[list[float]]] = None,
-        input_boxes: Optional[list[list[float]]] = None,
-    ) -> dict[str, Any]:
-        """
-        Send a SAM3 segmentation request to the remote Host.
-
-        NOTE: The Host manages its own SAM3 weights path configuration.
-        The client does NOT send weights_path - it is read from the Host's
-        configuration on the server side.
-
-        Parameters
-        ----------
-        image : Any
-            Input image as numpy array.
-        input_points : list[list[float]] | None
-            Point prompts.
-        input_boxes : list[list[float]] | None
-            Box prompts.
-
-        Returns
-        -------
-        dict[str, Any]
-            Response containing segmentation masks and coordinates.
-
-        Raises
-        ------
-        RemoteClientError
-            If the request fails.
-        """
-        # Encode image as base64 PNG
-        cv2 = _get_cv2()
-        if cv2 is None:
-            raise RemoteClientError("OpenCV not available for image encoding")
-
-        success, png_bytes = cv2.imencode(".png", image)
-        if not success:
-            raise RemoteClientError("Failed to encode image")
-
-        # Encode as base64 string for JSON payload
-        frame_b64 = base64.b64encode(png_bytes).decode("utf-8")
-
-        payload = {"frame_b64": frame_b64}
-
-        if input_points:
-            payload["input_points"] = input_points
-        if input_boxes:
-            payload["input_boxes"] = input_boxes
-
-        # NOTE: weights_path is NOT included in payload
-        # The Host reads sam3_weights_path from its own configuration
-
-        result = self._make_request("/api/host/evaluate-sam3/", json_data=payload)
-        return result
-
-    def get_status(self) -> dict[str, Any]:
-        """
-        Get the remote Host status.
-
-        Returns
-        -------
-        dict[str, Any]
-            Host status information.
-        """
-        return self._make_request("/api/host/status/")
-
-    def check_connection(self) -> bool:
-        """
-        Check if the remote Host is reachable.
-
-        Returns
-        -------
-        bool
-            True if the Host responds to status requests.
-        """
-        try:
-            status = self.get_status()
-            return "status" in status or "running" in status
-        except RemoteClientError:
-            return False
 
 
 # ------------------------------------------------------------------
@@ -274,23 +207,10 @@ def _get_cv2():
 
 
 def cv2_imencode(frame: Any) -> tuple[bool, bytes]:
-    """
-    Encode an image frame to PNG bytes.
-
-    Parameters
-    ----------
-    frame : Any
-        Input image as numpy array.
-
-    Returns
-    -------
-    tuple[bool, bytes]
-        (success, encoded_bytes). Returns (False, b"") on failure.
-    """
+    """Encode an image frame to PNG bytes."""
     cv2 = _get_cv2()
     if cv2 is None:
         return (False, b"")
-
     try:
         success, buffer = cv2.imencode(".png", frame)
         return (success, buffer.tobytes() if success else b"")
@@ -302,20 +222,11 @@ def cv2_imdecode(buf: Any) -> Any:
     """
     Decode PNG bytes to an image frame.
 
-    Parameters
-    ----------
-    buf : Any
-        Encoded image bytes.
-
-    Returns
-    -------
-    Any | None
-        Decoded image as numpy array, or None on failure.
+    Uses module-level numpy import for safety.
     """
     cv2 = _get_cv2()
     if cv2 is None:
         return None
-
     try:
         arr = np.frombuffer(buf, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -328,27 +239,10 @@ def image_to_base64(
     format: str = "png",
     quality: int = 95,
 ) -> str:
-    """
-    Encode an image to a base64 string.
-
-    Parameters
-    ----------
-    image : Any
-        Input image as numpy array.
-    format : str
-        Image format ("png" or "jpeg").
-    quality : int
-        JPEG quality (1-100). Ignored for PNG.
-
-    Returns
-    -------
-    str
-        Base64-encoded image string.
-    """
+    """Encode an image to a base64 string."""
     cv2 = _get_cv2()
     if cv2 is None:
         raise RemoteClientError("OpenCV not available")
-
     try:
         if format.lower() == "png":
             success, buffer = cv2.imencode(".png", image)
@@ -356,39 +250,21 @@ def image_to_base64(
             success, buffer = cv2.imencode(
                 ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality]
             )
-
         if not success:
             raise RemoteClientError("Failed to encode image")
-
         return base64.b64encode(buffer).decode("utf-8")
     except Exception as exc:
         raise RemoteClientError(f"Image encoding failed: {exc}") from exc
 
 
 def base64_to_image(b64_string: str) -> Optional[Any]:
-    """
-    Decode a base64 string to an image.
-
-    Parameters
-    ----------
-    b64_string : str
-        Base64-encoded image string.
-
-    Returns
-    -------
-    Any | None
-        Decoded image as numpy array, or None on failure.
-    """
+    """Decode a base64 string to an image."""
     try:
-        import numpy as np
-
         decoded = base64.b64decode(b64_string)
         arr = np.frombuffer(decoded, dtype=np.uint8)
-
         cv2 = _get_cv2()
         if cv2 is None:
             return None
-
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception:
         return None

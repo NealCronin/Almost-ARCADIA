@@ -1,6 +1,7 @@
 """
 Tests for heatmap_stream endpoint.
 """
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -15,6 +16,7 @@ class HeatmapStreamTests(TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
+        os.environ.setdefault('ALMOST_ARCADIA_CONFIG_DIR', 'C:/Users/Neal/AppData/Local/Temp/test_arcadia')
         self.factory = RequestFactory()
 
     def test_heatmap_stream_returns_streaming_response(self):
@@ -62,10 +64,16 @@ class HeatmapStreamTests(TestCase):
 
     def test_heatmap_stream_opencv_not_installed(self):
         """Test heatmap_stream handles missing OpenCV gracefully."""
-        # Mock __import__ to raise ImportError for cv2
-        with patch('builtins.__import__', side_effect=ImportError("cv2 not found")):
+        # Only mock the cv2 module import, not __import__ globally
+        import builtins
+        original_import = builtins.__import__
+        def mock_import(name, *args, **kwargs):
+            if name == 'cv2':
+                raise ImportError("cv2 not found")
+            return original_import(name, *args, **kwargs)
+        
+        with patch('builtins.__import__', side_effect=mock_import):
             request = self.factory.get('/stream/heatmap/')
-            # Should still return a streaming response even with OpenCV error
             response = heatmap_stream(request)
             self.assertIsInstance(response, StreamingHttpResponse)
 
