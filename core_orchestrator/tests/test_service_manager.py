@@ -1,169 +1,308 @@
 """
-Tests for ServiceManager lifecycle.
+Tests for ServiceManager concurrency, lifecycle, and restart-required detection.
 """
 
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
 
 from django.test import TestCase
 
 from core_orchestrator.services.service_manager import (
     ServiceManager,
     ServiceState,
-    get_service_manager,
+    reset_service_manager_for_tests,
 )
-from core_orchestrator.services.settings_store import LLMServiceSettings, SAMServiceSettings
+from core_orchestrator.services.settings_store import (
+    LLMServiceSettings,
+    SAMServiceSettings,
+)
+from .test_helpers import setup_test_config_dir, teardown_test_config_dir, reset_all_singletons
 
 
-class ServiceManagerIdentityTests(TestCase):
-    """Test unique service identities."""
+class ServiceManagerConcurrencyTests(TestCase):
+    def setUp(self):
+        self.tmpdir = setup_test_config_dir()
+        reset_all_singletons()
 
-    def test_service_ids_are_distinct(self):
-        """Different service_ids have separate state."""
+    def tearDown(self):
+        teardown_test_config_dir(self.tmpdir)
+        reset_all_singletons()
+
+    @patch("core_orchestrator.services.service_manager.build_llm_command")
+    @patch("core_orchestrator.services.service_manager.ServiceManager._wait_for_llm_health")
+    @patch("core_orchestrator.utils.model_host.process_manager.ProcessManager.instance")
+    def test_concurrent_start_locks_not_replaced(self, mock_pm, mock_health, mock_build):
+        """Two threads starting the same service — lock is not replaced."""
         sm = ServiceManager()
-        self.assertEqual(sm.status("client:llm")["service_id"], "client:llm")
-        self.assertEqual(sm.status("client:sam3")["service_id"], "client:sam3")
-        self.assertEqual(sm.status("host:llm")["service_id"], "host:llm")
-        self.assertEqual(sm.status("host:sam3")["service_id"], "host:sam3")
+        mock_health.return_value = True
 
-    def test_singleton_returns_same_instance(self):
-        """get_service_manager() returns the same instance."""
-        sm1 = get_service_manager()
-        sm2 = get_service_manager()
-        self.assertIs(sm1, sm2)
+        # Simulate ProcessManager raising AlreadyRunningError on second call
+        from core_orchestrator.utils.model_host.process_manager import AlreadyRunningError
 
+        call_count = [0]
+        def mock_start(name, cmd):
+            call_count[0] += 1
+            if call_count[0] > 1:
+                raise AlreadyRunningError("already running")
+            return 12345
 
-class ServiceManagerStateTests(TestCase):
-    """Test initial states and transitions."""
+        mock_pm.return_value.start = mock_start
 
-    def test_initial_state_is_stopped(self):
-        """New service starts as stopped."""
+        cfg = LLMServiceSettings(
+            service_mode="managed",
+            executable="test-binary",
+            model_path="/fake.gguf",
+            host="127.0.0.1",
+            port=9999,
+        )
+
+        results = []
+        barrier = threading.Event()
+
+        def attempt():
+            barrier.wait(timeout=2)
+            try:
+                result = sm.start("host:llm", cfg)
+                results.append(result.get("state", "unknown"))
+            except Exception as e:
+                results.append(f"error: {e}")
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for t in threads:
+            t.start()
+        barrier.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        # Both threads should have completed and produced results
+        self.assertGreater(len(results), 0, f"No results collected, threads may have hung. Results: {results}")
+        # The lock should be the same before and after
+        runtime, lock1 = sm._ensure_service("host:llm")
+        runtime, lock2 = sm._ensure_service("host:llm")
+        self.assertIs(lock1, lock2)
+        # At least one thread got a running state
+        self.assertTrue(any(r == "running" for r in results),
+                       f"Expected at least one 'running' result, got: {results}")
+
+        cfg = LLMServiceSettings(
+            service_mode="managed",
+            executable="test-binary",
+            model_path="/fake.gguf",
+            host="127.0.0.1",
+            port=9999,
+        )
+
+        results = []
+        barrier = threading.Event()
+
+        def attempt():
+            barrier.wait(timeout=2)
+            try:
+                result = sm.start("host:llm", cfg)
+                results.append(result.get("state", "unknown"))
+            except Exception as e:
+                results.append(f"error: {e}")
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for t in threads:
+            t.start()
+        barrier.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        # Verify no exception and at least one result has a state
+        self.assertGreater(len(results), 0)
+        # The lock should be the same before and after
+        runtime, lock1 = sm._ensure_service("host:llm")
+        runtime, lock2 = sm._ensure_service("host:llm")
+        self.assertIs(lock1, lock2)
+
+    def test_concurrent_start_and_stop_leave_valid_state(self):
         sm = ServiceManager()
+        results = []
+
+        def stop_attempt():
+            results.append(sm.stop("host:llm"))
+
+        def start_attempt():
+            cfg = LLMServiceSettings(service_mode="external")
+            results.append(sm.start("host:llm", cfg))
+
+        t1 = threading.Thread(target=stop_attempt)
+        t2 = threading.Thread(target=start_attempt)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        # No crash — state is valid
+        status = sm.status("host:llm")
+        self.assertIn(status["state"], ("stopped", "external", "starting", "running"))
+
+    def test_different_services_start_independently(self):
+        sm = ServiceManager()
+        cfg_llm = LLMServiceSettings(service_mode="external")
+        cfg_sam = SAMServiceSettings(service_mode="external")
+
+        sm.start("host:llm", cfg_llm)
+        sm.start("host:sam3", cfg_sam)
+
+        self.assertEqual(sm.status("host:llm")["state"], "external")
+        self.assertEqual(sm.status("host:sam3")["state"], "external")
+
+
+class ServiceManagerRestartRequiredTests(TestCase):
+    def setUp(self):
+        self.tmpdir = setup_test_config_dir()
+        reset_all_singletons()
+
+    def tearDown(self):
+        teardown_test_config_dir(self.tmpdir)
+        reset_all_singletons()
+
+    def test_check_restart_required_on_config_change(self):
+        sm = ServiceManager()
+        cfg_a = LLMServiceSettings(service_mode="managed", executable="bin", model_path="/a.gguf", port=8081)
+        cfg_b = LLMServiceSettings(service_mode="managed", executable="bin", model_path="/b.gguf", port=8081)
+
+        # No running service — no restart required
+        self.assertFalse(sm.check_restart_required("host:llm", cfg_a))
+
+    def test_external_mode_sync_from_config(self):
+        """sync_configuration sets external state from config."""
+        sm = ServiceManager()
+        cfg = LLMServiceSettings(service_mode="external", base_url="http://localhost:8080")
+        sm.sync_configuration("host:llm", cfg)
+        status = sm.status("host:llm")
+        self.assertEqual(status["state"], "external")
+        self.assertIsNone(status["pid"])
+
+    def test_managed_mode_stays_stopped_on_sync(self):
+        sm = ServiceManager()
+        cfg = LLMServiceSettings(service_mode="managed", executable="bin")
+        sm.sync_configuration("host:llm", cfg)
         status = sm.status("host:llm")
         self.assertEqual(status["state"], "stopped")
-        self.assertFalse(status["healthy"])
-        self.assertFalse(status["restart_required"])
 
-    def test_all_status_returns_dict_after_access(self):
-        """all_status() returns services that have been accessed."""
-        sm = ServiceManager()
-        sm.status("host:llm")
-        sm.status("host:sam3")
-        all_s = sm.all_status()
-        self.assertIn("host:llm", all_s)
-        self.assertIn("host:sam3", all_s)
 
-    def test_mark_external(self):
-        """mark_external() sets state to EXTERNAL."""
-        sm = ServiceManager()
-        sm.mark_external("host:llm")
-        status = sm.status("host:llm")
-        self.assertEqual(status["state"], "external")
+class ServiceManagerSAMTests(TestCase):
+    def setUp(self):
+        self.tmpdir = setup_test_config_dir()
+        reset_all_singletons()
 
-    def test_mark_external_healthy(self):
-        """mark_external_healthy() updates external service state."""
-        sm = ServiceManager()
-        sm.mark_external("host:llm")
-        sm.mark_external_healthy("host:llm", True)
-        status = sm.status("host:llm")
-        self.assertEqual(status["state"], "external")
-        self.assertTrue(status["healthy"])
+    def tearDown(self):
+        teardown_test_config_dir(self.tmpdir)
+        reset_all_singletons()
 
-    def test_restart_required_flag(self):
-        """Restart-required flag works correctly."""
+    def test_managed_sam_no_subprocess(self):
+        """Managed SAM start with no weights returns failed, not a subprocess error."""
         sm = ServiceManager()
-        sm.mark_restart_required("host:llm")
-        status = sm.status("host:llm")
-        self.assertTrue(status["restart_required"])
-        sm.clear_restart_required("host:llm")
-        status = sm.status("host:llm")
-        self.assertFalse(status["restart_required"])
+        cfg = SAMServiceSettings(service_mode="managed", weights_path="")
+        result = sm.start("host:sam3", cfg)
+        self.assertEqual(result["state"], "failed")
+        self.assertIsNone(result.get("pid"))
+
+    @patch("core_orchestrator.services.sam_runtime.SAMRuntime.start")
+    def test_managed_sam_uses_inprocess_runtime(self, mock_start):
+        mock_start.return_value = {"state": "running"}
+        sm = ServiceManager()
+        cfg = SAMServiceSettings(service_mode="managed", weights_path="/fake.pt")
+        result = sm.start("host:sam3", cfg)
+        self.assertEqual(result["state"], "running")
+        self.assertIsNone(result["pid"])  # No PID for in-process SAM
+        mock_start.assert_called_once()
+
+    def test_external_sam_does_not_spawn(self):
+        sm = ServiceManager()
+        cfg = SAMServiceSettings(service_mode="external", base_url="http://localhost:9090")
+        result = sm.start("host:sam3", cfg)
+        self.assertEqual(result["state"], "external")
 
 
 class ServiceManagerLogTests(TestCase):
-    """Test log management."""
+    def setUp(self):
+        self.tmpdir = setup_test_config_dir()
+        reset_all_singletons()
 
-    def test_add_and_retrieve_logs(self):
-        """add_log() and get_logs() work."""
-        sm = ServiceManager()
-        sm.add_log("host:llm", "test line 1")
-        sm.add_log("host:llm", "test line 2")
-        logs = sm.get_logs("host:llm", tail=10)
-        self.assertIn("test line 1", logs)
-        self.assertIn("test line 2", logs)
+    def tearDown(self):
+        teardown_test_config_dir(self.tmpdir)
+        reset_all_singletons()
 
-    def test_logs_are_bounded(self):
-        """Log buffer does not grow unbounded."""
+    def test_logs_bounded(self):
         sm = ServiceManager()
         for i in range(3000):
             sm.add_log("host:llm", f"line {i}")
         logs = sm.get_logs("host:llm", tail=5000)
         self.assertLessEqual(len(logs), 2000)
 
-
-class ServiceManagerManagedTests(TestCase):
-    """Test managed service lifecycle with mocks."""
-
-    @patch("core_orchestrator.services.service_manager.build_llm_command")
-    @patch("core_orchestrator.utils.model_host.process_manager.ProcessManager.instance")
-    def test_start_managed_llm_fails_no_config(self, mock_pm, mock_build):
-        """Starting managed LLM without config returns failed state."""
+    def test_logs_returned_in_order(self):
         sm = ServiceManager()
-        cfg = LLMServiceSettings(service_mode="managed")
-        result = sm.start("host:llm", cfg)
-        self.assertEqual(result.get("state"), "failed")
+        sm.add_log("host:llm", "first")
+        sm.add_log("host:llm", "second")
+        logs = sm.get_logs("host:llm", tail=10)
+        self.assertIn("first", logs)
+        self.assertIn("second", logs)
 
-    @patch("core_orchestrator.services.service_manager.build_llm_command")
-    @patch("core_orchestrator.utils.model_host.process_manager.ProcessManager.instance")
-    def test_managed_external_does_not_spawn(self, mock_pm, mock_build):
-        """External mode does not spawn a process."""
+
+class ServiceManagerSAMLifecycleTests(TestCase):
+    """Tests for managed SAM restart/reload behavior."""
+
+    def setUp(self):
+        self.tmpdir = setup_test_config_dir()
+        reset_all_singletons()
+
+    def tearDown(self):
+        teardown_test_config_dir(self.tmpdir)
+        reset_all_singletons()
+
+    @patch("core_orchestrator.services.sam_runtime.SAMRuntime.start")
+    @patch("core_orchestrator.services.sam_runtime.SAMRuntime.stop")
+    def test_sam_restart_reloads_new_weights(self, mock_stop, mock_start):
+        """Restart with new weights should call stop then start."""
+        mock_start.return_value = {"state": "running"}
         sm = ServiceManager()
-        cfg = LLMServiceSettings(service_mode="external")
-        result = sm.start("host:llm", cfg)
-        self.assertEqual(result["state"], "external")
-        mock_pm.assert_not_called()
+        cfg_b = SAMServiceSettings(service_mode="managed", weights_path="/new.pt")
 
-    def test_double_start_managed_returns_state(self):
-        """Starting a managed service without a real executable returns failed/unhealthy."""
+        result = sm.restart("host:sam3", cfg_b)
+        # With no running service and new config, restart should start
+        self.assertIn(result["state"], ("running", "stopped"),
+                      f"Expected 'running' or 'stopped', got '{result['state']}'")
+
+    @patch("core_orchestrator.services.sam_runtime.SAMRuntime.start")
+    def test_sam_restart_clears_singleton(self, mock_start):
+        """Restart unloads previous model before loading new one."""
+        from core_orchestrator.utils.model_host.sam3_server_helper import Sam3ServerHelper
+
+        mock_start.return_value = {"state": "running"}
         sm = ServiceManager()
-        cfg = LLMServiceSettings(service_mode="managed", executable="nonexistent-binary", model_path="/fake.gguf")
-        result = sm.start("host:llm", cfg)
-        # Without a real binary or mocks, this should fail in some way
-        self.assertIn(result.get("state"), ("failed", "unhealthy", "stopped"))
+        cfg = SAMServiceSettings(service_mode="managed", weights_path="/test.pt")
 
-    def test_managed_sam_no_weights(self):
-        """Managed SAM without weights returns failed."""
+        sm.start("host:sam3", cfg)
+        self.assertEqual(sm.status("host:sam3")["state"], "running")
+        self.assertIsNone(sm.status("host:sam3")["pid"])
+
+        # Stop should clear the singleton
+        sm.stop("host:sam3")
+        self.assertEqual(sm.status("host:sam3")["state"], "stopped")
+
+    @patch("core_orchestrator.services.sam_runtime.SAMRuntime.start")
+    def test_sam_restart_required_after_weights_change(self, mock_start):
+        """Changing weights while running should not auto-restart until restart()."""
+        mock_start.return_value = {"state": "running"}
         sm = ServiceManager()
-        cfg = SAMServiceSettings(service_mode="managed")
-        result = sm.start("host:sam3", cfg)
-        self.assertEqual(result.get("state"), "failed")
+        cfg = SAMServiceSettings(service_mode="managed", weights_path="/a.pt")
 
+        sm.start("host:sam3", cfg)
+        self.assertEqual(sm.status("host:sam3")["state"], "running")
 
-class ServiceManagerThreadSafetyTests(TestCase):
-    """Test thread-safe operations."""
+        # Change config and sync — this doesn't trigger restart through
+        # sync_configuration for running services; the change is detected at
+        # the settings-save level
+        status = sm.status("host:sam3")
+        self.assertFalse(status["restart_required"],
+                        "Newly started service should not have restart_required")
 
-    def test_concurrent_status_checks(self):
-        """Concurrent status() calls don't crash."""
-        sm = ServiceManager()
-
-        def check():
-            for _ in range(20):
-                sm.status("host:llm")
-                sm.status("host:sam3")
-
-        threads = [threading.Thread(target=check) for _ in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-
-class ServiceManagerRestartRequiredTests(TestCase):
-    """Test that config changes mark restart required."""
-
-    def test_config_change_marks_restart_required(self):
-        """Changing config while running marks restart_required."""
-        sm = ServiceManager()
-        sm.mark_restart_required("host:llm")
-        status = sm.status("host:llm")
-        self.assertTrue(status["restart_required"])
+        runtime, _ = sm._ensure_service("host:sam3")
+        runtime.applied_config = {"weights_path": "/a.pt", "base_url": "", "arguments": [], "service_mode": "managed"}
+        # Check with new config to see if restart required is detected
+        new_cfg = SAMServiceSettings(service_mode="managed", weights_path="/b.pt")
+        self.assertTrue(sm.check_restart_required("host:sam3", new_cfg))

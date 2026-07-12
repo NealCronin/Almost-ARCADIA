@@ -15,6 +15,11 @@ urlpatterns = [
     # --- Settings API ---
     path("api/settings/", views.settings_view, name="settings"),
     path("api/settings/reset/", views.settings_reset, name="settings_reset"),
+    path("api/services/command-preview/", views.command_preview, name="command_preview"),
+    path("api/services/logs/", views.service_logs, name="service_logs"),
+
+    # --- Client API ---
+    path("api/client/test-host/", views.test_host_connection, name="test_host_connection"),
 
     # --- Host Portal ---
     path("host/", views.host_portal, name="host_portal"),

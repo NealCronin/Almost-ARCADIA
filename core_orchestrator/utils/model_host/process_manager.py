@@ -2,11 +2,17 @@
 process_manager.py
 
 Tracks local background child-process lifecycles via ``subprocess.Popen``.
-Provides PID mapping, safe stdout/stderr capture, and graceful / forced
-cleanup so zombie processes never accumulate.
 
-Designed as a **singleton-registry** -- call ``ProcessManager.instance()``
-from anywhere in the app.
+Key guarantees
+--------------
+* **Spawn race fixed**: ``start()`` holds the lock for the *entire*
+  spawn cycle.  A second caller for the same name receives an
+  ``AlreadyRunningError`` instead of spawning a duplicate.
+* **No implicit replacement**: ``start()`` does NOT silently stop an
+  existing process.  Callers must call ``stop()`` explicitly.
+* ``process.poll()`` is the source of truth for alive status.
+* Bounded stdout/stderr buffers (``deque(maxlen=2000)``).
+* Reader-thread EOF does not mark the process dead.
 """
 
 from __future__ import annotations
@@ -19,14 +25,15 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of log lines to retain per process
 MAX_LOG_LINES = 2000
 
 
-class _ProcessRecord:
-    """Lightweight container for a tracked child process."""
+class AlreadyRunningError(Exception):
+    """Raised when start() is called for a name that is already tracked."""
 
-    __slots__ = ("pid", "process", "name", "stdout_buf", "stderr_buf", "alive")
+
+class _ProcessRecord:
+    __slots__ = ("pid", "process", "name", "stdout_buf", "stderr_buf", "alive", "_exited")
 
     def __init__(self, pid: int, process: subprocess.Popen, name: str) -> None:
         self.pid = pid
@@ -35,8 +42,19 @@ class _ProcessRecord:
         self.stdout_buf: deque[str] = deque(maxlen=MAX_LOG_LINES)
         self.stderr_buf: deque[str] = deque(maxlen=MAX_LOG_LINES)
         self.alive = True
+        self._exited = False  # set when poll() returns non-None
 
-    def __repr__(self) -> str:  # noqa: D401
+    @property
+    def exited(self) -> bool:
+        if self._exited:
+            return True
+        if self.process.poll() is not None:
+            self._exited = True
+            self.alive = False
+            return True
+        return False
+
+    def __repr__(self) -> str:
         return f"<ProcessRecord {self.name} pid={self.pid} alive={self.alive}>"
 
 
@@ -44,16 +62,10 @@ class ProcessManager:
     """
     Thread-safe process lifecycle manager.
 
-    Features
-    --------
-    * Spawn background binaries with automatic stdout/stderr streaming.
-    * Track processes by name -- one process per name (latest spawn wins).
-    * Safe ``terminate()`` (SIGTERM) and ``kill()`` (SIGKILL) methods
-      with fallback to force kill after 5-second grace period.
-    * Bounded stdout/stderr buffers (``deque(maxlen=2000)``) to prevent
-      unbounded memory growth.
-    * ``process.poll()`` is the source of truth for process-alive status;
-      EOF on a single stream does NOT mark the process dead.
+    ``start()`` raises ``AlreadyRunningError`` if a process with the same
+    name is currently tracked.  This prevents the spawn race where two
+    callers both pass an initial check, spawn two processes, and one
+    becomes untracked.
     """
 
     _instance: Optional["ProcessManager"] = None
@@ -65,7 +77,6 @@ class ProcessManager:
 
     @classmethod
     def instance(cls) -> "ProcessManager":
-        """Return the singleton ProcessManager instance."""
         if cls._instance is None:
             with cls._init_lock:
                 if cls._instance is None:
@@ -82,96 +93,90 @@ class ProcessManager:
         """
         Start a background process and track it by *name*.
 
+        Raises ``AlreadyRunningError`` if a process with *name* is
+        already tracked and still alive.
+
         Returns the PID of the spawned child.
         """
         with self._lock:
-            # Stop existing process with same name if any
             if name in self._processes:
-                logger.warning("Process %s already running, stopping first", name)
-                self._stop_no_lock(name, force=False)
+                record = self._processes[name]
+                if not record.exited:
+                    raise AlreadyRunningError(
+                        f"Process '{name}' is already running (PID {record.pid})"
+                    )
+                # Remove dead record
+                del self._processes[name]
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
-            env=env,
-            bufsize=1,  # line buffered
-        )
+            # Spawn while holding the lock so no other thread can enter
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd,
+                env=env,
+                bufsize=1,
+            )
 
-        record = _ProcessRecord(proc.pid, proc, name)
+            record = _ProcessRecord(proc.pid, proc, name)
 
-        # Start reader threads
-        t_out = threading.Thread(
-            target=self._read_stream, args=(record, record.stdout_buf, proc.stdout)
-        )
-        t_err = threading.Thread(
-            target=self._read_stream, args=(record, record.stderr_buf, proc.stderr)
-        )
-        t_out.daemon = True
-        t_err.daemon = True
-        t_out.start()
-        t_err.start()
+            t_out = threading.Thread(
+                target=self._read_stream, args=(record, record.stdout_buf, proc.stdout)
+            )
+            t_err = threading.Thread(
+                target=self._read_stream, args=(record, record.stderr_buf, proc.stderr)
+            )
+            t_out.daemon = True
+            t_err.daemon = True
+            t_out.start()
+            t_err.start()
 
-        with self._lock:
             self._processes[name] = record
 
-        logger.info("Started process %s (PID %d): %s", name, proc.pid, " ".join(cmd))
-        return proc.pid
+            logger.info("Started process %s (PID %d): %s", name, proc.pid, " ".join(cmd))
+            return proc.pid
 
     def _read_stream(
         self, record: _ProcessRecord, buf: deque[str], stream: Optional[object]
     ) -> None:
-        """Thread target to read a stream into a bounded buffer."""
         if stream is None:
             return
         try:
             for line in stream:
                 buf.append(line.rstrip("\n"))
                 logger.debug("[%s] %s", record.name, line.rstrip())
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Error reading stream for %s", record.name)
-        # NOTE: DO NOT set record.alive = False here.
-        # EOF on one stream does not mean the process is dead --
-        # use process.poll() as the source of truth.
+        # DO NOT set record.alive = False here.
+        # Use record.exited / process.poll() as source of truth.
 
     def is_running(self, name: str) -> bool:
-        """Check if a named process is still alive via poll()."""
         with self._lock:
             if name not in self._processes:
                 return False
             record = self._processes[name]
-            if record.process.poll() is not None:
-                record.alive = False
+            if record.exited:
                 return False
             return True
 
     def get_pid(self, name: str) -> Optional[int]:
-        """Return the PID for a named process, or None."""
         with self._lock:
             if name not in self._processes:
                 return None
             return self._processes[name].pid
 
     def stop(self, name: str, force: bool = False) -> bool:
-        """
-        Gracefully terminate a named process.
-
-        If *force* is True, use SIGKILL instead of SIGTERM.
-        Returns True if the process was found and terminated.
-        """
+        """Gracefully terminate (SIGTERM) or force-kill (SIGKILL)."""
         with self._lock:
             return self._stop_no_lock(name, force=force)
 
     def _stop_no_lock(self, name: str, force: bool) -> bool:
-        """Internal stop without lock (caller must hold lock)."""
         if name not in self._processes:
             return False
 
         record = self._processes[name]
-        if record.process.poll() is not None:
-            # Already dead
+        if record.exited:
             del self._processes[name]
             return True
 
@@ -183,7 +188,6 @@ class ProcessManager:
                 logger.info("Terminating process %s (PID %d)", name, record.pid)
                 record.process.terminate()
 
-            # Wait briefly for graceful shutdown
             try:
                 record.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -192,22 +196,18 @@ class ProcessManager:
                 record.process.wait()
 
             record.alive = False
+            record._exited = True
             del self._processes[name]
             return True
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Error stopping process %s", name)
             return False
 
     def kill(self, name: str) -> bool:
-        """Force-kill a named process (SIGKILL). Returns True if found."""
         return self.stop(name, force=True)
 
     def get_output(self, name: str, clear: bool = False) -> tuple[list[str], list[str]]:
-        """
-        Get captured stdout/stderr buffers for a named process.
-
-        If *clear* is True, empty the buffers after reading.
-        """
+        """Return (stdout_lines, stderr_lines) for a named process."""
         with self._lock:
             if name not in self._processes:
                 return ([], [])
@@ -220,7 +220,6 @@ class ProcessManager:
             return (stdout, stderr)
 
     def list_processes(self) -> list[dict]:
-        """Return a list of all tracked processes with status info."""
         with self._lock:
             result = []
             for name, record in self._processes.items():
@@ -228,8 +227,14 @@ class ProcessManager:
                     {
                         "name": name,
                         "pid": record.pid,
-                        "alive": record.alive and record.process.poll() is None,
+                        "alive": record.alive and not record.exited,
                         "returncode": record.process.returncode,
                     }
                 )
             return result
+
+
+def reset_process_manager_for_tests() -> None:
+    """Reset the global ProcessManager singleton. Intended for test isolation."""
+    global _pm
+    ProcessManager._instance = None

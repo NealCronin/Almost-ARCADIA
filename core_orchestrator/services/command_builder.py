@@ -57,14 +57,11 @@ def build_sam_command(settings: SAMServiceSettings) -> list[str]:
     """
     Build the command array for a managed SAM service.
 
-    SAM models are typically loaded via Python, not a separate binary.
-    If an executable is supplied, use it; otherwise return an empty list.
+    Managed SAM runs in-process.  No subprocess command is generated.
+    Returns an empty list because SAM is loaded via ``SAMRuntime``,
+    not via ``subprocess.Popen``.
     """
-    if not settings.weights_path:
-        return []
-    cmd = [settings.weights_path] if settings.arguments else []
-    cmd.extend(settings.arguments)
-    return cmd
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -72,14 +69,11 @@ def build_sam_command(settings: SAMServiceSettings) -> list[str]:
 # ---------------------------------------------------------------------------
 def preview_command(settings: LLMServiceSettings | SAMServiceSettings) -> str:
     """Return a human-readable command preview string."""
-    if isinstance(settings, LLMServiceSettings):
-        cmd = build_llm_command(settings)
-    else:
-        cmd = build_sam_command(settings)
-
+    if isinstance(settings, SAMServiceSettings):
+        return "Managed SAM runs in-process using the configured weights path."
+    cmd = build_llm_command(settings)
     if not cmd:
         return "(no command generated — check configuration)"
-
     return " ".join(shlex.quote(c) for c in cmd)
 
 
@@ -87,21 +81,24 @@ def preview_command_parts(
     settings: LLMServiceSettings | SAMServiceSettings,
 ) -> dict:
     """Return structured command preview with separated parts."""
-    if isinstance(settings, LLMServiceSettings):
-        cmd = build_llm_command(settings)
-        structured_args = ["--model", settings.model_path] if settings.model_path else []
-        if settings.host:
-            structured_args.extend(["--host", settings.host])
-        if settings.port:
-            structured_args.extend(["--port", str(settings.port)])
-    else:
-        cmd = build_sam_command(settings)
-        structured_args = []
-
+    if isinstance(settings, SAMServiceSettings):
+        return {
+            "executable": "",
+            "structured_arguments": [],
+            "raw_arguments": list(settings.arguments) if hasattr(settings, "arguments") else [],
+            "display_command": "Managed SAM runs in-process using the configured weights path.",
+            "argument_array": [],
+        }
+    cmd = build_llm_command(settings)
+    structured_args = ["--model", settings.model_path] if settings.model_path else []
+    if settings.host:
+        structured_args.extend(["--host", settings.host])
+    if settings.port:
+        structured_args.extend(["--port", str(settings.port)])
     return {
         "executable": cmd[0] if cmd else "",
         "structured_arguments": structured_args,
-        "raw_arguments": settings.arguments,
-        "full_command": " ".join(shlex.quote(c) for c in cmd),
+        "raw_arguments": list(settings.arguments),
+        "display_command": " ".join(shlex.quote(c) for c in cmd),
         "argument_array": cmd,
     }

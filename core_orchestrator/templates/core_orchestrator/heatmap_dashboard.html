@@ -3,6 +3,7 @@
 {% block title %}Heatmap Dashboard — Almost ARCADIA{% endblock %}
 
 {% block content %}
+{% csrf_token %}
 <div class="max-w-6xl mx-auto">
     <h1 class="text-3xl font-bold text-white mb-4">Heatmap Dashboard</h1>
     <p class="text-gray-400 mb-8">
@@ -11,9 +12,7 @@
     </p>
 
     <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <!-- Left: Configuration Panel -->
         <div class="xl:col-span-1 space-y-6">
-            <!-- Dataset Configuration -->
             <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
                 <h2 class="text-lg font-semibold text-green-400 mb-4">Dataset</h2>
                 <form id="configForm" class="space-y-4">
@@ -24,7 +23,6 @@
                                class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm">
                     </div>
 
-                    <!-- LLM Mode -->
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-2">LLM Execution</label>
                         <div class="flex space-x-4">
@@ -43,7 +41,6 @@
                         </div>
                     </div>
 
-                    <!-- SAM Mode -->
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-2">SAM Execution</label>
                         <div class="flex space-x-4">
@@ -62,7 +59,6 @@
                         </div>
                     </div>
 
-                    <!-- Remote Host Configuration -->
                     <div id="remoteConfigSection"
                          class="p-4 bg-gray-900 rounded-lg border border-gray-600
                                 {% if config.llm_mode != "remote" and config.sam3_mode != "remote" %}hidden{% endif %}">
@@ -99,7 +95,6 @@
                 </form>
             </div>
 
-            <!-- Status Panel -->
             <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700" id="statusPanel">
                 <h2 class="text-lg font-semibold text-gray-300 mb-3">Status</h2>
                 <div class="space-y-2 text-sm">
@@ -119,7 +114,6 @@
             </div>
         </div>
 
-        <!-- Right: Stream Viewer -->
         <div class="xl:col-span-2">
             <div class="bg-gray-800 rounded-xl shadow-lg border border-gray-700 overflow-hidden">
                 <div class="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-700">
@@ -167,19 +161,37 @@
 
 {% block extra_js %}
 <script>
+// ---- CSRF helper ----
+function getCookie(name) {
+    const cookies = document.cookie ? document.cookie.split(';') : [];
+    for (const cookie of cookies) {
+        const trimmed = cookie.trim();
+        if (trimmed.startsWith(name + '=')) {
+            return decodeURIComponent(trimmed.slice(name.length + 1));
+        }
+    }
+    return null;
+}
+
+function djangoFetch(url, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const headers = new Headers(options.headers || {});
+    if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) {
+        const token = getCookie('csrftoken');
+        if (token) headers.set('X-CSRFToken', token);
+    }
+    return fetch(url, { ...options, headers });
+}
+
 let currentStreamUrl = null;
 let streamActive = false;
 
-// Toggle remote config visibility based on routing selections
 function updateRemoteVisibility() {
     const llmRemote = document.querySelector('input[name="llmMode"]:checked')?.value === 'remote';
     const samRemote = document.querySelector('input[name="samMode"]:checked')?.value === 'remote';
     const section = document.getElementById('remoteConfigSection');
-    if (llmRemote || samRemote) {
-        section.classList.remove('hidden');
-    } else {
-        section.classList.add('hidden');
-    }
+    if (llmRemote || samRemote) section.classList.remove('hidden');
+    else section.classList.add('hidden');
 }
 
 document.querySelectorAll('input[name="llmMode"], input[name="samMode"]').forEach(radio => {
@@ -187,7 +199,7 @@ document.querySelectorAll('input[name="llmMode"], input[name="samMode"]').forEac
 });
 updateRemoteVisibility();
 
-// Save configuration
+// Save configuration — uses djangoFetch for CSRF
 document.getElementById('saveConfigBtn').addEventListener('click', async () => {
     const clientSettings = {
         llm_mode: document.querySelector('input[name="llmMode"]:checked')?.value || 'local',
@@ -200,7 +212,7 @@ document.getElementById('saveConfigBtn').addEventListener('click', async () => {
         },
     };
     try {
-        const resp = await fetch('/api/settings/', {
+        const resp = await djangoFetch('/api/settings/', {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({client: clientSettings}),
@@ -218,17 +230,27 @@ document.getElementById('saveConfigBtn').addEventListener('click', async () => {
     }
 });
 
-// Test connection
+// Test connection — uses Django proxy endpoint (avoids CORS)
 document.getElementById('testConnectionBtn').addEventListener('click', async () => {
-    const ip = document.getElementById('remoteHostIp').value;
+    const host = document.getElementById('remoteHostIp').value;
     const port = document.getElementById('remoteHostPort').value;
     const resultEl = document.getElementById('connectionResult');
     resultEl.textContent = 'Testing...';
+    resultEl.className = 'text-xs text-gray-400';
     try {
-        const resp = await fetch(`http://${ip}:${port}/api/host/status/`);
+        const resp = await djangoFetch('/api/client/test-host/', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({host: host, port: parseInt(port), scheme: 'http'}),
+        });
         const data = await resp.json();
-        resultEl.textContent = `Connected — Status: ${data.status || 'unknown'}`;
-        resultEl.className = 'text-xs text-green-400';
+        if (data.connected) {
+            resultEl.textContent = `Connected — Status: ${data.status?.status || 'unknown'}`;
+            resultEl.className = 'text-xs text-green-400';
+        } else {
+            resultEl.textContent = `Connection failed: ${data.error?.message || 'unknown'}`;
+            resultEl.className = 'text-xs text-red-400';
+        }
     } catch(e) {
         resultEl.textContent = `Connection failed: ${e.message}`;
         resultEl.className = 'text-xs text-red-400';
@@ -266,9 +288,7 @@ document.getElementById('startStreamBtn').addEventListener('click', () => {
 
 document.getElementById('stopStreamBtn').addEventListener('click', () => {
     const img = document.getElementById('streamImage');
-    if (currentStreamUrl) {
-        img.src = '';
-    }
+    if (currentStreamUrl) img.src = '';
     img.style.display = 'none';
     document.getElementById('streamPlaceholder').style.display = 'flex';
     document.getElementById('startStreamBtn').disabled = false;
