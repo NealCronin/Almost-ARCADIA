@@ -3,6 +3,7 @@
 {% block title %}Host Portal — Almost ARCADIA{% endblock %}
 
 {% block content %}
+{% csrf_token %}
 <div class="max-w-5xl mx-auto">
     <h1 class="text-3xl font-bold text-white mb-4">Host Portal</h1>
     <p class="text-gray-400 mb-8">
@@ -24,7 +25,7 @@
         </div>
     </div>
 
-    <!-- ======== Listener Configuration ======== -->
+    <!-- Listener -->
     <div class="bg-gray-800 rounded-xl p-6 shadow-lg mb-6 border border-gray-700">
         <h2 class="text-xl font-semibold text-blue-400 mb-4">Host Listener</h2>
         <form id="listenerForm" class="space-y-4">
@@ -42,62 +43,49 @@
             </div>
             <div class="flex space-x-3">
                 <button type="button" id="startListenerBtn"
-                        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">
-                    Start Listener
-                </button>
+                        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Start Listener</button>
                 <button type="button" id="stopListenerBtn"
-                        class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">
-                    Stop Listener
-                </button>
+                        class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">Stop</button>
                 <button type="button" id="restartListenerBtn"
-                        class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">
-                    Restart
-                </button>
+                        class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Restart</button>
             </div>
         </form>
     </div>
 
-    <!-- ======== Host LLM Configuration ======== -->
+    <!-- Host LLM -->
     <div class="bg-gray-800 rounded-xl p-6 shadow-lg mb-6 border border-gray-700">
         <h2 class="text-xl font-semibold text-purple-400 mb-4">Host LLM Service</h2>
         <form id="hostLlmForm" class="space-y-4">
             <div class="flex space-x-4 mb-4">
                 <label class="flex items-center space-x-2">
-                    <input type="radio" name="llm_service_mode" value="managed" checked
-                           class="form-radio text-blue-500">
+                    <input type="radio" name="llm_service_mode" value="managed" checked class="form-radio text-blue-500">
                     <span class="text-gray-300">Managed by Almost ARCADIA</span>
                 </label>
                 <label class="flex items-center space-x-2">
-                    <input type="radio" name="llm_service_mode" value="external"
-                           class="form-radio text-blue-500">
+                    <input type="radio" name="llm_service_mode" value="external" class="form-radio text-blue-500">
                     <span class="text-gray-300">Connect to existing server</span>
                 </label>
             </div>
 
-            <!-- Managed LLM fields -->
             <div id="llmManagedFields">
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Executable Path</label>
-                        <input type="text" id="llmExecutable" placeholder="llama-server"
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="text" id="llmExecutable" value="{{ llm_executable }}" placeholder="llama-server" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Model Path (GGUF)</label>
-                        <input type="text" id="llmModelPath" placeholder="/path/to/model.gguf"
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="text" id="llmModelPath" value="{{ llm_model_path }}" placeholder="/path/to/model.gguf" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
                 <div class="grid grid-cols-2 gap-4 mt-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Host</label>
-                        <input type="text" id="llmHost" value="127.0.0.1"
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="text" id="llmHost" value="127.0.0.1" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Port</label>
-                        <input type="number" id="llmPort" value="8081"
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="number" id="llmPort" value="8081" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
                 <div class="mt-4">
@@ -105,66 +93,57 @@
                     <select id="llmApiFormat" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                         <option value="llama-completion">llama.cpp completion</option>
                         <option value="openai-chat">OpenAI chat completions</option>
+                        <option value="openai-responses">OpenAI responses</option>
                     </select>
                 </div>
             </div>
 
-            <!-- External LLM fields -->
             <div id="llmExternalFields" class="hidden">
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Base URL</label>
-                        <input type="text" id="llmBaseUrl" placeholder="http://127.0.0.1:8081"
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="text" id="llmBaseUrl" placeholder="http://127.0.0.1:8081" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">Model ID</label>
-                        <input type="text" id="llmModelId" placeholder="gpt-4, qwen2.5, ..."
-                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <input type="text" id="llmModelId" placeholder="gpt-4, qwen2.5, ..." class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
             </div>
 
-            <!-- Raw arguments -->
             <div class="mt-4">
-                <label class="block text-sm font-medium text-gray-300 mb-1">Raw Extra Arguments (one per line)</label>
-                <textarea id="llmRawArgs" rows="3" placeholder="--ctx-size 131072&#10;--cache-type-k q8_0"
+                <label class="block text-sm font-medium text-gray-300 mb-1">Raw Extra Arguments (one token per line)</label>
+                <textarea id="llmRawArgs" rows="4" placeholder="--ctx-size&#10;131072&#10;--cache-type-k&#10;q8_0&#10;--flash-attn"
                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white font-mono text-sm"></textarea>
+                <p class="text-xs text-gray-500 mt-1">Each line is one argument token. The backend uses this array directly with subprocess.Popen.</p>
             </div>
 
-            <!-- Command preview -->
             <div id="llmCommandPreview" class="hidden mt-2 p-3 bg-gray-900 border border-gray-600 rounded-lg">
                 <p class="text-xs text-gray-400 mb-1">Generated Command:</p>
                 <pre class="text-green-400 text-sm font-mono whitespace-pre-wrap" id="llmCommandText"></pre>
             </div>
 
             <div class="flex space-x-3">
-                <button type="button" id="saveLlmBtn"
-                        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">Save LLM Config</button>
-                <button type="button" id="startLlmBtn"
-                        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Start</button>
-                <button type="button" id="stopLlmBtn"
-                        class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">Stop</button>
-                <button type="button" id="restartLlmBtn"
-                        class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Restart</button>
+                <button type="button" id="saveLlmBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">Save LLM Config</button>
+                <button type="button" id="startLlmBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Start</button>
+                <button type="button" id="stopLlmBtn" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">Stop</button>
+                <button type="button" id="restartLlmBtn" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Restart</button>
             </div>
             <div id="llmStatus" class="mt-2 text-sm text-gray-400"></div>
         </form>
     </div>
 
-    <!-- ======== Host SAM3 Configuration ======== -->
+    <!-- Host SAM3 -->
     <div class="bg-gray-800 rounded-xl p-6 shadow-lg mb-6 border border-gray-700">
         <h2 class="text-xl font-semibold text-teal-400 mb-4">Host SAM3 Service</h2>
         <form id="hostSamForm" class="space-y-4">
             <div class="flex space-x-4 mb-4">
                 <label class="flex items-center space-x-2">
-                    <input type="radio" name="sam_service_mode" value="managed" checked
-                           class="form-radio text-teal-500">
-                    <span class="text-gray-300">Managed by Almost ARCADIA</span>
+                    <input type="radio" name="sam_service_mode" value="managed" checked class="form-radio text-teal-500">
+                    <span class="text-gray-300">Managed (in-process)</span>
                 </label>
                 <label class="flex items-center space-x-2">
-                    <input type="radio" name="sam_service_mode" value="external"
-                           class="form-radio text-teal-500">
+                    <input type="radio" name="sam_service_mode" value="external" class="form-radio text-teal-500">
                     <span class="text-gray-300">Connect to existing server</span>
                 </label>
             </div>
@@ -172,31 +151,38 @@
             <div id="samManagedFields">
                 <div>
                     <label class="block text-sm font-medium text-gray-300 mb-1">Weights Path</label>
-                    <input type="text" id="samWeightsPath" value="{{ sam3_weights_path }}" placeholder="/path/to/sam3.pt"
-                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                    <input type="text" id="samWeightsPath" value="{{ sam3_weights_path }}" placeholder="/path/to/sam3.pt" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                 </div>
+                <p class="text-xs text-gray-500 mt-1">Managed SAM runs in-process using the configured weights path. No subprocess is launched.</p>
             </div>
 
             <div id="samExternalFields" class="hidden">
                 <div>
                     <label class="block text-sm font-medium text-gray-300 mb-1">Base URL</label>
-                    <input type="text" id="samBaseUrl" placeholder="http://127.0.0.1:9090"
-                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                    <input type="text" id="samBaseUrl" placeholder="http://127.0.0.1:9090" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
                 </div>
             </div>
 
             <div class="flex space-x-3">
-                <button type="button" id="saveSamBtn"
-                        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">Save SAM Config</button>
-                <button type="button" id="startSamBtn"
-                        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Start</button>
-                <button type="button" id="stopSamBtn"
-                        class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">Stop</button>
-                <button type="button" id="restartSamBtn"
-                        class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Restart</button>
+                <button type="button" id="saveSamBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">Save SAM Config</button>
+                <button type="button" id="startSamBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Start</button>
+                <button type="button" id="stopSamBtn" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors">Stop</button>
+                <button type="button" id="restartSamBtn" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Restart</button>
             </div>
             <div id="samStatus" class="mt-2 text-sm text-gray-400"></div>
         </form>
+    </div>
+
+    <!-- Logs -->
+    <div class="bg-gray-800 rounded-xl p-6 shadow-lg mb-6 border border-gray-700">
+        <h2 class="text-xl font-semibold text-blue-400 mb-4 flex items-center justify-between">
+            <span>Service Logs</span>
+            <select id="logServiceSelect" class="text-sm bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white">
+                <option value="host:llm">Host LLM</option>
+                <option value="host:sam3">Host SAM3</option>
+            </select>
+        </h2>
+        <div id="serviceLogs" class="space-y-1 max-h-64 overflow-y-auto font-mono text-xs text-gray-300"></div>
     </div>
 
     <!-- Request Log -->
@@ -210,35 +196,124 @@
         <ul class="text-sm text-gray-300 space-y-1 list-disc list-inside">
             <li>Configuration is saved to a JSON file and survives restarts.</li>
             <li>Changing configuration while a service is running marks "restart required".</li>
-            <li>Raw arguments are appended after structured args (last-wins precedence).</li>
+            <li>Raw arguments are one token per line (not shell-parsed).</li>
             <li>For external servers, Almost ARCADIA does not start/stop the process.</li>
+            <li>Managed SAM runs in-process — no subprocess is launched.</li>
         </ul>
     </div>
 </div>
 
-<!-- Hidden field for settings JSON -->
 <script id="settingsData" type="application/json">{{ settings_json|safe }}</script>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-// Host Portal JavaScript
+// ---- CSRF and fetch helpers ----
+function getCookie(name) {
+    const cookies = document.cookie ? document.cookie.split(';') : [];
+    for (const cookie of cookies) {
+        const trimmed = cookie.trim();
+        if (trimmed.startsWith(name + '=')) {
+            return decodeURIComponent(trimmed.slice(name.length + 1));
+        }
+    }
+    return null;
+}
+
+function djangoFetch(url, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const headers = new Headers(options.headers || {});
+    if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) {
+        const token = getCookie('csrftoken');
+        if (token) {
+            headers.set('X-CSRFToken', token);
+        }
+    }
+    return fetch(url, { ...options, headers });
+}
+
+// ---- Settings initialization ----
+let savedSettings = {};
+try {
+    savedSettings = JSON.parse(document.getElementById('settingsData').textContent);
+} catch(e) {
+    savedSettings = {};
+}
+
 const API = {
     settings: '/api/settings/',
     hostPortal: '/host/',
     hostStatus: '/api/host/status/',
+    commandPreview: '/api/services/command-preview/',
+    serviceLogs: '/api/services/logs/',
 };
 
-let settings = {};
-try {
-    settings = JSON.parse(document.getElementById('settingsData').textContent);
-} catch(e) {
-    settings = {};
+// ---- Field helpers ----
+function setValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value || '';
+}
+function setRadioValue(name, value) {
+    document.querySelectorAll(`input[name="${name}"]`).forEach(radio => {
+        radio.checked = (radio.value === (value || 'managed'));
+    });
+}
+function formatArgumentLines(args) {
+    return Array.isArray(args) ? args.join('\n') : '';
+}
+function parseArgumentLines(text) {
+    return text.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
 }
 
-// Helper: POST JSON
-async function apiPost(url, data) {
-    const resp = await fetch(url, {
+// ---- Initialize all fields from saved settings ----
+function initializeHostPortal(saved) {
+    const llm = saved?.host?.llm || {};
+    const sam = saved?.host?.sam3 || {};
+
+    setRadioValue('llm_service_mode', llm.service_mode || 'managed');
+    setValue('llmExecutable', llm.executable);
+    setValue('llmModelPath', llm.model_path);
+    setValue('llmModelId', llm.model_id);
+    setValue('llmBaseUrl', llm.base_url);
+    setValue('llmApiFormat', llm.api_format || 'llama-completion');
+    setValue('llmHost', llm.host || '127.0.0.1');
+    setValue('llmPort', llm.port || 8081);
+    setValue('llmRawArgs', formatArgumentLines(llm.arguments || []));
+
+    setRadioValue('sam_service_mode', sam.service_mode || 'managed');
+    setValue('samWeightsPath', sam.weights_path);
+    setValue('samBaseUrl', sam.base_url);
+
+    updateLlmModeVisibility();
+    updateSamModeVisibility();
+}
+
+function updateLlmModeVisibility() {
+    const mode = document.querySelector('input[name="llm_service_mode"]:checked')?.value;
+    document.getElementById('llmManagedFields').classList.toggle('hidden', mode === 'external');
+    document.getElementById('llmExternalFields').classList.toggle('hidden', mode === 'managed');
+}
+
+function updateSamModeVisibility() {
+    const mode = document.querySelector('input[name="sam_service_mode"]:checked')?.value;
+    document.getElementById('samManagedFields').classList.toggle('hidden', mode === 'external');
+    document.getElementById('samExternalFields').classList.toggle('hidden', mode === 'managed');
+}
+
+// Initialize on load
+initializeHostPortal(savedSettings);
+
+// Mode toggle listeners
+document.querySelectorAll('input[name="llm_service_mode"]').forEach(radio => {
+    radio.addEventListener('change', updateLlmModeVisibility);
+});
+document.querySelectorAll('input[name="sam_service_mode"]').forEach(radio => {
+    radio.addEventListener('change', updateSamModeVisibility);
+});
+
+// ---- Listener controls ----
+async function postJSON(url, data) {
+    const resp = await djangoFetch(url, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),
@@ -246,8 +321,8 @@ async function apiPost(url, data) {
     return resp.json();
 }
 
-async function apiPut(url, data) {
-    const resp = await fetch(url, {
+async function putJSON(url, data) {
+    const resp = await djangoFetch(url, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data),
@@ -255,14 +330,13 @@ async function apiPut(url, data) {
     return resp.json();
 }
 
-// --- Listener ---
 document.getElementById('startListenerBtn').addEventListener('click', async () => {
     const data = {
         action: 'start_listener',
         listen_ip: document.getElementById('listenIp').value,
         listen_port: parseInt(document.getElementById('listenPort').value),
     };
-    const result = await apiPost(API.hostPortal, data);
+    const result = await postJSON(API.hostPortal, data);
     if (result.status === 'ok') {
         updateListenerStatus(true, data.listen_ip, data.listen_port);
     } else {
@@ -271,10 +345,8 @@ document.getElementById('startListenerBtn').addEventListener('click', async () =
 });
 
 document.getElementById('stopListenerBtn').addEventListener('click', async () => {
-    const result = await apiPost(API.hostPortal, {action: 'stop_listener'});
-    if (result.status === 'ok') {
-        updateListenerStatus(false);
-    }
+    const result = await postJSON(API.hostPortal, {action: 'stop_listener'});
+    if (result.status === 'ok') updateListenerStatus(false);
 });
 
 document.getElementById('restartListenerBtn').addEventListener('click', async () => {
@@ -283,12 +355,8 @@ document.getElementById('restartListenerBtn').addEventListener('click', async ()
         listen_ip: document.getElementById('listenIp').value,
         listen_port: parseInt(document.getElementById('listenPort').value),
     };
-    const result = await apiPost(API.hostPortal, data);
-    if (result.status === 'ok') {
-        updateListenerStatus(true, data.listen_ip, data.listen_port);
-    } else {
-        alert('Failed: ' + (result.error?.message || JSON.stringify(result)));
-    }
+    const result = await postJSON(API.hostPortal, data);
+    if (result.status === 'ok') updateListenerStatus(true, data.listen_ip, data.listen_port);
 });
 
 function updateListenerStatus(running, ip, port) {
@@ -300,13 +368,12 @@ function updateListenerStatus(running, ip, port) {
     if (ip && port) addr.textContent = `${ip}:${port}`;
 }
 
-// --- Service helper ---
-async function manageService(serviceId, action, formId, statusElId) {
-    const data = { action: action + '_service', service_id: serviceId };
-    const result = await apiPost(API.hostPortal, data);
+// ---- Service management ----
+async function manageService(serviceId, action, statusElId) {
+    const result = await postJSON(API.hostPortal, { action: action + '_service', service_id: serviceId });
     const statusEl = document.getElementById(statusElId);
     if (result.state) {
-        statusEl.textContent = `State: ${result.state}` + (result.error ? ` — ${result.error}` : '');
+        statusEl.textContent = `State: ${result.state}` + (result.error ? ` — ${result.error}` : '') + (result.restart_required ? ' (restart required)' : '');
     } else if (result.error) {
         statusEl.textContent = `Error: ${result.error.message || JSON.stringify(result.error)}`;
     } else {
@@ -315,17 +382,9 @@ async function manageService(serviceId, action, formId, statusElId) {
     return result;
 }
 
-// --- LLM Service ---
-document.querySelectorAll('input[name="llm_service_mode"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        document.getElementById('llmManagedFields').classList.toggle('hidden', radio.value === 'external');
-        document.getElementById('llmExternalFields').classList.toggle('hidden', radio.value === 'managed');
-    });
-});
-
 document.getElementById('saveLlmBtn').addEventListener('click', async () => {
     const isManaged = document.querySelector('input[name="llm_service_mode"]:checked').value === 'managed';
-    const rawArgs = document.getElementById('llmRawArgs').value.split('\n').filter(s => s.trim());
+    const rawArgs = parseArgumentLines(document.getElementById('llmRawArgs').value);
     const hostSettings = {
         llm: {
             service_mode: isManaged ? 'managed' : 'external',
@@ -339,25 +398,19 @@ document.getElementById('saveLlmBtn').addEventListener('click', async () => {
             arguments: rawArgs,
         }
     };
-    const result = await apiPut(API.settings, {host: hostSettings});
+    const result = await putJSON(API.settings, {host: hostSettings});
     if (result.host) {
+        savedSettings = result;
         document.getElementById('llmStatus').textContent = 'LLM config saved.';
+        updateCommandPreview();
     } else {
         document.getElementById('llmStatus').textContent = 'Save failed: ' + JSON.stringify(result);
     }
 });
 
-document.getElementById('startLlmBtn').addEventListener('click', () => manageService('host:llm', 'start', 'hostLlmForm', 'llmStatus'));
-document.getElementById('stopLlmBtn').addEventListener('click', () => manageService('host:llm', 'stop', 'hostLlmForm', 'llmStatus'));
-document.getElementById('restartLlmBtn').addEventListener('click', () => manageService('host:llm', 'restart', 'hostLlmForm', 'llmStatus'));
-
-// --- SAM Service ---
-document.querySelectorAll('input[name="sam_service_mode"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        document.getElementById('samManagedFields').classList.toggle('hidden', radio.value === 'external');
-        document.getElementById('samExternalFields').classList.toggle('hidden', radio.value === 'managed');
-    });
-});
+document.getElementById('startLlmBtn').addEventListener('click', () => manageService('host:llm', 'start', 'llmStatus'));
+document.getElementById('stopLlmBtn').addEventListener('click', () => manageService('host:llm', 'stop', 'llmStatus'));
+document.getElementById('restartLlmBtn').addEventListener('click', () => manageService('host:llm', 'restart', 'llmStatus'));
 
 document.getElementById('saveSamBtn').addEventListener('click', async () => {
     const isManaged = document.querySelector('input[name="sam_service_mode"]:checked').value === 'managed';
@@ -368,19 +421,54 @@ document.getElementById('saveSamBtn').addEventListener('click', async () => {
             base_url: document.getElementById('samBaseUrl').value,
         }
     };
-    const result = await apiPut(API.settings, {host: hostSettings});
+    const result = await putJSON(API.settings, {host: hostSettings});
     if (result.host) {
+        savedSettings = result;
         document.getElementById('samStatus').textContent = 'SAM config saved.';
     } else {
         document.getElementById('samStatus').textContent = 'Save failed: ' + JSON.stringify(result);
     }
 });
 
-document.getElementById('startSamBtn').addEventListener('click', () => manageService('host:sam3', 'start', 'hostSamForm', 'samStatus'));
-document.getElementById('stopSamBtn').addEventListener('click', () => manageService('host:sam3', 'stop', 'hostSamForm', 'samStatus'));
-document.getElementById('restartSamBtn').addEventListener('click', () => manageService('host:sam3', 'restart', 'hostSamForm', 'samStatus'));
+document.getElementById('startSamBtn').addEventListener('click', () => manageService('host:sam3', 'start', 'samStatus'));
+document.getElementById('stopSamBtn').addEventListener('click', () => manageService('host:sam3', 'stop', 'samStatus'));
+document.getElementById('restartSamBtn').addEventListener('click', () => manageService('host:sam3', 'restart', 'samStatus'));
 
-// --- Poll status ---
+// ---- Command preview ----
+let previewTimer = null;
+async function updateCommandPreview() {
+    const isManaged = document.querySelector('input[name="llm_service_mode"]:checked')?.value === 'managed';
+    if (!isManaged) {
+        document.getElementById('llmCommandPreview').classList.add('hidden');
+        return;
+    }
+    const config = {
+        service_mode: 'managed',
+        executable: document.getElementById('llmExecutable').value,
+        model_path: document.getElementById('llmModelPath').value,
+        host: document.getElementById('llmHost').value,
+        port: parseInt(document.getElementById('llmPort').value) || 8081,
+        api_format: document.getElementById('llmApiFormat').value,
+        arguments: parseArgumentLines(document.getElementById('llmRawArgs').value),
+    };
+    try {
+        const result = await postJSON(API.commandPreview, {service_id: 'host:llm', configuration: config});
+        if (result.display_command) {
+            document.getElementById('llmCommandText').textContent = result.display_command;
+            document.getElementById('llmCommandPreview').classList.remove('hidden');
+        }
+    } catch(e) { /* ignore preview errors during typing */ }
+}
+
+// Debounce preview on input changes
+['llmExecutable', 'llmModelPath', 'llmHost', 'llmPort', 'llmApiFormat', 'llmRawArgs'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+        clearTimeout(previewTimer);
+        previewTimer = setTimeout(updateCommandPreview, 300);
+    });
+});
+
+// ---- Poll status ----
 async function pollStatus() {
     try {
         const resp = await fetch(API.hostStatus);
@@ -394,10 +482,11 @@ async function pollStatus() {
             document.getElementById('samStatus').textContent =
                 `SAM: ${data.sam3.state}` + (data.sam3.restart_required ? ' (restart required)' : '');
         }
+        const badge = document.getElementById('restartRequiredBadge');
         if (data.restart_required) {
-            document.getElementById('restartRequiredBadge').classList.remove('hidden');
+            badge.classList.remove('hidden');
         } else {
-            document.getElementById('restartRequiredBadge').classList.add('hidden');
+            badge.classList.add('hidden');
         }
     } catch(e) {
         console.warn('Status poll failed:', e);
@@ -405,5 +494,26 @@ async function pollStatus() {
 }
 setInterval(pollStatus, 3000);
 pollStatus();
+
+// ---- Service logs ----
+async function loadServiceLogs() {
+    const serviceId = document.getElementById('logServiceSelect').value;
+    try {
+        const resp = await fetch(`${API.serviceLogs}?service_id=${encodeURIComponent(serviceId)}&tail=200`);
+        const data = await resp.json();
+        const el = document.getElementById('serviceLogs');
+        el.innerHTML = '';
+        for (const line of data.lines || []) {
+            const div = document.createElement('div');
+            div.className = line.stream === 'stderr' ? 'text-red-400' : 'text-gray-300';
+            div.textContent = `[${line.stream}] ${line.text}`;
+            el.appendChild(div);
+        }
+        el.scrollTop = el.scrollHeight;
+    } catch(e) { /* ignore */ }
+}
+document.getElementById('logServiceSelect').addEventListener('change', loadServiceLogs);
+setInterval(loadServiceLogs, 5000);
+loadServiceLogs();
 </script>
 {% endblock %}

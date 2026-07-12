@@ -9,7 +9,13 @@ from .pages import (
     heatmap_dashboard,
     heatmap_stream,
 )
-from .settings_api import settings_view, settings_reset
+from .settings_api import (
+    settings_view,
+    settings_reset,
+    command_preview,
+    service_logs,
+    test_host_connection,
+)
 
 __all__ = [
     "landing_page",
@@ -23,4 +29,7 @@ __all__ = [
     "heatmap_stream",
     "settings_view",
     "settings_reset",
+    "command_preview",
+    "service_logs",
+    "test_host_connection",
 ]

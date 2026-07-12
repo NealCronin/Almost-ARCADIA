@@ -1,8 +1,8 @@
 """
 pages.py
 
-Django views for page rendering and API endpoints, refactored to use
-the persistent settings store and service manager.
+Django views for page rendering and API endpoints.
+Domain logic (inference, settings, lifecycle) is delegated to services.
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Optional
 
 import cv2
@@ -22,10 +22,17 @@ from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
 from ..services.command_builder import preview_command
+from ..services.inference_service import (
+    ServiceNotRunningError,
+    InferenceRequestError,
+    ExternalServiceError,
+    evaluate_host_llm,
+    evaluate_host_sam3,
+)
 from ..services.service_manager import get_service_manager
 from ..services.settings_store import (
+    SettingsValidationError,
     _dataclass_to_dict,
-    _dict_to_appsettings,
     get_settings_store,
     AppSettings,
     LLMServiceSettings,
@@ -42,29 +49,26 @@ _host_api_thread: Optional[threading.Thread] = None
 _host_api_server: Optional[HTTPServer] = None
 _host_api_config: dict[str, Any] = {}
 
-# Request log for Host Portal display
 _request_log: list[dict[str, Any]] = []
 _MAX_LOG_ENTRIES = 100
 _log_lock = threading.Lock()
 _config_lock = threading.Lock()
-_lifecycle_lock = threading.Lock()  # protects start/stop/restart of listener
+_lifecycle_lock = threading.Lock()
 
-# Maximum request body size for custom Host listener (50 MB)
 _MAX_REQUEST_BODY = 50 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _error(code: str, message: str, status: int = 400) -> JsonResponse:
+def _error(code: str, message: str, status: int = 400, details: dict | None = None) -> JsonResponse:
     return JsonResponse(
-        {"error": {"code": code, "message": message, "details": {}}},
+        {"error": {"code": code, "message": message, "details": details or {}}},
         status=status,
     )
 
 
 def log_request(endpoint: str, details: dict[str, Any]) -> None:
-    """Thread-safe request logging for Host Portal display."""
     with _log_lock:
         _request_log.append({"endpoint": endpoint, "details": details})
         if len(_request_log) > _MAX_LOG_ENTRIES:
@@ -72,14 +76,10 @@ def log_request(endpoint: str, details: dict[str, Any]) -> None:
 
 
 def get_request_logs() -> list[dict[str, Any]]:
-    """Thread-safe retrieval of request logs."""
     with _log_lock:
         return list(reversed(_request_log))
 
 
-# ---------------------------------------------------------------------------
-# Model validation helpers
-# ---------------------------------------------------------------------------
 def validate_sam3_model(weights_path: str) -> tuple[bool, str]:
     if not weights_path:
         return False, "Weights path is empty"
@@ -99,7 +99,7 @@ def validate_llm_model(model_path: str) -> tuple[bool, str]:
         return False, f"Model not found at: {model_path}"
     if not path.is_file():
         return False, f"Path is not a file: {model_path}"
-    return True, f"LLM model found"
+    return True, "LLM model found"
 
 
 def validate_opencv() -> tuple[bool, str]:
@@ -114,7 +114,7 @@ def validate_opencv() -> tuple[bool, str]:
 # Host API Request Handler (Background Server)
 # ---------------------------------------------------------------------------
 class HostAPIHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler for Host API endpoints."""
+    """HTTP handler for Host API endpoints — uses the inference service."""
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -126,12 +126,21 @@ class HostAPIHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
     def _read_body(self) -> Optional[bytes]:
-        """Read request body with size limit."""
         raw_length = self.headers.get("Content-Length", "0")
         try:
             content_length = int(raw_length)
         except (ValueError, TypeError):
-            self._send_json_response({"error": "Invalid Content-Length"}, status=400)
+            self._send_json_response(
+                {"error": {"code": "invalid_content_length", "message": "Invalid Content-Length"}},
+                status=400,
+            )
+            return None
+
+        if content_length < 0:
+            self._send_json_response(
+                {"error": {"code": "invalid_content_length", "message": "Negative Content-Length"}},
+                status=400,
+            )
             return None
 
         if content_length > _MAX_REQUEST_BODY:
@@ -141,37 +150,12 @@ class HostAPIHandler(BaseHTTPRequestHandler):
             )
             return None
 
-        return self.rfile.read(content_length)
-
-    def _decode_image(self, frame_b64: str) -> Optional[np.ndarray]:
-        """Decode a base64-encoded image with validation."""
         try:
-            raw = base64.b64decode(frame_b64)
+            return self.rfile.read(content_length)
         except Exception:
-            self._send_json_response({"error": {"code": "invalid_image", "message": "Invalid base64 encoding"}}, status=400)
-            return None
-
-        try:
-            arr = np.frombuffer(raw, dtype=np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if frame is None:
-                self._send_json_response({"error": {"code": "invalid_image", "message": "Failed to decode image"}}, status=400)
-                return None
-            # Validate dimensions
-            h, w = frame.shape[:2]
-            if h > 10000 or w > 10000 or h * w > 50_000_000:
-                self._send_json_response(
-                    {"error": {"code": "image_too_large", "message": f"Image dimensions {w}x{h} exceed limits"}},
-                    status=400,
-                )
-                return None
-            return frame
-        except Exception as exc:
-            self._send_json_response({"error": {"code": "decode_failed", "message": str(exc)}}, status=400)
             return None
 
     def do_GET(self) -> None:
-        """Handle GET requests (status endpoint)."""
         if self.path == "/api/host/status/":
             self._handle_status()
         else:
@@ -181,7 +165,6 @@ class HostAPIHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:
-        """Handle POST requests."""
         body = self._read_body()
         if body is None:
             return
@@ -189,7 +172,17 @@ class HostAPIHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
-            self._send_json_response({"error": {"code": "invalid_json", "message": "Invalid JSON"}}, status=400)
+            self._send_json_response(
+                {"error": {"code": "invalid_json", "message": "Invalid JSON"}},
+                status=400,
+            )
+            return
+
+        if not isinstance(data, dict):
+            self._send_json_response(
+                {"error": {"code": "invalid_json", "message": "Request body must be a JSON object"}},
+                status=400,
+            )
             return
 
         endpoint = self.path
@@ -199,12 +192,11 @@ class HostAPIHandler(BaseHTTPRequestHandler):
             self._handle_evaluate_sam3(data)
         else:
             self._send_json_response(
-                {"error": {"code": "endpoint_not_found", "message": f"Unknown endpoint: {self.path}"}},
+                {"error": {"code": "endpoint_not_found", "message": f"Unknown endpoint: {endpoint}"}},
                 status=404,
             )
 
     def _handle_status(self) -> None:
-        """Return Host listener + service status."""
         with _config_lock:
             config = dict(_host_api_config)
 
@@ -221,153 +213,55 @@ class HostAPIHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_evaluate_llm(self, data: dict[str, Any]) -> None:
-        """Handle LLM evaluation using Host-owned, persistent config."""
-        prompt = data.get("prompt", "")
-        if not prompt:
+        try:
+            result = evaluate_host_llm(data)
+            self._send_json_response(result)
+        except InferenceRequestError as exc:
             self._send_json_response(
-                {"error": {"code": "missing_prompt", "message": "prompt is required"}},
+                {"error": {"code": "invalid_request", "message": str(exc)}},
                 status=400,
             )
-            return
-
-        sm = get_service_manager()
-        llm_status = sm.status("host:llm")
-
-        if llm_status["state"] == "external":
-            # Forward to external server
-            import requests  # noqa: PLC0415
-            store = get_settings_store()
-            settings = store.load()
-            llm_cfg = settings.host.llm
-            try:
-                resp = requests.post(
-                    f"{llm_cfg.base_url}/completion",
-                    json={"prompt": prompt},
-                    timeout=llm_cfg.request_timeout_seconds,
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                content = result.get("content", result.get("generation", ""))
-                log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
-                self._send_json_response({
-                    "content": content,
-                    "model_id": llm_cfg.model_id,
-                    "usage": None,
-                    "metadata": {},
-                })
-            except Exception as exc:
-                logger.exception("External LLM request failed")
-                self._send_json_response(
-                    {"error": {"code": "remote_request_failed", "message": str(exc)}},
-                    status=502,
-                )
-        elif llm_status["state"] == "running":
-            # Use managed service
-            from ..utils.model_host.llama_server_helper import LlamaServerHelper  # noqa: PLC0415
-            store = get_settings_store()
-            settings = store.load()
-            llm_cfg = settings.host.llm
-            helper = LlamaServerHelper(
-                model_path=llm_cfg.model_path,
-                host=llm_cfg.host,
-                port=llm_cfg.port,
-            )
-            helper._server_ready = True  # Trust the service manager
-            try:
-                result = helper.evaluate(
-                    prompt,
-                    max_tokens=data.get("max_tokens", 512),
-                    temperature=data.get("temperature", 0.7),
-                )
-                log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
-                self._send_json_response({
-                    "content": result,
-                    "model_id": llm_cfg.model_id,
-                    "usage": None,
-                    "metadata": {},
-                })
-            except Exception as exc:
-                logger.exception("LLM evaluation error")
-                self._send_json_response(
-                    {"error": {"code": "service_error", "message": str(exc)}},
-                    status=500,
-                )
-        else:
+        except ServiceNotRunningError as exc:
             self._send_json_response(
-                {"error": {"code": "service_not_running", "message": "Host LLM service is not running"}},
+                {"error": {"code": "service_not_running", "message": str(exc)}},
                 status=503,
+            )
+        except ExternalServiceError as exc:
+            self._send_json_response(
+                {"error": {"code": "remote_request_failed", "message": str(exc)}},
+                status=502,
+            )
+        except Exception as exc:
+            logger.exception("LLM evaluation error")
+            self._send_json_response(
+                {"error": {"code": "service_error", "message": "Internal error"}},
+                status=500,
             )
 
     def _handle_evaluate_sam3(self, data: dict[str, Any]) -> None:
-        """Handle SAM3 segmentation using Host-owned persistent config."""
-        frame_b64 = data.get("frame_b64")
-        if not frame_b64:
+        try:
+            result = evaluate_host_sam3(data)
+            self._send_json_response(result)
+        except InferenceRequestError as exc:
             self._send_json_response(
-                {"error": {"code": "missing_frame", "message": "frame_b64 is required"}},
+                {"error": {"code": "invalid_request", "message": str(exc)}},
                 status=400,
             )
-            return
-
-        frame = self._decode_image(frame_b64)
-        if frame is None:
-            return
-
-        input_points = data.get("input_points")
-        input_boxes = data.get("input_boxes")
-
-        # Use Host-owned config
-        sm = get_service_manager()
-        sam_status = sm.status("host:sam3")
-
-        if sam_status["state"] in ("stopped", "failed"):
-            # Try to use the singleton SAM3 helper with Host config
-            from ..utils.model_host.sam3_server_helper import Sam3ServerHelper  # noqa: PLC0415
-
-            store = get_settings_store()
-            settings = store.load()
-            weights_path = settings.host.sam3.weights_path
-
-            if not weights_path:
-                self._send_json_response(
-                    {"error": {"code": "model_not_configured", "message": "SAM3 weights path not configured on Host"}},
-                    status=400,
-                )
-                return
-
-            helper = Sam3ServerHelper(checkpoint_path=weights_path)
-            if not helper.initialize():
-                self._send_json_response(
-                    {"error": {"code": "service_start_failed", "message": "Failed to initialize SAM3"}},
-                    status=503,
-                )
-                return
-
-            try:
-                if input_points:
-                    result = helper.predict_from_points(frame, input_points, [1] * len(input_points))
-                elif input_boxes:
-                    result = helper.predict_from_box(frame, input_boxes[0])
-                else:
-                    result = helper.predict(frame)
-
-                target_coords = helper.get_target_coordinates(frame, input_points)
-                log_request("/api/host/evaluate-sam3/", {"frame_shape": str(frame.shape)})
-                self._send_json_response({
-                    "masks": result.get("masks", []),
-                    "scores": result.get("scores", []),
-                    "bbox": result.get("bbox", []),
-                    "target_coords": target_coords,
-                })
-            except Exception as exc:
-                logger.exception("SAM3 evaluation error")
-                self._send_json_response(
-                    {"error": {"code": "service_error", "message": str(exc)}},
-                    status=500,
-                )
-        else:
+        except ServiceNotRunningError as exc:
             self._send_json_response(
-                {"error": {"code": "service_not_running", "message": "SAM3 service not available"}},
+                {"error": {"code": "service_not_running", "message": str(exc)}},
                 status=503,
+            )
+        except ExternalServiceError as exc:
+            self._send_json_response(
+                {"error": {"code": "remote_request_failed", "message": str(exc)}},
+                status=502,
+            )
+        except Exception as exc:
+            logger.exception("SAM3 evaluation error")
+            self._send_json_response(
+                {"error": {"code": "service_error", "message": "Internal error"}},
+                status=500,
             )
 
 
@@ -376,7 +270,6 @@ class HostAPIHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def landing_page(request: HttpRequest) -> HttpResponse:
-    """Landing page: Route to Host or Client portal."""
     return render(request, "core_orchestrator/index.html")
 
 
@@ -395,10 +288,22 @@ def host_portal(request: HttpRequest) -> HttpResponse:
         with _config_lock:
             config_snapshot = dict(_host_api_config)
 
+        # Sync runtime state from saved configuration
+        sm = get_service_manager()
+        sm.sync_configuration("host:llm", settings.host.llm)
+        sm.sync_configuration("host:sam3", settings.host.sam3)
+
         return render(request, "core_orchestrator/host_portal.html", {
             "listen_ip": config_snapshot.get("listen_ip", settings.host.listen_ip),
             "listen_port": config_snapshot.get("listen_port", settings.host.listen_port),
             "sam3_weights_path": config_snapshot.get("sam3_weights_path", settings.host.sam3.weights_path),
+            "llm_executable": settings.host.llm.executable,
+            "llm_model_path": settings.host.llm.model_path,
+            "llm_model_id": settings.host.llm.model_id,
+            "llm_base_url": settings.host.llm.base_url,
+            "llm_api_format": settings.host.llm.api_format,
+            "llm_host": settings.host.llm.host,
+            "llm_port": settings.host.llm.port,
             "running": _host_api_running,
             "settings_json": json.dumps(_dataclass_to_dict(settings), indent=2),
         })
@@ -411,7 +316,6 @@ def host_portal(request: HttpRequest) -> HttpResponse:
 
     action = body.get("action", "")
 
-    # --- Listener actions ---
     if action == "stop_listener":
         return _stop_listener()
 
@@ -420,28 +324,37 @@ def host_portal(request: HttpRequest) -> HttpResponse:
 
     if action == "restart_listener":
         stop_result = _stop_listener()
-        if stop_result.status_code >= 400 and json.loads(stop_result.content).get("error", {}).get("code") != "already_stopped":
-            return stop_result
+        if stop_result.status_code >= 400:
+            content = json.loads(stop_result.content)
+            if content.get("error", {}).get("code") != "already_stopped":
+                return stop_result
         return _start_listener(body, settings)
 
-    # --- Service management actions ---
     if action in ("start_service", "stop_service", "restart_service"):
         return _handle_service_action(action, body, settings)
 
-    # --- Save settings ---
     if action == "save_settings":
         try:
             settings = store.update(body.get("settings", {}))
+            # Check restart-required for active services
+            sm = get_service_manager()
+            sm.check_restart_required("host:llm", settings.host.llm)
+            sm.check_restart_required("host:sam3", settings.host.sam3)
             return JsonResponse({"status": "ok", "settings": _dataclass_to_dict(settings)})
+        except SettingsValidationError as exc:
+            return _error(
+                "invalid_configuration",
+                "The submitted settings are invalid.",
+                details={exc.field_path: str(exc)},
+            )
         except Exception as exc:
             logger.exception("Save failed")
-            return _error("settings_save_failed", str(exc), status=500)
+            return _error("settings_save_failed", "Failed to save settings", status=500)
 
     return _error("invalid_action", f"Unknown action: {action}")
 
 
 def _stop_listener() -> JsonResponse:
-    """Stop the Host API listener with lifecycle protection."""
     global _host_api_running, _host_api_thread, _host_api_server
 
     with _lifecycle_lock:
@@ -468,7 +381,6 @@ def _stop_listener() -> JsonResponse:
 
 
 def _start_listener(body: dict, settings: AppSettings) -> JsonResponse:
-    """Start the Host API listener with lifecycle protection."""
     global _host_api_running, _host_api_thread, _host_api_server
 
     listen_ip = body.get("listen_ip", settings.host.listen_ip)
@@ -509,7 +421,6 @@ def _start_listener(body: dict, settings: AppSettings) -> JsonResponse:
 
 
 def _handle_service_action(action: str, body: dict, settings: AppSettings) -> JsonResponse:
-    """Handle start/stop/restart for host:llm or host:sam3."""
     service_id = body.get("service_id", "")
     if service_id not in ("host:llm", "host:sam3"):
         return _error("invalid_service_id", f"Unknown service: {service_id}")
@@ -534,15 +445,12 @@ def _handle_service_action(action: str, body: dict, settings: AppSettings) -> Js
 
 
 # ---------------------------------------------------------------------------
-# Legacy/backward-compat views (imported from old views.py)
+# API views (direct Django endpoints)
 # ---------------------------------------------------------------------------
 
 @csrf_exempt
 def host_evaluate_llm(request: HttpRequest) -> JsonResponse:
-    """
-    Host API Endpoint: Run LLM evaluation using Host-owned persistent config.
-    No longer requires model_path from client.
-    """
+    """Host API: Run LLM evaluation using Host-owned persistent config."""
     if request.method != "POST":
         return _error("method_not_allowed", "Method not allowed", status=405)
 
@@ -551,57 +459,26 @@ def host_evaluate_llm(request: HttpRequest) -> JsonResponse:
     except json.JSONDecodeError:
         return _error("invalid_json", "Invalid JSON")
 
-    prompt = body.get("prompt")
-    if not prompt:
-        return _error("missing_prompt", "prompt is required")
+    if not isinstance(body, dict):
+        return _error("invalid_json", "Request body must be a JSON object")
 
-    store = get_settings_store()
-    settings = store.load()
-    llm_cfg = settings.host.llm
-
-    sm = get_service_manager()
-    llm_status = sm.status("host:llm")
-
-    if llm_status["state"] == "running":
-        from ..utils.model_host.llama_server_helper import LlamaServerHelper
-        helper = LlamaServerHelper(
-            model_path=llm_cfg.model_path,
-            host=llm_cfg.host,
-            port=llm_cfg.port,
-        )
-        helper._server_ready = True
-        try:
-            result = helper.evaluate(prompt, max_tokens=body.get("max_tokens", 512))
-            log_request("/api/host/evaluate-llm/", {"prompt_length": len(prompt)})
-            return JsonResponse({"content": result, "model_id": llm_cfg.model_id, "usage": None, "metadata": {}})
-        except Exception as exc:
-            logger.exception("LLM evaluation error")
-            return _error("service_error", str(exc), status=500)
-    elif llm_status["state"] == "external":
-        import requests
-        try:
-            resp = requests.post(
-                f"{llm_cfg.base_url}/completion",
-                json={"prompt": prompt},
-                timeout=llm_cfg.request_timeout_seconds,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            content = result.get("content", result.get("generation", ""))
-            return JsonResponse({"content": content, "model_id": llm_cfg.model_id, "usage": None, "metadata": {}})
-        except Exception as exc:
-            logger.exception("External LLM request failed")
-            return _error("remote_request_failed", str(exc), status=502)
-    else:
-        return _error("service_not_running", "Host LLM service is not running", status=503)
+    try:
+        result = evaluate_host_llm(body)
+        return JsonResponse(result)
+    except InferenceRequestError as exc:
+        return _error("invalid_request", str(exc))
+    except ServiceNotRunningError as exc:
+        return _error("service_not_running", str(exc), status=503)
+    except ExternalServiceError as exc:
+        return _error("remote_request_failed", str(exc), status=502)
+    except Exception as exc:
+        logger.exception("LLM evaluation error")
+        return _error("service_error", "Internal error", status=500)
 
 
 @csrf_exempt
 def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
-    """
-    Host API Endpoint: Run SAM3 segmentation using Host-owned config.
-    Client no longer sends weights_path.
-    """
+    """Host API: Run SAM3 segmentation using Host-owned config."""
     if request.method != "POST":
         return _error("method_not_allowed", "Method not allowed", status=405)
 
@@ -610,56 +487,21 @@ def host_evaluate_sam3(request: HttpRequest) -> JsonResponse:
     except json.JSONDecodeError:
         return _error("invalid_json", "Invalid JSON")
 
-    frame_b64 = body.get("frame_b64")
-    if not frame_b64:
-        return _error("missing_frame", "frame_b64 is required")
+    if not isinstance(body, dict):
+        return _error("invalid_json", "Request body must be a JSON object")
 
     try:
-        raw = base64.b64decode(frame_b64)
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if frame is None:
-            return _error("invalid_image", "Failed to decode frame")
-        h, w = frame.shape[:2]
-        if h > 10000 or w > 10000 or h * w > 50_000_000:
-            return _error("image_too_large", f"Image dimensions {w}x{h} exceed limits")
-    except Exception as exc:
-        return _error("invalid_image", f"Invalid frame_b64: {exc}")
-
-    input_points = body.get("input_points")
-    input_boxes = body.get("input_boxes")
-
-    store = get_settings_store()
-    settings = store.load()
-    weights_path = settings.host.sam3.weights_path
-
-    if not weights_path:
-        return _error("model_not_configured", "SAM3 weights path not configured on Host. Configure in Host Portal.")
-
-    try:
-        from ..utils.model_host.sam3_server_helper import Sam3ServerHelper
-        helper = Sam3ServerHelper(checkpoint_path=weights_path)
-        if not helper.initialize():
-            return _error("service_start_failed", "Failed to initialize SAM3", status=503)
-
-        if input_points:
-            result = helper.predict_from_points(frame, input_points, [1] * len(input_points))
-        elif input_boxes:
-            result = helper.predict_from_box(frame, input_boxes[0])
-        else:
-            result = helper.predict(frame)
-
-        target_coords = helper.get_target_coordinates(frame, input_points)
-        log_request("/api/host/evaluate-sam3/", {"frame_shape": str(frame.shape)})
-        return JsonResponse({
-            "masks": result.get("masks", []),
-            "scores": result.get("scores", []),
-            "bbox": result.get("bbox", []),
-            "target_coords": target_coords,
-        })
+        result = evaluate_host_sam3(body)
+        return JsonResponse(result)
+    except InferenceRequestError as exc:
+        return _error("invalid_request", str(exc))
+    except ServiceNotRunningError as exc:
+        return _error("service_not_running", str(exc), status=503)
+    except ExternalServiceError as exc:
+        return _error("remote_request_failed", str(exc), status=502)
     except Exception as exc:
         logger.exception("SAM3 evaluation error")
-        return _error("service_error", str(exc), status=500)
+        return _error("service_error", "Internal error", status=500)
 
 
 def host_status(request: HttpRequest) -> JsonResponse:
@@ -668,11 +510,21 @@ def host_status(request: HttpRequest) -> JsonResponse:
         config_snapshot = dict(_host_api_config)
 
     sm = get_service_manager()
+    store = get_settings_store()
+    saved = store.load()
+
+    # Sync from config
+    sm.sync_configuration("host:llm", saved.host.llm)
+    sm.sync_configuration("host:sam3", saved.host.sam3)
+
     llm_status = sm.status("host:llm")
     sam_status = sm.status("host:sam3")
 
-    store = get_settings_store()
-    saved = store.load()
+    # Check restart required for listener
+    listener_restart = (
+        config_snapshot.get("listen_ip", "") != saved.host.listen_ip
+        or config_snapshot.get("listen_port", 0) != saved.host.listen_port
+    )
 
     return JsonResponse({
         "status": "running" if _host_api_running else "stopped",
@@ -680,8 +532,15 @@ def host_status(request: HttpRequest) -> JsonResponse:
         "listen_port": config_snapshot.get("listen_port", saved.host.listen_port),
         "llm": llm_status,
         "sam3": sam_status,
-        "restart_required": config_snapshot.get("listen_ip", "") != saved.host.listen_ip
-        or config_snapshot.get("listen_port", 0) != saved.host.listen_port,
+        "restart_required": listener_restart or llm_status.get("restart_required", False) or sam_status.get("restart_required", False),
+        "saved_configuration": {
+            "listen_ip": saved.host.listen_ip,
+            "listen_port": saved.host.listen_port,
+        },
+        "runtime": {
+            "listen_ip": config_snapshot.get("listen_ip", saved.host.listen_ip),
+            "listen_port": config_snapshot.get("listen_port", saved.host.listen_port),
+        },
     })
 
 
@@ -690,12 +549,10 @@ def host_status(request: HttpRequest) -> JsonResponse:
 # ---------------------------------------------------------------------------
 
 def client_portal(request: HttpRequest) -> HttpResponse:
-    """Client Portal: Tool selection page."""
     return render(request, "core_orchestrator/tool_selection.html")
 
 
 def client_run_workspace(request: HttpRequest) -> HttpResponse:
-    """Render a shared progress workspace for selected client tools."""
     tool_catalog = {
         "drone-heatmap": {
             "label": "Drone Heatmap",
@@ -739,10 +596,7 @@ def client_run_workspace(request: HttpRequest) -> HttpResponse:
 
 
 def heatmap_dashboard(request: HttpRequest) -> HttpResponse:
-    """
-    Heatmap Dashboard: Main client interface.
-    Uses persistent settings with independent LLM/SAM routing.
-    """
+    """Heatmap Dashboard — uses persistent settings with independent LLM/SAM routing."""
     store = get_settings_store()
     settings = store.load()
 
@@ -758,21 +612,16 @@ def heatmap_dashboard(request: HttpRequest) -> HttpResponse:
 
 
 def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
-    """
-    MJPEG stream endpoint.
-    Uses independent llm_mode and sam3_mode. Accepts legacy routing_mode.
-    """
+    """MJPEG stream — uses independent llm_mode and sam3_mode."""
     dataset_path = request.GET.get("dataset_path", "")
     llm_mode = request.GET.get("llm_mode", "")
     sam3_mode = request.GET.get("sam3_mode", "")
     legacy_mode = request.GET.get("routing_mode", "")
 
-    # Backward compat: if only routing_mode is set, use it for both
     if not llm_mode and not sam3_mode and legacy_mode:
         llm_mode = legacy_mode
         sam3_mode = legacy_mode
 
-    # Default from settings if still empty
     if not llm_mode or not sam3_mode:
         store = get_settings_store()
         settings = store.load()
@@ -817,10 +666,7 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
         except ImportError:
             logger.error("OpenCV not available for video stream")
             error_bytes = create_error_frame("OpenCV not installed")
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n"
-            )
+            yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n")
             return
 
         cap = None
@@ -829,25 +675,17 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
             if not cap.isOpened():
                 logger.error("Failed to open video source: %s", dataset_path)
                 error_bytes = create_error_frame(f"Cannot open: {dataset_path}")
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n"
-                )
+                yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n")
                 return
         else:
-            logger.info("No dataset path provided, showing placeholder")
             placeholder_frame = np.full((480, 640, 3), (50, 50, 60), dtype=np.uint8)
             cv2_local.putText(placeholder_frame, "No video source configured", (180, 200),
                              cv2_local.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
             cv2_local.putText(placeholder_frame, "Set dataset path in Heatmap Dashboard", (140, 240),
                              cv2_local.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
             _, buffer = cv2_local.imencode(".jpg", placeholder_frame, [cv2_local.IMWRITE_JPEG_QUALITY, 85])
-            while True:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
-                )
-                return
+            yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
+            return
 
         cap.set(cv2_local.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2_local.CAP_PROP_FRAME_HEIGHT, 480)
@@ -881,18 +719,12 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                         continue
                     else:
                         error_bytes = create_error_frame("Camera stream ended")
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n"
-                        )
+                        yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n")
                         break
 
                 if frame_count % skip_frames != 0:
                     _, buffer = cv2_local.imencode(".jpg", frame, [cv2_local.IMWRITE_JPEG_QUALITY, 85])
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
-                    )
+                    yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
                     frame_count += 1
                     continue
 
@@ -925,7 +757,6 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                         for i, mask in enumerate(masks):
                             if len(mask) > 0 and isinstance(mask[0], list):
                                 try:
-                                    import numpy as np
                                     mask_arr = np.array(mask, dtype=np.uint8)
                                     overlay = frame.copy()
                                     contours, _ = cv2_local.findContours(
@@ -958,18 +789,12 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
                     logger.warning("Inference error on frame %d: %s", frame_count, infer_exc)
 
                 _, buffer = cv2_local.imencode(".jpg", frame, [cv2_local.IMWRITE_JPEG_QUALITY, 85])
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
-                )
+                yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
 
         except Exception as exc:
             logger.exception("Stream error: %s", exc)
             error_bytes = create_error_frame(f"Stream Error: {exc}")
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n"
-            )
+            yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + error_bytes + b"\r\n")
         finally:
             if cap:
                 cap.release()
@@ -978,7 +803,3 @@ def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:
         generate(),
         content_type="multipart/x-mixed-replace; boundary=frame",
     )
-
-
-# Ensure Path is available for validation functions
-from pathlib import Path  # noqa: E402, F811

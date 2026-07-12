@@ -3,9 +3,6 @@ core_orchestrator/views.py
 
 Legacy entry point — re-exports all views from the refactored views package
 for backward compatibility.
-
-All new code lives in ``core_orchestrator/views/pages.py`` and
-``core_orchestrator/views/settings_api.py``.
 """
 
 from .views.pages import (
@@ -25,7 +22,13 @@ from .views.pages import (
     validate_opencv,
     HostAPIHandler,
 )
-from .views.settings_api import settings_view, settings_reset
+from .views.settings_api import (
+    settings_view,
+    settings_reset,
+    command_preview,
+    service_logs,
+    test_host_connection,
+)
 
 __all__ = [
     "landing_page",
@@ -39,6 +42,9 @@ __all__ = [
     "heatmap_stream",
     "settings_view",
     "settings_reset",
+    "command_preview",
+    "service_logs",
+    "test_host_connection",
     "log_request",
     "get_request_logs",
     "validate_sam3_model",

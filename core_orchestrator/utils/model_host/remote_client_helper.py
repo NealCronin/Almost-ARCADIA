@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import json
 from typing import Any, Optional
 
 import numpy as np
@@ -165,7 +166,10 @@ class RemoteClientHelper:
                         timeout=self.timeout,
                     )
                 resp.raise_for_status()
-                return resp.json()
+                try:
+                    return resp.json()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise RemoteClientError(f"Invalid JSON response: {exc}") from exc
 
             except requests.RequestException as exc:
                 if attempt < MAX_RETRIES - 1:
