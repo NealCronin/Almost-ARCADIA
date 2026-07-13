@@ -7,7 +7,7 @@
     <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-8">
         <div>
             <h1 class="text-3xl font-bold text-white mb-3">Run Workspace</h1>
-            <p class="text-gray-400 text-lg">Track progress for each selected tool and switch between outputs.</p>
+            <p class="text-gray-400 text-lg">Monitor selected tools and switch between active outputs.</p>
         </div>
         <a href="{% url 'core_orchestrator:client_portal' %}" class="inline-flex justify-center px-4 py-2 rounded-lg bg-gray-700 text-gray-100 hover:bg-gray-600 transition-colors font-medium">
             New Run
@@ -30,70 +30,46 @@
         <div class="p-6">
             {% for tool in selected_tools %}
             <section id="tab-{{ tool.key }}" class="run-panel {% if not forloop.first %}hidden{% endif %}" role="tabpanel">
-                <div class="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6">
-                    <div class="rounded-lg bg-gray-900/60 border border-gray-700 p-5 min-h-[360px]">
-                        <div class="flex items-start justify-between gap-4 mb-5">
-                            <div>
-                                <h2 class="text-2xl font-bold text-white">{{ tool.label }}</h2>
-                                <p class="text-gray-400 mt-2">{{ tool.description }}</p>
-                            </div>
-                            <span class="status-pill px-3 py-1 rounded-full bg-blue-900/70 text-blue-200 text-sm font-medium">Running</span>
+                <div class="rounded-lg bg-gray-900/60 border border-gray-700 p-5 min-h-[460px]">
+                    <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-5">
+                        <div>
+                            <h2 class="text-2xl font-bold text-white">{{ tool.label }}</h2>
+                            <p class="text-gray-400 mt-2">{{ tool.description }}</p>
                         </div>
-
-                        <div class="mb-6">
-                            <div class="flex justify-between text-sm text-gray-400 mb-2">
-                                <span>Progress</span>
-                                <span class="progress-label">0%</span>
-                            </div>
-                            <div class="h-3 rounded-full bg-gray-700 overflow-hidden">
-                                <div class="progress-bar h-full rounded-full bg-green-500 transition-all duration-500" style="width: 0%"></div>
-                            </div>
-                        </div>
-
-                        <div class="rounded-lg border border-gray-700 bg-gray-950/40 p-5">
-                            <h3 class="font-semibold text-white mb-3">Live Output</h3>
-                            {% if tool.key == "drone-heatmap" %}
-                            <div class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center text-gray-400">
-                                Heatmap preview will appear here.
-                            </div>
-                            <a href="{% url 'core_orchestrator:heatmap_dashboard' %}" class="inline-flex mt-4 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-medium">
-                                Open Heatmap Dashboard
-                            </a>
-                            {% elif tool.key == "3d-reconstruction" %}
-                            <div class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center text-gray-400">
-                                3D reconstruction viewer will appear here.
-                            </div>
-                            {% else %}
-                            <div class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center text-gray-400">
-                                Knowledge graph preview will appear here.
-                            </div>
-                            {% endif %}
-                        </div>
+                        <span class="status-pill self-start px-3 py-1 rounded-full bg-blue-900/70 text-blue-200 text-sm font-medium">Running</span>
                     </div>
 
-                    <aside class="rounded-lg bg-gray-900/60 border border-gray-700 p-5">
-                        <h3 class="font-semibold text-white mb-4">Run Details</h3>
-                        <dl class="space-y-3 text-sm mb-6">
-                            <div class="flex justify-between gap-4">
-                                <dt class="text-gray-500">Files</dt>
-                                <dd class="text-gray-200">{{ tool.file_count }}</dd>
+                    <div class="rounded-lg border border-gray-700 bg-gray-950/40 p-5">
+                        <h3 class="font-semibold text-white mb-3">Live Output</h3>
+                        {% if tool.key == "drone-heatmap" %}
+                        <div class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex flex-col items-center justify-center text-gray-400 gap-4 px-6 text-center">
+                            <p>Heatmap workflow is running.</p>
+                            <a href="{% url 'core_orchestrator:heatmap_dashboard' %}" class="inline-flex px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-medium">
+                                Open Heatmap Dashboard
+                            </a>
+                        </div>
+                        {% elif tool.key == "3d-reconstruction" %}
+                        <div id="mast3r-output"
+                             class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex flex-col items-center justify-center text-gray-400 gap-4 px-6 text-center"
+                             data-mast3r-dataset="{{ tool.dataset_path }}"
+                             data-reconstruction-engine="{% if tool.settings == 'high-quality-live-reconstruction' %}lingbot-map{% else %}mast3r-slam{% endif %}">
+                            <p>{% if tool.settings == 'high-quality-live-reconstruction' %}LingBot-Map high-quality reconstruction opens a browser viewer and streams partial updates during inference.{% else %}MASt3R-SLAM live reconstruction runs in its own viewer process.{% endif %}</p>
+                            <p id="mast3r-status" class="text-sm text-gray-500">Starting reconstruction...</p>
+                            <a id="reconstruction-viewer-link" href="#" target="_blank" rel="noopener" class="hidden px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-medium">Open Viewer</a>
+                            <pre id="mast3r-log" class="hidden max-h-56 w-full overflow-auto rounded-lg bg-black/50 p-3 text-left text-xs leading-5 text-green-200"></pre>
+                            <div class="flex flex-col sm:flex-row gap-3">
+                                <button type="button" id="mast3r-stop" class="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-medium">
+                                    Stop
+                                </button>
                             </div>
-                            <div class="flex justify-between gap-4">
-                                <dt class="text-gray-500">Settings</dt>
-                                <dd class="text-gray-200 text-right">{% if tool.settings %}{{ tool.settings }}{% else %}Default{% endif %}</dd>
-                            </div>
-                        </dl>
-
-                        <h3 class="font-semibold text-white mb-4">Steps</h3>
-                        <ol class="space-y-3">
-                            {% for step in tool.steps %}
-                            <li class="step-item flex items-center gap-3 text-sm text-gray-400">
-                                <span class="step-dot h-3 w-3 rounded-full bg-gray-600"></span>
-                                {{ step }}
-                            </li>
-                            {% endfor %}
-                        </ol>
-                    </aside>
+                        </div>
+                        {% else %}
+                        <div class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex flex-col items-center justify-center text-gray-400 gap-3 px-6 text-center">
+                            <p>{{ tool.label }} workflow is running.</p>
+                            <p class="text-sm text-gray-500">Output will appear here when this tool publishes results.</p>
+                        </div>
+                        {% endif %}
+                    </div>
                 </div>
             </section>
             {% endfor %}
@@ -122,33 +98,86 @@
         });
     });
 
-    document.querySelectorAll(".run-panel").forEach((panel, panelIndex) => {
-        const bar = panel.querySelector(".progress-bar");
-        const label = panel.querySelector(".progress-label");
-        const status = panel.querySelector(".status-pill");
-        const steps = Array.from(panel.querySelectorAll(".step-item"));
-        let progress = 0;
+    const mast3rOutput = document.getElementById("mast3r-output");
+    const mast3rStatus = document.getElementById("mast3r-status");
+    const mast3rStop = document.getElementById("mast3r-stop");
+    const mast3rLog = document.getElementById("mast3r-log");
+    const reconstructionViewerLink = document.getElementById("reconstruction-viewer-link");
+    let mast3rStartRequested = false;
 
-        const timer = window.setInterval(() => {
-            progress = Math.min(progress + 8 + panelIndex * 2, 100);
-            bar.style.width = `${progress}%`;
-            label.textContent = `${progress}%`;
+    function selectedEngineName() {
+        return mast3rOutput?.dataset.reconstructionEngine === "lingbot-map" ? "LingBot-Map" : "MASt3R-SLAM";
+    }
 
-            const activeSteps = Math.ceil((progress / 100) * steps.length);
-            steps.forEach((step, index) => {
-                const complete = index < activeSteps;
-                step.classList.toggle("text-gray-200", complete);
-                step.classList.toggle("text-gray-400", !complete);
-                step.querySelector(".step-dot").classList.toggle("bg-green-500", complete);
-                step.querySelector(".step-dot").classList.toggle("bg-gray-600", !complete);
-            });
+    async function updateMast3rStatus(message) {
+        if (!mast3rStatus) return;
+        if (message) {
+            mast3rStatus.textContent = message;
+        }
 
-            if (progress >= 100) {
-                status.textContent = "Complete";
-                status.className = "status-pill px-3 py-1 rounded-full bg-green-900/70 text-green-200 text-sm font-medium";
-                window.clearInterval(timer);
+        try {
+            const response = await fetch("{% url 'core_orchestrator:reconstruction_status' %}");
+            const data = await response.json();
+            const engineName = data.engine === "lingbot-map" ? "LingBot-Map" : "MASt3R-SLAM";
+            mast3rStatus.textContent = data.running
+                ? `${engineName} is running (PID ${data.pid}).`
+                : `${engineName} is ${data.status || "stopped"}.`;
+            if (reconstructionViewerLink && data.viewer_url) {
+                reconstructionViewerLink.href = data.viewer_url;
+                reconstructionViewerLink.classList.remove("hidden");
             }
-        }, 900);
-    });
+            if (mast3rLog && data.log_tail) {
+                mast3rLog.textContent = data.log_tail;
+                mast3rLog.classList.remove("hidden");
+            }
+        } catch (error) {
+            mast3rStatus.textContent = `Could not read ${selectedEngineName()} status.`;
+        }
+    }
+
+    async function postMast3rCommand(url, pendingMessage) {
+        if (!mast3rStatus) return;
+        mast3rStatus.textContent = pendingMessage;
+        try {
+            const dataset = mast3rOutput?.dataset.mast3rDataset || "";
+            const engine = mast3rOutput?.dataset.reconstructionEngine || "mast3r-slam";
+            const response = await fetch(url, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    dataset: dataset,
+                    engine: engine,
+                    config: "config/base.yaml",
+                    save_as: "web-launch",
+                    port: 8080,
+                }),
+            });
+            const data = await response.json();
+            mast3rStatus.textContent = data.error || data.message || "Command completed.";
+            if (reconstructionViewerLink && data.viewer_url) {
+                reconstructionViewerLink.href = data.viewer_url;
+                reconstructionViewerLink.classList.remove("hidden");
+            }
+            if (mast3rLog && data.log_tail) {
+                mast3rLog.textContent = data.log_tail;
+                mast3rLog.classList.remove("hidden");
+            }
+            window.setTimeout(() => updateMast3rStatus(), 1000);
+        } catch (error) {
+            mast3rStatus.textContent = `${selectedEngineName()} command failed.`;
+        }
+    }
+
+    if (mast3rOutput && mast3rStop) {
+        mast3rStop.textContent = `Stop ${selectedEngineName()}`;
+        mast3rStop.addEventListener("click", () => {
+            postMast3rCommand("{% url 'core_orchestrator:reconstruction_stop' %}", `Stopping ${selectedEngineName()}...`);
+        });
+        if (!mast3rStartRequested) {
+            mast3rStartRequested = true;
+            postMast3rCommand("{% url 'core_orchestrator:reconstruction_start' %}", `Starting ${selectedEngineName()}...`);
+        }
+        window.setInterval(() => updateMast3rStatus(), 5000);
+    }
 </script>
 {% endblock %}

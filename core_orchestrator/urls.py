@@ -23,4 +23,8 @@ urlpatterns = [
     path("client/run/", views.client_run_workspace, name="client_run_workspace"),
     path("client/heatmap/", views.heatmap_dashboard, name="heatmap_dashboard"),
     path("stream/heatmap/", views.heatmap_stream, name="heatmap_stream"),
+    path("api/reconstruction/upload/", views.reconstruction_upload_dataset, name="reconstruction_upload_dataset"),
+    path("api/reconstruction/start/", views.reconstruction_start, name="reconstruction_start"),
+    path("api/reconstruction/stop/", views.reconstruction_stop, name="reconstruction_stop"),
+    path("api/reconstruction/status/", views.reconstruction_status, name="reconstruction_status"),
 ]

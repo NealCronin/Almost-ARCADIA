@@ -17,10 +17,21 @@
                     <p class="text-sm text-gray-400">Choose individual image/video files, or select a whole folder of drone captures.</p>
                 </div>
                 <div>
-                    <label class="block cursor-pointer px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
-                        Upload Dataset
+                    <div class="relative">
+                        <button type="button" id="upload-menu-toggle" class="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium">
+                            Upload Dataset
+                        </button>
+                        <div id="upload-menu" class="hidden absolute right-0 z-20 mt-2 w-44 overflow-hidden rounded-lg border border-gray-700 bg-gray-900 shadow-xl">
+                            <button type="button" id="upload-files-choice" class="block w-full px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-800">
+                                File(s)
+                            </button>
+                            <button type="button" id="upload-folder-choice" class="block w-full px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-800">
+                                Folder
+                            </button>
+                        </div>
                         <input id="file-input" class="sr-only" type="file" multiple accept="image/*,video/*">
-                    </label>
+                        <input id="folder-input" class="sr-only" type="file" webkitdirectory directory multiple>
+                    </div>
                 </div>
             </div>
 
@@ -145,6 +156,11 @@
 {% block extra_js %}
 <script>
     const fileInput = document.getElementById("file-input");
+    const folderInput = document.getElementById("folder-input");
+    const uploadMenuToggle = document.getElementById("upload-menu-toggle");
+    const uploadMenu = document.getElementById("upload-menu");
+    const uploadFilesChoice = document.getElementById("upload-files-choice");
+    const uploadFolderChoice = document.getElementById("upload-folder-choice");
     const uploadDropzone = document.getElementById("upload-dropzone");
     const fileList = document.getElementById("file-list");
     const uploadSummary = document.getElementById("upload-summary");
@@ -216,6 +232,26 @@
         return file.type.startsWith("video/");
     }
 
+    const naturalPathCollator = new Intl.Collator(undefined, {
+        numeric: true,
+        sensitivity: "base",
+    });
+
+    function fileUploadPath(file) {
+        return file.webkitRelativePath || file.relativePath || file.name;
+    }
+
+    function sortFilesSequentially(files) {
+        return Array.from(files).sort((left, right) => {
+            const leftIsVideo = isVideoFile(left);
+            const rightIsVideo = isVideoFile(right);
+            if (leftIsVideo !== rightIsVideo) {
+                return leftIsVideo ? 1 : -1;
+            }
+            return naturalPathCollator.compare(fileUploadPath(left), fileUploadPath(right));
+        });
+    }
+
     function getDatasetError(files) {
         const imageFiles = files.filter(isImageFile);
         const videoFiles = files.filter(isVideoFile);
@@ -235,7 +271,7 @@
     }
 
     function renderFiles(files) {
-        const incomingFiles = Array.from(files);
+        const incomingFiles = sortFilesSequentially(files);
         const datasetError = getDatasetError(incomingFiles);
 
         if (datasetError) {
@@ -264,7 +300,7 @@
         selectedFiles.slice(0, 8).forEach((file) => {
             const li = document.createElement("li");
             li.className = "truncate rounded-md bg-gray-800 px-3 py-2";
-            li.textContent = file.webkitRelativePath || file.name;
+            li.textContent = fileUploadPath(file);
             fileList.appendChild(li);
         });
         if (selectedFiles.length > 8) {
@@ -288,9 +324,11 @@
         });
     }
 
-    async function collectFilesFromEntry(entry) {
+    async function collectFilesFromEntry(entry, parentPath = "") {
         if (entry.isFile) {
-            return [await getEntryFile(entry)];
+            const file = await getEntryFile(entry);
+            file.relativePath = `${parentPath}${file.name}`;
+            return [file];
         }
 
         if (!entry.isDirectory) {
@@ -300,9 +338,10 @@
         const directoryReader = entry.createReader();
         const files = [];
         let entries = await readDirectoryEntries(directoryReader);
+        const nestedParentPath = `${parentPath}${entry.name}/`;
 
         while (entries.length) {
-            const nestedFiles = await Promise.all(entries.map(collectFilesFromEntry));
+            const nestedFiles = await Promise.all(entries.map((childEntry) => collectFilesFromEntry(childEntry, nestedParentPath)));
             files.push(...nestedFiles.flat());
             entries = await readDirectoryEntries(directoryReader);
         }
@@ -322,7 +361,25 @@
         return files.flat();
     }
 
+    uploadMenuToggle.addEventListener("click", () => {
+        uploadMenu.classList.toggle("hidden");
+    });
+    uploadFilesChoice.addEventListener("click", () => {
+        uploadMenu.classList.add("hidden");
+        fileInput.click();
+    });
+    uploadFolderChoice.addEventListener("click", () => {
+        uploadMenu.classList.add("hidden");
+        folderInput.click();
+    });
+    document.addEventListener("click", (event) => {
+        if (!uploadMenu.contains(event.target) && event.target !== uploadMenuToggle) {
+            uploadMenu.classList.add("hidden");
+        }
+    });
+
     fileInput.addEventListener("change", (event) => renderFiles(event.target.files));
+    folderInput.addEventListener("change", (event) => renderFiles(event.target.files));
     uploadDropzone.addEventListener("dragover", (event) => {
         event.preventDefault();
         uploadDropzone.classList.add("border-blue-500", "bg-gray-900");
@@ -337,6 +394,7 @@
     });
     clearFiles.addEventListener("click", () => {
         fileInput.value = "";
+        folderInput.value = "";
         renderFiles([]);
     });
 
@@ -403,7 +461,51 @@
         }
     });
 
-    document.getElementById("client-tool-form").addEventListener("submit", (event) => {
+    function selectedReconstructionEngineName(tools) {
+        if (!tools.includes("3d-reconstruction")) {
+            return "selected tools";
+        }
+        const reconstructionSetting = document.querySelector("input[name='reconstruction_settings']:checked")?.value || "";
+        return reconstructionSetting === "high-quality-live-reconstruction" ? "LingBot-Map" : "MASt3R-SLAM";
+    }
+
+    async function uploadSelectedDataset(engineName) {
+        const formData = new FormData();
+        selectedFiles.forEach((file) => {
+            const relativePath = fileUploadPath(file);
+            formData.append("files", file, file.name);
+            formData.append("relative_paths", relativePath);
+        });
+
+        uploadProgress.classList.remove("hidden");
+        uploadProgressLabel.textContent = `Saving dataset for ${engineName}...`;
+        uploadProgressPercent.textContent = "0%";
+        uploadProgressBar.style.width = "0%";
+        uploadProgressBar.className = "h-full rounded-full bg-blue-500 transition-all duration-300";
+
+        const response = await fetch("{% url 'core_orchestrator:reconstruction_upload_dataset' %}", {
+            method: "POST",
+            body: formData,
+        });
+        const contentType = response.headers.get("content-type") || "";
+        const data = contentType.includes("application/json")
+            ? await response.json()
+            : {error: await response.text()};
+        if (!response.ok) {
+            const fallbackMessage = response.status === 400
+                ? "Dataset upload was rejected by the server."
+                : "Dataset upload failed.";
+            throw new Error(data.error || fallbackMessage);
+        }
+
+        uploadProgressLabel.textContent = "Dataset saved";
+        uploadProgressPercent.textContent = "100%";
+        uploadProgressBar.style.width = "100%";
+        uploadProgressBar.className = "h-full rounded-full bg-green-500 transition-all duration-300";
+        return data;
+    }
+
+    document.getElementById("client-tool-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         const tools = Array.from(document.querySelectorAll("input[name='tools']:checked")).map((tool) => tool.value);
         if (!selectedFiles.length) {
@@ -429,6 +531,18 @@
         });
         if (confirmedAdvancedParameters.length) {
             params.set("advanced_parameters", confirmedAdvancedParameters.join(","));
+        }
+
+        if (selectedFiles.length) {
+            try {
+                const dataset = await uploadSelectedDataset(selectedReconstructionEngineName(tools));
+                params.set("dataset_path", dataset.dataset_path);
+                params.set("file_count", String(dataset.file_count));
+            } catch (error) {
+                formStatus.textContent = error.message;
+                formStatus.className = "text-sm text-yellow-400";
+                return;
+            }
         }
 
         window.location.href = `{% url 'core_orchestrator:client_run_workspace' %}?${params.toString()}`;

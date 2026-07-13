@@ -70,9 +70,11 @@ USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# Streaming / upload limits for remote inference payloads
-DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50 MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
+# Streaming / upload limits for remote inference and large reconstruction datasets.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024 * 1024  # 5 GB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+DATA_UPLOAD_MAX_NUMBER_FILES = int(os.environ.get("DATA_UPLOAD_MAX_NUMBER_FILES", "100000"))
+DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.environ.get("DATA_UPLOAD_MAX_NUMBER_FIELDS", "210000"))
 
 # Host server defaults
 HOST_LISTEN_HOST = os.environ.get("HOST_LISTEN_HOST", "0.0.0.0")

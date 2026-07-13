@@ -83,3 +83,37 @@ coverage.xml
 
 # Logs
 *.log
+
+# User uploaded datasets
+uploads/
+runtime/
+
+# Local MASt3R-SLAM checkout copy
+MASt3R-SLAM/
+
+# Vendored MASt3R-SLAM runtime artifacts
+vendor/mast3r-slam/.venv/
+vendor/mast3r-slam/.tools/
+vendor/mast3r-slam/.agents/
+vendor/mast3r-slam/datasets/
+vendor/mast3r-slam/checkpoints/
+vendor/mast3r-slam/logs/
+vendor/mast3r-slam/Archive/
+vendor/mast3r-slam/MidAir/
+vendor/mast3r-slam/Train/
+vendor/mast3r-slam/Train (1)/
+vendor/mast3r-slam/frames/
+vendor/mast3r-slam/groundtruths/
+vendor/mast3r-slam/malaga-urban-dataset-extract-06/
+vendor/mast3r-slam/example_quarry_2.0/
+vendor/mast3r-slam/03/
+vendor/mast3r-slam/Not-Really-ARCADIA/
+vendor/mast3r-slam/mobileclip_blt.ts
+vendor/mast3r-slam/*.mp4
+vendor/mast3r-slam/*.pt
+vendor/mast3r-slam/*.pth
+vendor/mast3r-slam/*.bin
+vendor/mast3r-slam/*.onnx
+vendor/mast3r-slam/*.engine
+vendor/mast3r-slam/*.safetensors
+!vendor/mast3r-slam/mast3r_slam_backends*.so
