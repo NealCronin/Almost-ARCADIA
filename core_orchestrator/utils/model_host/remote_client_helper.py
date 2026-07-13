@@ -218,9 +218,9 @@ def cv2_imencode(frame: Any) -> tuple[bool, bytes]:
     try:
         success, buffer = cv2.imencode(".png", frame)
         return (success, buffer.tobytes() if success else b"")
-    except Exception:
+    except Exception as exc:
+        logger.warning("Image encoding failed: %s", exc, exc_info=True)
         return (False, b"")
-
 
 def cv2_imdecode(buf: Any) -> Any:
     """
@@ -234,7 +234,8 @@ def cv2_imdecode(buf: Any) -> Any:
     try:
         arr = np.frombuffer(buf, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Image decoding failed: %s", exc, exc_info=True)
         return None
 
 
@@ -270,5 +271,6 @@ def base64_to_image(b64_string: str) -> Optional[Any]:
         if cv2 is None:
             return None
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Base64 image decoding failed: %s", exc, exc_info=True)
         return None
