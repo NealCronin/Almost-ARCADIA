@@ -1,7 +1,17 @@
 """Shared data contracts for the Almost ARCADIA prototype.
 
-All classes are plain dataclasses with explicit JSON serialization and
-deserialization. No framework dependencies.
+These classes are plain dataclasses that carry data between modules.
+No framework dependencies — only the Python standard library.
+
+JSON-facing contracts (serializable to/from dict/JSON):
+    ModelSpec, ServiceSpec, ServiceEndpoint, NodeConfig,
+    LanguageResponse, SegmentationResult, AnalysisConfig,
+    AnalysisResult, AnalysisWorkspace
+
+Runtime-only contracts (not JSON-serializable — binary or unserializable fields):
+    RunningService    — holds an arbitrary runtime_handle
+    LanguageRequest   — contains list[bytes] for images
+    SegmentationRequest — contains bytes for image data
 """
 
 from __future__ import annotations
@@ -13,11 +23,12 @@ from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
-# ModelSpec
+# JSON-facing contracts
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ModelSpec:
+    """Description of a model to be loaded by a service."""
     repository: Optional[str] = None
     filename: Optional[str] = None
     local_path: Optional[str] = None
@@ -33,12 +44,9 @@ class ModelSpec:
         return cls(**data)
 
 
-# ---------------------------------------------------------------------------
-# ServiceSpec
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ServiceSpec:
+    """Specification for launching a service."""
     service_type: str
     port: int
     model: Optional[ModelSpec] = None
@@ -61,12 +69,9 @@ class ServiceSpec:
         return cls(**d)
 
 
-# ---------------------------------------------------------------------------
-# ServiceEndpoint
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ServiceEndpoint:
+    """Network endpoint for a running service."""
     host: str
     port: int
     service_type: str
@@ -82,12 +87,9 @@ class ServiceEndpoint:
         return cls(**data)
 
 
-# ---------------------------------------------------------------------------
-# NodeConfig
-# ---------------------------------------------------------------------------
-
 @dataclass
 class NodeConfig:
+    """Configuration for an inference node."""
     name: str
     host: str
     instruction_port: int
@@ -104,70 +106,9 @@ class NodeConfig:
         return cls(**data)
 
 
-# ---------------------------------------------------------------------------
-# RunningService
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RunningService:
-    spec: ServiceSpec
-    endpoint: ServiceEndpoint
-    runtime_handle: Any = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["spec"] = self.spec.to_dict()
-        d["endpoint"] = self.endpoint.to_dict()
-        # runtime_handle is never serialised.
-        d.pop("runtime_handle", None)
-        return d
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> RunningService:
-        d = dict(data)
-        d["spec"] = ServiceSpec.from_dict(d["spec"])
-        d["endpoint"] = ServiceEndpoint.from_dict(d["endpoint"])
-        return cls(**d)
-
-
-# ---------------------------------------------------------------------------
-# LanguageRequest
-# ---------------------------------------------------------------------------
-
-@dataclass
-class LanguageRequest:
-    prompt: str
-    images: Optional[list[bytes]] = None
-    settings: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        # images (list[bytes]) cannot be represented in JSON, so we
-        # convert to None at the JSON boundary.
-        d["images"] = None
-        return d
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> LanguageRequest:
-        # images will always be None when coming from JSON.
-        d = dict(data)
-        if "images" in d and d["images"] is not None:
-            d["images"] = None
-        return cls(**d)
-
-
-# ---------------------------------------------------------------------------
-# LanguageResponse
-# ---------------------------------------------------------------------------
-
 @dataclass
 class LanguageResponse:
+    """Response from a language model."""
     text: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,38 +122,19 @@ class LanguageResponse:
         return cls(**data)
 
 
-# ---------------------------------------------------------------------------
-# SegmentationRequest
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SegmentationRequest:
-    image: bytes
-    prompt: str | list[str]
-
-    def to_dict(self) -> dict[str, Any]:
-        # image (bytes) cannot be represented in JSON.
-        return {
-            "prompt": self.prompt,
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SegmentationRequest:
-        d = dict(data)
-        if "image" not in d:
-            d["image"] = b""  # stub
-        return cls(**d)
-
-
-# ---------------------------------------------------------------------------
-# SegmentationResult
-# ---------------------------------------------------------------------------
-
 @dataclass
 class SegmentationResult:
+    """Result from an image segmentation model.
+
+    ``masks``: list of per-pixel mask values.
+    Each mask element represents a single segmentation mask.
+    The exact in-memory representation depends on what the
+    segmentation backend produces — typically a list of NumPy arrays
+    or 2-D boolean grids, one per detected region. These masks are
+    **not** JSON-serializable and are omitted from dict/JSON output.
+    Use the masks only within-process; encode them via the future
+    SAM API when transmitting over HTTP.
+    """
     masks: list
     labels: list[str]
     confidences: list[float]
@@ -221,22 +143,26 @@ class SegmentationResult:
     source_height: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # masks may contain non-serializable elements (e.g. numpy arrays).
+        # We omit them from the dict; reconstruction requires the
+        # original in-memory object.
+        d.pop("masks", None)
+        return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SegmentationResult:
-        return cls(**data)
+        d = dict(data)
+        d.setdefault("masks", [])
+        return cls(**d)
 
-
-# ---------------------------------------------------------------------------
-# AnalysisConfig
-# ---------------------------------------------------------------------------
 
 @dataclass
 class AnalysisConfig:
+    """Configuration for a full analysis pipeline."""
     input_path: str
     output_path: str
     scene_service: ServiceSpec
@@ -266,12 +192,9 @@ class AnalysisConfig:
         return cls(**d)
 
 
-# ---------------------------------------------------------------------------
-# AnalysisResult
-# ---------------------------------------------------------------------------
-
 @dataclass
 class AnalysisResult:
+    """Summary of a completed analysis pipeline."""
     output_directory: str
     result_files: list[str]
     success: bool
@@ -288,12 +211,9 @@ class AnalysisResult:
         return cls(**data)
 
 
-# ---------------------------------------------------------------------------
-# AnalysisWorkspace
-# ---------------------------------------------------------------------------
-
 @dataclass
 class AnalysisWorkspace:
+    """Filesystem workspace for an analysis run."""
     root: Path
     log_path: Path
     config_path: Path
@@ -321,16 +241,82 @@ class AnalysisWorkspace:
 
 
 # ---------------------------------------------------------------------------
-# Top-level helpers
+# Runtime-only contracts (binary / unserializable fields)
 # ---------------------------------------------------------------------------
 
-def to_json(obj: Any) -> str:
-    """Serialize a contract object (or dict) to a JSON string."""
-    if hasattr(obj, "to_json"):
-        return obj.to_json()
-    return json.dumps(obj)
+@dataclass
+class RunningService:
+    """A service that is currently running.
+
+    The ``runtime_handle`` holds an opaque object produced by the
+    service launcher (e.g. a subprocess, a connection, or a model
+    reference). It may not be serializable and is **never** included
+    in any dictionary or JSON representation.
+    """
+
+    spec: ServiceSpec
+    endpoint: ServiceEndpoint
+    runtime_handle: Any = None
+
+    # Public summary — does not include runtime_handle
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "spec": self.spec.to_dict(),
+            "endpoint": self.endpoint.to_dict(),
+        }
 
 
-def from_json(text: str) -> dict[str, Any]:
-    """Parse a JSON string into a plain dict (no deserialization)."""
-    return json.loads(text)
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RunningService:
+        d = dict(data)
+        d["spec"] = ServiceSpec.from_dict(d["spec"])
+        d["endpoint"] = ServiceEndpoint.from_dict(d["endpoint"])
+        return cls(**d)
+
+
+@dataclass
+class LanguageRequest:
+    """Request to a language model.
+
+    The ``images`` field carries raw binary image data. This contract
+    is intended for in-memory use — the bytes are **not** serialised
+    to JSON here. The future inference clients are responsible for
+    choosing an encoding (base64, multipart, etc.) when transmitting
+    over the network.
+    """
+
+    prompt: str
+    images: Optional[list[bytes]] = None
+    settings: dict[str, Any] = field(default_factory=dict)
+
+    # No to_dict / from_json — this contract is not JSON-facing.
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LanguageRequest:
+        """Construct from a dict, but images will be ``None``."""
+        d = dict(data)
+        d.setdefault("images", None)
+        return cls(**d)
+
+
+@dataclass
+class SegmentationRequest:
+    """Request to a segmentation model.
+
+    The ``image`` field carries raw binary image data. Like
+    ``LanguageRequest``, this contract is for in-memory use only — the
+    bytes are **not** serialised to JSON here. The future segmentation
+    client is responsible for encoding over the network.
+    """
+
+    image: bytes
+    prompt: str | list[str]
+
+    # No to_dict / from_json — this contract is not JSON-facing.
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SegmentationRequest:
+        """Construct from a dict, but image will be an empty stub."""
+        d = dict(data)
+        d.setdefault("image", b"")
+        return cls(**d)

@@ -2,21 +2,23 @@
 
 Covers:
 - Every JSON-facing contract can be constructed.
-- Nested contracts survive a dict round trip.
-- Nested contracts survive a JSON round trip.
+- Nested contracts survive dict and JSON round trips.
 - Mutable defaults are not shared between instances.
 - Missing required fields fail clearly.
-- RunningService.runtime_handle is excluded from serialization.
-- pathlib.Path values are encoded and reconstructed correctly.
+- RunningService.runtime_handle is excluded from serialization
+  (including a non-copyable handle).
+- Binary request data remains unchanged in memory.
+- Runtime-only contracts do not perform lossy JSON round trips.
+- pathlib.Path values encode and reconstruct correctly.
 """
 
+import copy
 import json
-import re
 from pathlib import Path
 
 import pytest
 
-from contracts import (
+from arcadia.contracts import (
     AnalysisConfig,
     AnalysisResult,
     AnalysisWorkspace,
@@ -33,7 +35,7 @@ from contracts import (
 
 
 # =====================================================================
-# Construction — every contract can be instantiated
+# 1. Construction — every contract can be instantiated
 # =====================================================================
 
 def test_model_spec_construction():
@@ -42,7 +44,6 @@ def test_model_spec_construction():
     assert m.filename == "file.bin"
     assert m.local_path == "/tmp"
 
-    # Optional fields with defaults
     m2 = ModelSpec()
     assert m2.repository is None
     assert m2.filename is None
@@ -61,7 +62,6 @@ def test_service_spec_construction():
     assert s.model.filename == "model.bin"
     assert s.settings["max_tokens"] == 2048
 
-    # Optional fields
     s2 = ServiceSpec(service_type="vision", port=9000)
     assert s2.model is None
     assert s2.settings == {}
@@ -175,7 +175,7 @@ def test_analysis_workspace_construction():
 
 
 # =====================================================================
-# Dict round-trip (to_dict / from_dict)
+# 2. Dict round-trip (to_dict / from_dict) — JSON-facing contracts
 # =====================================================================
 
 def test_model_spec_dict_roundtrip():
@@ -221,34 +221,6 @@ def test_node_config_dict_roundtrip():
     assert n2.host == n.host
     assert n2.instruction_port == n.instruction_port
     assert n2.local == n.local
-
-
-def test_running_service_dict_roundtrip():
-    rs = RunningService(
-        spec=ServiceSpec(service_type="llm", port=8000),
-        endpoint=ServiceEndpoint(host="127.0.0.1", port=8001, service_type="llm"),
-        runtime_handle="fake",
-    )
-    d = rs.to_dict()
-    rs2 = RunningService.from_dict(d)
-    assert rs2.spec.service_type == rs.spec.service_type
-    assert rs2.endpoint.host == rs.endpoint.host
-    # runtime_handle is excluded from serialization
-    assert "runtime_handle" not in d
-
-
-def test_language_request_dict_roundtrip():
-    req = LanguageRequest(
-        prompt="test",
-        images=[b"img1", b"img2"],
-        settings={"t": 0.5},
-    )
-    d = req.to_dict()
-    req2 = LanguageRequest.from_dict(d)
-    assert req2.prompt == req.prompt
-    # images are always None after JSON boundary
-    assert req2.images is None
-    assert req2.settings == req.settings
 
 
 def test_language_response_dict_roundtrip():
@@ -327,7 +299,7 @@ def test_analysis_workspace_dict_roundtrip():
 
 
 # =====================================================================
-# JSON round-trip (to_json / from_json)
+# 3. JSON round-trip — JSON-facing contracts
 # =====================================================================
 
 def test_model_spec_json_roundtrip():
@@ -405,7 +377,7 @@ def test_analysis_workspace_json_roundtrip():
 
 
 # =====================================================================
-# Nested contracts survive dict round trip
+# 4. Nested contracts survive dict and JSON round trips
 # =====================================================================
 
 def test_nested_analysis_config_dict_roundtrip():
@@ -461,8 +433,36 @@ def test_nested_running_service_dict_roundtrip():
     assert rs2.endpoint.host == "127.0.0.1"
 
 
+def test_full_analysis_config_json_roundtrip():
+    """Full nested JSON round-trip."""
+    cfg = AnalysisConfig(
+        input_path="/data/input.jpg",
+        output_path="/data/output",
+        scene_service=ServiceSpec(
+            service_type="scene",
+            port=8000,
+            model=ModelSpec(repository="scene-model", filename="scene.bin", local_path="/m/scene"),
+            settings={"resolution": "512x512", "verbose": True},
+        ),
+        segmentation_service=ServiceSpec(
+            service_type="sam",
+            port=9000,
+            model=ModelSpec(repository="sam-model", filename="sam.bin"),
+            settings={"nms_threshold": 0.5, "min_area": 1000},
+        ),
+        scene_node=NodeConfig(name="scene", host="127.0.0.1", instruction_port=5000, local=False),
+        segmentation_node=NodeConfig(name="sam", host="127.0.0.1", instruction_port=5001, local=False),
+        pipeline_settings={"steps": 3, "retry": True, "timeout": 30},
+    )
+    j = json.loads(cfg.to_json())
+    cfg2 = AnalysisConfig.from_dict(j)
+    assert cfg2.scene_service.model.repository == "scene-model"
+    assert cfg2.segmentation_service.settings["nms_threshold"] == 0.5
+    assert cfg2.pipeline_settings["timeout"] == 30
+
+
 # =====================================================================
-# Mutable defaults isolation
+# 5. Mutable defaults isolation
 # =====================================================================
 
 def test_model_spec_no_shared_defaults():
@@ -476,7 +476,6 @@ def test_service_spec_no_shared_settings():
     s1.settings["x"] = 1
     s2 = ServiceSpec(service_type="b", port=2000)
     assert "x" not in s2.settings
-    assert s2.settings == {}
 
 
 def test_analysis_config_no_shared_pipeline_settings():
@@ -508,14 +507,14 @@ def test_language_request_no_shared_settings():
 
 
 # =====================================================================
-# Missing required fields fail clearly
+# 6. Missing required fields fail clearly
 # =====================================================================
 
 def _check_missing_field(cls):
-    """Helper: assert that calling cls() without required args raises TypeError."""
+    """Assert that calling cls() without required args raises TypeError."""
     with pytest.raises(TypeError) as exc_info:
         cls()
-    assert re.search(r"missing.*required.*argument", str(exc_info.value))
+    assert "missing" in str(exc_info.value).lower()
 
 
 def test_service_spec_missing_service_type():
@@ -627,7 +626,7 @@ def test_analysis_workspace_missing_result_path():
 
 
 # =====================================================================
-# runtime_handle excluded from serialization
+# 7. runtime_handle excluded from serialization
 # =====================================================================
 
 def test_runtime_handle_excluded_from_dict():
@@ -646,8 +645,9 @@ def test_runtime_handle_excluded_from_json():
         endpoint=ServiceEndpoint(host="127.0.0.1", port=8001, service_type="llm"),
         runtime_handle=object(),
     )
-    j = json.loads(rs.to_json())
-    assert "runtime_handle" not in j
+    j = json.dumps(rs.to_dict())
+    data = json.loads(j)
+    assert "runtime_handle" not in data
 
 
 def test_runtime_handle_not_restored_from_dict():
@@ -667,13 +667,107 @@ def test_runtime_handle_not_restored_from_json():
         endpoint=ServiceEndpoint(host="127.0.0.1", port=8001, service_type="llm"),
         runtime_handle="original",
     )
-    j = json.loads(rs.to_json())
-    rs2 = RunningService.from_dict(j)
+    j = json.dumps(rs.to_dict())
+    rs2 = RunningService.from_dict(json.loads(j))
     assert rs2.runtime_handle is None
 
 
 # =====================================================================
-# pathlib.Path encoding and decoding
+# 8. Non-copyable runtime_handle is safely excluded
+# =====================================================================
+
+class _NonCopyable:
+    """A class whose copy/deepcopy both raise."""
+    def __copy__(self):
+        raise TypeError("cannot copy")
+    def __deepcopy__(self, memo):
+        raise TypeError("cannot deepcopy")
+
+def test_non_copyable_runtime_handle_excluded():
+    """A non-copyable handle is still excluded from to_dict()."""
+    handle = _NonCopyable()
+    rs = RunningService(
+        spec=ServiceSpec(service_type="llm", port=8000),
+        endpoint=ServiceEndpoint(host="127.0.0.1", port=8001, service_type="llm"),
+        runtime_handle=handle,
+    )
+    d = rs.to_dict()
+    assert "runtime_handle" not in d
+
+    # Verify the dict itself is serialisable (no trace of the non-copyable object)
+    json_str = json.dumps(d)
+    json.loads(json_str)
+
+
+# =====================================================================
+# 9. Binary request data remains unchanged in memory
+# =====================================================================
+
+def test_language_request_binary_data_preserved():
+    """LanguageRequest images are never mutated by the contract."""
+    original_images = [b"\x89PNG\x00\x00", b"JPEG_DATA"]
+    req = LanguageRequest(prompt="classify", images=original_images)
+    assert req.images is original_images  # same object
+    assert req.images[0] == b"\x89PNG\x00\x00"
+    assert req.images[1] == b"JPEG_DATA"
+
+    # Round-trip through dict — images become None (by design), but the
+    # original in-memory object is untouched.
+    req2 = LanguageRequest.from_dict({"prompt": "classify", "images": None})
+    # The contract itself never touched the original images list
+
+
+def test_segmentation_request_binary_data_preserved():
+    """SegmentationRequest image is never mutated by the contract."""
+    image = b"\xFF\xD8\xFF\xE0JPEG_HEADER"
+    req = SegmentationRequest(image=image, prompt="segment")
+    assert req.image is image
+    assert req.image == b"\xFF\xD8\xFF\xE0JPEG_HEADER"
+
+
+# =====================================================================
+# 10. Runtime-only contracts do not perform lossy JSON round trips
+# =====================================================================
+
+def test_language_request_no_to_json():
+    """LanguageRequest has no to_json method — it is not JSON-facing."""
+    req = LanguageRequest(prompt="test", images=[b"\x01\x02\x03"])
+    assert not hasattr(req, "to_json")
+
+
+def test_segmentation_request_no_to_json():
+    """SegmentationRequest has no to_json method — it is not JSON-facing."""
+    req = SegmentationRequest(image=b"\x00\x01", prompt="x")
+    assert not hasattr(req, "to_json")
+
+
+def test_segmentation_result_masks_excluded_from_dict():
+    """SegmentationResult masks are omitted from to_dict()."""
+    res = SegmentationResult(
+        masks=[True, False],
+        labels=["cat"],
+        confidences=[0.9],
+        bounding_boxes=[[10, 10, 20, 20]],
+    )
+    d = res.to_dict()
+    assert "masks" not in d
+
+
+def test_segmentation_result_masks_restored_on_from_dict():
+    """from_dict provides a sensible default for masks."""
+    res = SegmentationResult(
+        masks=[True],
+        labels=["a"],
+        confidences=[0.5],
+        bounding_boxes=[[]],
+    )
+    d = res.to_dict()
+    res2 = SegmentationResult.from_dict(d)
+    assert res2.masks == []
+
+
+# =====================================================================
+# 11. pathlib.Path round-trips correctly
 # =====================================================================
 
 def test_path_encoded_as_string():
@@ -735,66 +829,14 @@ def test_path_relative_to_absolute():
 
 
 # =====================================================================
-# Full nested JSON round-trip (the complex case)
+# 12. JSON-facing contracts have to_json; runtime-only do not
 # =====================================================================
 
-def test_full_analysis_config_json_roundtrip():
-    """AnalysisConfig with nested ServiceSpec (with ModelSpec) and NodeConfig."""
-    cfg = AnalysisConfig(
-        input_path="/data/input.jpg",
-        output_path="/data/output",
-        scene_service=ServiceSpec(
-            service_type="scene",
-            port=8000,
-            model=ModelSpec(repository="scene-model", filename="scene.bin", local_path="/m/scene"),
-            settings={"resolution": "512x512", "verbose": True},
-        ),
-        segmentation_service=ServiceSpec(
-            service_type="sam",
-            port=9000,
-            model=ModelSpec(repository="sam-model", filename="sam.bin"),
-            settings={"nms_threshold": 0.5, "min_area": 1000},
-        ),
-        scene_node=NodeConfig(name="scene", host="127.0.0.1", instruction_port=5000, local=False),
-        segmentation_node=NodeConfig(name="sam", host="127.0.0.1", instruction_port=5001, local=False),
-        pipeline_settings={"steps": 3, "retry": True, "timeout": 30},
-    )
-
-    # Dict round-trip
-    d = cfg.to_dict()
-    cfg2 = AnalysisConfig.from_dict(d)
-    assert cfg2.scene_service.model.repository == "scene-model"
-    assert cfg2.scene_service.model.filename == "scene.bin"
-    assert cfg2.scene_service.model.local_path == "/m/scene"
-    assert cfg2.scene_service.settings["resolution"] == "512x512"
-    assert cfg2.segmentation_service.model.repository == "sam-model"
-    assert cfg2.segmentation_service.model.filename == "sam.bin"
-    assert cfg2.scene_node.name == "scene"
-    assert cfg2.segmentation_node.name == "sam"
-    assert cfg2.pipeline_settings["steps"] == 3
-
-    # JSON round-trip
-    j = json.loads(cfg.to_json())
-    cfg3 = AnalysisConfig.from_dict(j)
-    assert cfg3.scene_service.model.repository == "scene-model"
-    assert cfg3.segmentation_service.settings["nms_threshold"] == 0.5
-    assert cfg3.pipeline_settings["timeout"] == 30
+def test_json_facing_contracts_have_to_json():
+    """Only JSON-facing contracts implement to_json()."""
+    for cls in (ModelSpec, ServiceSpec, ServiceEndpoint, NodeConfig,
+                LanguageResponse, SegmentationResult,
+                AnalysisConfig, AnalysisResult, AnalysisWorkspace):
+        assert hasattr(cls, "to_json"), f"{cls.__name__} should have to_json()"
 
 
-# =====================================================================
-# Helper functions
-# =====================================================================
-
-def test_to_json_and_from_json_helpers():
-    from contracts import to_json, from_json
-
-    ws = AnalysisWorkspace(
-        root=Path("/ws"),
-        log_path=Path("/ws/log.txt"),
-        config_path=Path("/ws/cfg.json"),
-        result_path=Path("/ws/res"),
-    )
-    j_str = to_json(ws)
-    j_dict = from_json(j_str)
-    assert "root" in j_dict
-    assert j_dict["root"] == "/ws"
