@@ -1,0 +1,107 @@
+{% extends "core_orchestrator/base.html" %}
+
+{% block title %}COLMAP Reconstruction Viewer{% endblock %}
+
+{% block content %}
+<div class="h-[calc(100vh-9rem)] min-h-[560px] rounded-lg border border-gray-700 bg-black overflow-hidden relative">
+    <div class="absolute left-4 top-4 z-10 rounded-lg border border-gray-700 bg-gray-900/90 px-4 py-3 text-sm text-gray-200">
+        <div class="font-semibold text-white">COLMAP Reconstruction</div>
+        <div id="viewer-status" class="text-gray-400">Loading dense.ply...</div>
+    </div>
+    <a href="{{ artifact_url }}" class="absolute right-4 top-4 z-10 rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 hover:bg-gray-700">
+        Download PLY
+    </a>
+    <div id="ply-viewer" class="h-full w-full"></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://unpkg.com/three@0.166.1/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.166.1/examples/jsm/"
+    }
+}
+</script>
+<script type="module">
+    import * as THREE from "three";
+    import {OrbitControls} from "three/addons/controls/OrbitControls.js";
+    import {PLYLoader} from "three/addons/loaders/PLYLoader.js";
+
+    const container = document.getElementById("ply-viewer");
+    const status = document.getElementById("viewer-status");
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x030712);
+
+    const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.01, 100000);
+    camera.position.set(0, -3, 2);
+
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x334155, 2.5));
+    const light = new THREE.DirectionalLight(0xffffff, 1.5);
+    light.position.set(3, -4, 5);
+    scene.add(light);
+
+    function frameObject(object) {
+        const box = new THREE.Box3().setFromObject(object);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const radius = Math.max(size.x, size.y, size.z) || 1;
+        controls.target.copy(center);
+        camera.position.copy(center).add(new THREE.Vector3(0, -radius * 1.8, radius * 0.9));
+        camera.near = Math.max(radius / 10000, 0.001);
+        camera.far = radius * 100;
+        camera.updateProjectionMatrix();
+        controls.update();
+    }
+
+    new PLYLoader().load(
+        "{{ artifact_url }}",
+        (geometry) => {
+            geometry.computeVertexNormals();
+            const hasColors = Boolean(geometry.getAttribute("color"));
+            const material = new THREE.PointsMaterial({
+                size: 0.01,
+                vertexColors: hasColors,
+                color: hasColors ? 0xffffff : 0x93c5fd,
+                sizeAttenuation: true,
+            });
+            const points = new THREE.Points(geometry, material);
+            scene.add(points);
+            frameObject(points);
+            status.textContent = `${geometry.getAttribute("position").count.toLocaleString()} points loaded`;
+        },
+        (event) => {
+            if (event.total) {
+                status.textContent = `Loading dense.ply ${Math.round((event.loaded / event.total) * 100)}%`;
+            }
+        },
+        (error) => {
+            console.error(error);
+            status.textContent = "Could not load dense.ply.";
+        },
+    );
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener("resize", () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+</script>
+{% endblock %}

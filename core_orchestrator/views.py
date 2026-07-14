@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import shlex
 import signal
 import subprocess
@@ -32,7 +33,7 @@ import numpy as np
 
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage
-from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
+from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
@@ -90,6 +91,15 @@ LINGBOT_MAP_PYTHON = os.environ.get(
 )
 LINGBOT_MAP_MAIN = os.path.join(LINGBOT_MAP_ROOT, "lingbot_live_demo.py")
 LINGBOT_MAP_MODEL = os.environ.get("LINGBOT_MAP_MODEL", os.path.join(LINGBOT_MAP_ROOT, "lingbot-map.pt"))
+DRONE_3D_RECONSTRUCTION_ROOT = os.environ.get(
+    "DRONE_3D_RECONSTRUCTION_ROOT",
+    os.path.join(PROJECT_ROOT, "drone_3d_reconstruction"),
+)
+DRONE_3D_RECONSTRUCTION_SRC = os.path.join(DRONE_3D_RECONSTRUCTION_ROOT, "src")
+DRONE_3D_RECONSTRUCTION_PYTHON = os.environ.get(
+    "DRONE_3D_RECONSTRUCTION_PYTHON",
+    MAST3R_SLAM_PYTHON if os.path.isfile(MAST3R_SLAM_PYTHON) else sys.executable,
+)
 _mast3r_process: Optional[subprocess.Popen[str]] = None
 _mast3r_run: Optional[dict[str, Any]] = None
 _mast3r_lock = threading.Lock()
@@ -475,10 +485,12 @@ def _mast3r_status_payload() -> dict[str, Any]:
     engine = _mast3r_run.get("engine", "mast3r-slam") if _mast3r_run else "mast3r-slam"
     discovered_pid = _discover_reconstruction_pid(engine)
     if not running and discovered_pid is None and _mast3r_run is None:
-        lingbot_pid = _discover_reconstruction_pid("lingbot-map")
-        if lingbot_pid is not None:
-            engine = "lingbot-map"
-            discovered_pid = lingbot_pid
+        for fallback_engine in ("lingbot-map", "colmap-drone"):
+            fallback_pid = _discover_reconstruction_pid(fallback_engine)
+            if fallback_pid is not None:
+                engine = fallback_engine
+                discovered_pid = fallback_pid
+                break
     if not running and discovered_pid is not None:
         running = True
 
@@ -494,6 +506,14 @@ def _mast3r_status_payload() -> dict[str, Any]:
         "engine": engine,
     }
     if _mast3r_run:
+        viewer_url = _mast3r_run.get("viewer_url", "")
+        artifact_url = ""
+        if _mast3r_run.get("engine") == "colmap-drone":
+            run_id = _mast3r_run.get("run_id", "")
+            dense_ply_path = _colmap_dense_ply_path(run_id)
+            if dense_ply_path and os.path.isfile(dense_ply_path):
+                viewer_url = f"/api/reconstruction/viewer/{run_id}/"
+                artifact_url = f"/api/reconstruction/artifact/{run_id}/dense.ply"
         payload.update({
             "engine": _mast3r_run.get("engine", "mast3r-slam"),
             "run_id": _mast3r_run.get("run_id"),
@@ -501,7 +521,8 @@ def _mast3r_status_payload() -> dict[str, Any]:
             "command": " ".join(_mast3r_run.get("command", [])),
             "log_path": _mast3r_run.get("log_path"),
             "log_tail": _read_log_tail(_mast3r_run.get("log_path", "")),
-            "viewer_url": _mast3r_run.get("viewer_url", ""),
+            "viewer_url": viewer_url,
+            "artifact_url": artifact_url,
         })
     else:
         log_path = _latest_mast3r_log_path()
@@ -513,17 +534,38 @@ def _mast3r_status_payload() -> dict[str, Any]:
     return payload
 
 
+def _run_dir_for_id(run_id: str) -> str:
+    safe_run_id = _slugify(run_id)
+    run_dir = os.path.abspath(os.path.join(MAST3R_RUNS_ROOT, safe_run_id))
+    runs_root = os.path.abspath(MAST3R_RUNS_ROOT)
+    if os.path.commonpath([runs_root, run_dir]) != runs_root:
+        raise Http404("Invalid reconstruction run")
+    return run_dir
+
+
+def _colmap_dense_ply_path(run_id: str) -> str:
+    if not run_id:
+        return ""
+    return os.path.join(_run_dir_for_id(run_id), "colmap_output", "dense.ply")
+
+
 def _engine_label(engine: str) -> str:
+    if engine == "colmap-drone":
+        return "COLMAP 3D Reconstruction"
     return "LingBot-Map" if engine == "lingbot-map" else "MASt3R-SLAM"
 
 
 def _engine_root(engine: str) -> str:
+    if engine == "colmap-drone":
+        return DRONE_3D_RECONSTRUCTION_ROOT
     return LINGBOT_MAP_ROOT if engine == "lingbot-map" else MAST3R_SLAM_ROOT
 
 
 def _discover_reconstruction_pid(engine: str) -> Optional[int]:
     if engine == "lingbot-map":
         return _discover_lingbot_pid()
+    if engine == "colmap-drone":
+        return _discover_colmap_drone_pid()
     return _discover_mast3r_pid()
 
 
@@ -552,6 +594,29 @@ def _discover_lingbot_pid() -> Optional[int]:
     try:
         result = subprocess.run(
             ["pgrep", "-f", f"{LINGBOT_MAP_ROOT}.+lingbot_live_demo.py"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+
+    current_pid = os.getpid()
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != current_pid:
+            return pid
+    return None
+
+
+def _discover_colmap_drone_pid() -> Optional[int]:
+    """Find a running COLMAP drone reconstruction launched from this checkout."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"{DRONE_3D_RECONSTRUCTION_ROOT}.+colmap_reconstruction.orchestrate"],
             check=False,
             capture_output=True,
             text=True,
@@ -652,6 +717,8 @@ def _stop_mast3r_pid(pid: int, engine: str = "mast3r-slam") -> None:
 def _kill_reconstruction_descendants(engine: str) -> None:
     if engine == "lingbot-map":
         _kill_lingbot_descendants()
+    elif engine == "colmap-drone":
+        _kill_colmap_drone_descendants()
     else:
         _kill_mast3r_descendants()
 
@@ -702,6 +769,28 @@ def _kill_lingbot_descendants() -> None:
             time.sleep(1)
 
 
+def _kill_colmap_drone_descendants() -> None:
+    """Clean up COLMAP drone reconstruction processes from this checkout."""
+    if sys.platform == "win32":
+        return
+    patterns = [
+        f"{DRONE_3D_RECONSTRUCTION_ROOT}.+colmap_reconstruction.orchestrate",
+    ]
+    for sig in ("TERM", "KILL"):
+        for pattern in patterns:
+            try:
+                subprocess.run(
+                    ["pkill", f"-{sig}", "-f", pattern],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                continue
+        if sig == "TERM":
+            time.sleep(1)
+
+
 @csrf_exempt
 def reconstruction_start(request: HttpRequest) -> JsonResponse:
     """Start the selected live reconstruction workflow."""
@@ -730,7 +819,7 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"error": "Dataset path is required"}, status=400)
         if not os.path.exists(dataset):
             return JsonResponse({"error": f"Dataset path not found: {dataset}"}, status=400)
-        if engine not in {"mast3r-slam", "lingbot-map"}:
+        if engine not in {"mast3r-slam", "lingbot-map", "colmap-drone"}:
             return JsonResponse({"error": f"Unknown reconstruction engine: {engine}"}, status=400)
 
         stale_pid = _discover_reconstruction_pid(engine)
@@ -743,6 +832,8 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
         os.makedirs(run_dir, exist_ok=True)
         log_path = os.path.join(run_dir, "run.log")
         viewer_url = ""
+
+        process_env = None
 
         if engine == "lingbot-map":
             if not os.path.isdir(LINGBOT_MAP_ROOT):
@@ -760,8 +851,8 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
                 LINGBOT_MAP_MAIN,
                 "--model_path",
                 LINGBOT_MAP_MODEL,
-                "--stride",
-                "10",
+                #"--stride",
+                #"10",
                 "--mode",
                 "windowed",
                 "--window_size",
@@ -772,7 +863,7 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
                 "1",
                 "--use_sdpa",
                 "--downsample_factor",
-                "10",
+                "1",
                 "--conf_threshold",
                 "1.5",
                 "--port",
@@ -783,6 +874,32 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
             root = LINGBOT_MAP_ROOT
             config_path = ""
             viewer_url = f"http://localhost:{port}/?run_id={run_id}"
+        elif engine == "colmap-drone":
+            if not os.path.isdir(DRONE_3D_RECONSTRUCTION_ROOT):
+                return JsonResponse({"error": f"COLMAP drone reconstruction root not found: {DRONE_3D_RECONSTRUCTION_ROOT}"}, status=500)
+            if not os.path.isdir(DRONE_3D_RECONSTRUCTION_SRC):
+                return JsonResponse({"error": f"COLMAP drone reconstruction src not found: {DRONE_3D_RECONSTRUCTION_SRC}"}, status=500)
+            if not shutil.which("colmap") and not os.path.exists(os.path.join(DRONE_3D_RECONSTRUCTION_ROOT, "tools", "colmap", "COLMAP.bat")):
+                return JsonResponse({"error": "COLMAP executable not found. Install COLMAP or set COLMAP_EXE."}, status=500)
+
+            output_dir = os.path.join(run_dir, "colmap_output")
+            command = [
+                DRONE_3D_RECONSTRUCTION_PYTHON,
+                "-m",
+                "colmap_reconstruction.orchestrate",
+                dataset,
+                output_dir,
+            ]
+            cwd = DRONE_3D_RECONSTRUCTION_ROOT
+            root = DRONE_3D_RECONSTRUCTION_ROOT
+            config_path = ""
+            process_env = os.environ.copy()
+            existing_pythonpath = process_env.get("PYTHONPATH", "")
+            process_env["PYTHONPATH"] = (
+                DRONE_3D_RECONSTRUCTION_SRC
+                if not existing_pythonpath
+                else f"{DRONE_3D_RECONSTRUCTION_SRC}{os.pathsep}{existing_pythonpath}"
+            )
         else:
             if not os.path.isdir(MAST3R_SLAM_ROOT):
                 return JsonResponse({"error": f"MASt3R-SLAM root not found: {MAST3R_SLAM_ROOT}"}, status=500)
@@ -815,6 +932,7 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
             _mast3r_process = subprocess.Popen(
                 command,
                 cwd=cwd,
+                env=process_env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -839,7 +957,7 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"error": str(exc)}, status=500)
 
     return JsonResponse({
-        "message": "LingBot-Map started" if engine == "lingbot-map" else "MASt3R-SLAM started",
+        "message": f"{_engine_label(engine)} started",
         "command": _shell_command_text(command),
         "log_path": log_path,
         **_mast3r_status_payload(),
@@ -860,10 +978,12 @@ def reconstruction_stop(request: HttpRequest) -> JsonResponse:
         if _mast3r_process is None or _mast3r_process.poll() is not None:
             discovered_pid = _discover_reconstruction_pid(engine)
             if discovered_pid is None and _mast3r_run is None:
-                discovered_pid = _discover_reconstruction_pid("lingbot-map")
-                if discovered_pid is not None:
-                    engine = "lingbot-map"
-                    label = _engine_label(engine)
+                for fallback_engine in ("lingbot-map", "colmap-drone"):
+                    discovered_pid = _discover_reconstruction_pid(fallback_engine)
+                    if discovered_pid is not None:
+                        engine = fallback_engine
+                        label = _engine_label(engine)
+                        break
             if discovered_pid is not None:
                 _stop_mast3r_pid(discovered_pid, engine)
                 return JsonResponse({"message": f"{label} stopped", **_mast3r_status_payload()})
@@ -881,6 +1001,31 @@ def reconstruction_status(request: HttpRequest) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     return JsonResponse(_mast3r_status_payload())
+
+
+def reconstruction_artifact(request: HttpRequest, run_id: str, filename: str) -> FileResponse:
+    """Serve generated reconstruction artifacts for a completed run."""
+    if filename != "dense.ply":
+        raise Http404("Unknown reconstruction artifact")
+    artifact_path = _colmap_dense_ply_path(run_id)
+    if not artifact_path or not os.path.isfile(artifact_path):
+        raise Http404("Reconstruction artifact not found")
+    return FileResponse(open(artifact_path, "rb"), filename="dense.ply")
+
+
+def reconstruction_viewer(request: HttpRequest, run_id: str) -> HttpResponse:
+    """Render a browser PLY viewer for a completed COLMAP reconstruction."""
+    artifact_path = _colmap_dense_ply_path(run_id)
+    if not artifact_path or not os.path.isfile(artifact_path):
+        raise Http404("Reconstruction artifact not found")
+    return render(
+        request,
+        "core_orchestrator/reconstruction_ply_viewer.html",
+        {
+            "run_id": _slugify(run_id),
+            "artifact_url": f"/api/reconstruction/artifact/{_slugify(run_id)}/dense.ply",
+        },
+    )
 
 
 def _safe_upload_relative_path(raw_path: str) -> str:

@@ -27,4 +27,6 @@ urlpatterns = [
     path("api/reconstruction/start/", views.reconstruction_start, name="reconstruction_start"),
     path("api/reconstruction/stop/", views.reconstruction_stop, name="reconstruction_stop"),
     path("api/reconstruction/status/", views.reconstruction_status, name="reconstruction_status"),
+    path("api/reconstruction/viewer/<str:run_id>/", views.reconstruction_viewer, name="reconstruction_viewer"),
+    path("api/reconstruction/artifact/<str:run_id>/<str:filename>", views.reconstruction_artifact, name="reconstruction_artifact"),
 ]

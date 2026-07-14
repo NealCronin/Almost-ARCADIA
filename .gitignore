@@ -90,6 +90,8 @@ runtime/
 
 # Local MASt3R-SLAM checkout copy
 MASt3R-SLAM/
+lingbot-map/
+drone_3d_reconstruction/
 
 # Vendored MASt3R-SLAM runtime artifacts
 vendor/mast3r-slam/.venv/

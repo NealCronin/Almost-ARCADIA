@@ -52,8 +52,8 @@
                         <div id="mast3r-output"
                              class="aspect-video rounded-lg bg-gray-800 border border-gray-700 flex flex-col items-center justify-center text-gray-400 gap-4 px-6 text-center"
                              data-mast3r-dataset="{{ tool.dataset_path }}"
-                             data-reconstruction-engine="{% if tool.settings == 'high-quality-live-reconstruction' %}lingbot-map{% else %}mast3r-slam{% endif %}">
-                            <p>{% if tool.settings == 'high-quality-live-reconstruction' %}LingBot-Map high-quality reconstruction opens a browser viewer and streams partial updates during inference.{% else %}MASt3R-SLAM live reconstruction runs in its own viewer process.{% endif %}</p>
+                             data-reconstruction-engine="{% if tool.settings == 'high-quality-live-reconstruction' %}lingbot-map{% elif tool.settings == 'live-reconstruction' %}mast3r-slam{% else %}colmap-drone{% endif %}">
+                            <p>{% if tool.settings == 'high-quality-live-reconstruction' %}LingBot-Map high-quality reconstruction opens a browser viewer and streams partial updates during inference.{% elif tool.settings == 'live-reconstruction' %}MASt3R-SLAM live reconstruction runs in its own viewer process.{% else %}COLMAP 3D Reconstruction will build a dense PLY mesh from the selected captures.{% endif %}</p>
                             <p id="mast3r-status" class="text-sm text-gray-500">Starting reconstruction...</p>
                             <a id="reconstruction-viewer-link" href="#" target="_blank" rel="noopener" class="hidden px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors font-medium">Open Viewer</a>
                             <pre id="mast3r-log" class="hidden max-h-56 w-full overflow-auto rounded-lg bg-black/50 p-3 text-left text-xs leading-5 text-green-200"></pre>
@@ -106,7 +106,10 @@
     let mast3rStartRequested = false;
 
     function selectedEngineName() {
-        return mast3rOutput?.dataset.reconstructionEngine === "lingbot-map" ? "LingBot-Map" : "MASt3R-SLAM";
+        const engine = mast3rOutput?.dataset.reconstructionEngine || "colmap-drone";
+        if (engine === "lingbot-map") return "LingBot-Map";
+        if (engine === "mast3r-slam") return "MASt3R-SLAM";
+        return "COLMAP 3D Reconstruction";
     }
 
     async function updateMast3rStatus(message) {
@@ -118,7 +121,11 @@
         try {
             const response = await fetch("{% url 'core_orchestrator:reconstruction_status' %}");
             const data = await response.json();
-            const engineName = data.engine === "lingbot-map" ? "LingBot-Map" : "MASt3R-SLAM";
+            const engineName = data.engine === "lingbot-map"
+                ? "LingBot-Map"
+                : data.engine === "mast3r-slam"
+                    ? "MASt3R-SLAM"
+                    : "COLMAP 3D Reconstruction";
             mast3rStatus.textContent = data.running
                 ? `${engineName} is running (PID ${data.pid}).`
                 : `${engineName} is ${data.status || "stopped"}.`;
