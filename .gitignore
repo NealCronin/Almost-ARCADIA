@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# PyTorch models
+*.pt
+*.pth
 # Virtual environments
 venv/
 env/
