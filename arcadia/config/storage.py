@@ -5,7 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from arcadia.config.models import AppConfig, ConfigError
+from arcadia.config.models import AppConfig, ConfigError, default_app_config
 
 
 class JsonConfigRepository:
@@ -26,7 +26,7 @@ class JsonConfigRepository:
         Raises ConfigError for invalid JSON or malformed structure.
         """
         if not self.path.exists():
-            return AppConfig()
+            return default_app_config()
 
         try:
             text = self.path.read_text(encoding="utf-8")
@@ -44,7 +44,6 @@ class JsonConfigRepository:
             raise
         except Exception as exc:
             raise ConfigError(f"Invalid configuration structure in '{self.path}': {exc}") from exc
-
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk atomically.
 
@@ -63,7 +62,10 @@ class JsonConfigRepository:
             raise ConfigError(f"Cannot write configuration: '{parent}' exists and is not a directory")
 
         if not parent.exists():
-            parent.mkdir(parents=True, exist_ok=True)
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ConfigError(f"Cannot create parent directory '{parent}': {exc}") from exc
 
         tmp = None
         try:
