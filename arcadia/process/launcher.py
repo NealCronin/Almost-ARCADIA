@@ -4,16 +4,18 @@ import signal
 import sys
 import threading
 import subprocess
+
 try:
     from subprocess import CREATE_NEW_PROCESS_GROUP
 except ImportError:
     CREATE_NEW_PROCESS_GROUP = 0
 
-from .models import ProcessSpec, RunningProcess
+from .models import ProcessSpec, RunningProcess, _TrackedProcess
+
 logger = logging.getLogger(__name__)
 
-
 TERMINATE_TIMEOUT_SECONDS: float = 3.0
+
 
 class ProcessLaunchError(RuntimeError):
     """Raised when a child process fails to start."""
@@ -26,8 +28,10 @@ class ProcessLauncher:
     application-specific logic.
     """
 
-    def __init__(self, output_buffer_size: int = 200):
-        self._processes: dict[int, RunningProcess] = {}
+    def __init__(self, output_buffer_size: int = 200) -> None:
+        if output_buffer_size <= 0:
+            raise ValueError("output_buffer_size must be positive")
+        self._tracked: dict[int, _TrackedProcess] = {}
         self._lock = threading.Lock()
         self._output_buffer_size = output_buffer_size
 
@@ -62,6 +66,7 @@ class ProcessLauncher:
             env = os.environ.copy()
             env.update(spec.environment)
             kwargs["env"] = env
+
         # Platform-specific process isolation
         if sys.platform == "win32":
             kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP
@@ -74,12 +79,14 @@ class ProcessLauncher:
             raise ProcessLaunchError(f"Failed to start process: {spec.command!r}") from exc
 
         running = RunningProcess(process=proc, spec=spec, output_buffer_size=self._output_buffer_size)
-        with self._lock:
-            self._processes[proc.pid] = running
 
-        # Start background reader threads
-        self._start_reader(running, proc.stdout, "stdout")
-        self._start_reader(running, proc.stderr, "stderr")
+        with self._lock:
+            tracked = _TrackedProcess(running=running)
+            self._tracked[proc.pid] = tracked
+
+        # Start background reader threads and store them in tracked
+        tracked.reader_threads.append(self._start_reader(running, proc.stdout, "stdout"))
+        tracked.reader_threads.append(self._start_reader(running, proc.stderr, "stderr"))
 
         logger.info("Started process %s (pid=%d)", spec.command[0], proc.pid)
         return running
@@ -96,53 +103,66 @@ class ProcessLauncher:
         proc = running.process
         pid = proc.pid
 
-        # Clean up tracking regardless of state
-        with self._lock:
-            self._processes.pop(pid, None)
-
-        if proc.poll() is not None:
-            return  # already exited — just cleaned up tracking
-
-        # Graceful termination
+        # Keep the process registered until cleanup is attempted
+        tracked = None
         try:
-            if sys.platform == "win32":
-                proc.terminate()
-            else:
-                os.killpg(pid, signal.SIGTERM)
-        except Exception:
-            pass  # escalate to force kill below
+            with self._lock:
+                tracked = self._tracked.get(pid)
 
-        try:
-            proc.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass  # still alive — force kill
+            # If already exited, just clean up and return
+            if proc.poll() is not None:
+                return
 
-        # Force kill
-        try:
-            if sys.platform == "win32":
-                proc.kill()
-            else:
-                os.killpg(pid, signal.SIGKILL)
-        except Exception:
-            pass
+            # Graceful termination
+            try:
+                if sys.platform == "win32":
+                    proc.terminate()
+                else:
+                    os.killpg(pid, signal.SIGTERM)
+            except Exception:
+                pass  # escalate to force kill below
 
-        try:
-            proc.wait(timeout=1)
-        except Exception:
-            pass
+            try:
+                proc.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass  # still alive — force kill
+
+            # Force kill only if still alive
+            if proc.poll() is None:
+                try:
+                    if sys.platform == "win32":
+                        proc.kill()
+                    else:
+                        os.killpg(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+
+        finally:
+            # Remove from tracking and join reader threads after all cleanup
+            with self._lock:
+                self._tracked.pop(pid, None)
+
+            if tracked is not None:
+                for t in tracked.reader_threads:
+                    t.join(timeout=1)
 
         logger.info("Stopped process %s (pid=%d)", running.spec.command[0], pid)
 
     def stop_all(self) -> None:
         """Stop every tracked process. Individual failures are suppressed."""
         with self._lock:
-            snapshot = list(self._processes.values())
+            snapshot = list(self._tracked.values())
 
-        for running in snapshot:
+        for tracked in snapshot:
             try:
-                self.stop(running)
+                self.stop(tracked.running)
             except Exception:
-                logger.exception("Failed to stop process %s", running.spec.command[0])
+                logger.exception("Failed to stop process %s", tracked.running.spec.command[0])
 
     def recent_stdout(self, running: RunningProcess) -> list[str]:
         """Return a copy of the most recent stdout lines."""
@@ -156,10 +176,13 @@ class ProcessLauncher:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _start_reader(self, running: RunningProcess, stream, name: str) -> None:
-        """Background thread that reads lines from *stream* into the buffer."""
+    def _start_reader(self, running: RunningProcess, stream, name: str) -> threading.Thread:
+        """Background thread that reads lines from *stream* into the buffer.
 
-        def _read():
+        Returns the started thread so it can be tracked.
+        """
+
+        def _read() -> None:
             try:
                 for line in stream:
                     line = line.rstrip("\n\r")
@@ -177,3 +200,4 @@ class ProcessLauncher:
 
         thread = threading.Thread(target=_read, daemon=True)
         thread.start()
+        return thread

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from collections import deque
 from subprocess import Popen
 from pathlib import Path
+import threading
 
 
 @dataclass
@@ -19,10 +20,18 @@ class RunningProcess:
     stdout_lines: deque[str] = field(init=False)
     stderr_lines: deque[str] = field(init=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.stdout_lines = deque(maxlen=self.output_buffer_size)
         self.stderr_lines = deque(maxlen=self.output_buffer_size)
 
     @property
     def process_id(self) -> int:
         return self.process.pid
+
+
+@dataclass
+class _TrackedProcess:
+    """Internal wrapper that tracks a running process and its reader threads."""
+
+    running: RunningProcess
+    reader_threads: list[threading.Thread] = field(default_factory=list)
