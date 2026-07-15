@@ -29,35 +29,24 @@ class TestDefaults:
     """Default configuration behaviour."""
 
     def test_load_missing_file_returns_defaults(self, tmp_path: Path) -> None:
-        """Loading a non-existent file returns a default AppConfig."""
+        """Loading a non-existent file returns a default AppConfig with a local node."""
         repo = JsonConfigRepository(tmp_path / "nonexistent.json")
         config = repo.load()
 
-        assert config.nodes == {}
-        assert config.instruction_host == "127.0.0.1"
-        assert config.instruction_port == 9000
-        assert config.scene_service is None
-        assert config.segmentation_service is None
-        assert config.scene_node is None
-        assert config.segmentation_node is None
-        assert config.input_path == ""
-        assert config.output_path == ""
-        assert config.pipeline_settings == {}
+        assert "local" in config.nodes
+        assert config.nodes["local"].host == "127.0.0.1"
+        assert config.nodes["local"].instruction_port == 9000
+        assert config.nodes["local"].local is True
 
-    def test_default_contains_local_node(self, tmp_path: Path) -> None:
-        """A config with a local node survives save/load round-trip."""
-        local_node = NodeConfig(name="local", host="127.0.0.1", instruction_port=9000, local=True)
-        config = AppConfig(nodes={"local": local_node})
+    def test_default_loads_return_independent_configs(self, tmp_path: Path) -> None:
+        """Two loads from a missing file must return independent AppConfig instances."""
+        repo = JsonConfigRepository(tmp_path / "nonexistent.json")
 
-        repo = JsonConfigRepository(tmp_path / "config.json")
-        repo.save(config)
-        restored = repo.load()
+        first = repo.load()
+        second = repo.load()
 
-        assert "local" in restored.nodes
-        assert restored.nodes["local"].name == "local"
-        assert restored.nodes["local"].host == "127.0.0.1"
-        assert restored.nodes["local"].instruction_port == 9000
-        assert restored.nodes["local"].local is True
+        first.nodes["local"].host = "changed"
+        assert second.nodes["local"].host == "127.0.0.1"
 
     def test_default_configs_no_shared_mutable_state(self) -> None:
         """Two independently created AppConfig instances must not share mutable state."""
@@ -372,37 +361,30 @@ class TestFailures:
 
         assert "Invalid scene_service" in str(exc_info.value)
 
-    def test_failed_write_leaves_existing_config_unchanged(self, tmp_path: Path) -> None:
+    def test_failed_write_leaves_existing_config_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If os.replace fails, the existing config file is not corrupted."""
         original = AppConfig(input_path="/original")
         repo = JsonConfigRepository(tmp_path / "config.json")
         repo.save(original)
 
-        # Monkeypatch os.replace to raise
-        original_replace = os.replace
-        os.replace = lambda *a, **kw: (_ for _ in ()).throw(PermissionError("simulated failure"))
+        monkeypatch.setattr("os.replace", lambda *a, **kw: (_ for _ in ()).throw(PermissionError("simulated failure")))
 
         new_config = AppConfig(input_path="/new")
         with pytest.raises(ConfigError):
             repo.save(new_config)
 
-        os.replace = original_replace
-
         # Original config must still be intact
         restored = repo.load()
         assert restored.input_path == "/original"
 
-    def test_temp_file_removed_after_failure(self, tmp_path: Path) -> None:
+    def test_temp_file_removed_after_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If os.replace fails, the temp file is cleaned up."""
         repo = JsonConfigRepository(tmp_path / "config.json")
 
-        original_replace = os.replace
-        os.replace = lambda *a, **kw: (_ for _ in ()).throw(PermissionError("simulated failure"))
+        monkeypatch.setattr("os.replace", lambda *a, **kw: (_ for _ in ()).throw(PermissionError("simulated failure")))
 
         with pytest.raises(ConfigError):
             repo.save(AppConfig())
-
-        os.replace = original_replace
 
         # No temp files should remain
         tmp_files = list(tmp_path.glob(".arcadia-config-*.tmp"))

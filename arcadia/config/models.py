@@ -13,6 +13,18 @@ from arcadia.contracts import NodeConfig, ServiceSpec
 class ConfigError(Exception):
     """Raised for configuration loading, saving, or deserialization failures."""
 
+def default_app_config() -> AppConfig:
+    """Return a fresh default AppConfig with a local node.
+
+    Returns a new AppConfig instance with a single local node (name="local",
+    host="127.0.0.1", instruction_port=9000, local=True) and all other fields
+    at their defaults. Each call returns a fresh instance with independent
+    mutable dictionaries.
+    """
+    return AppConfig(
+        nodes={"local": NodeConfig(name="local", host="127.0.0.1", instruction_port=9000, local=True)},
+    )
+
 
 @dataclass
 class AppConfig:
