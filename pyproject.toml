@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "almost-arcadia"
+version = "0.1.0"
+description = "Almost ARCADIA prototype"
+requires-python = ">=3.11"
+dependencies = [
+    "llama-cpp-python[server]",
+    "huggingface-hub",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["arcadia/tests"]
