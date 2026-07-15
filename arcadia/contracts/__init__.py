@@ -5,13 +5,13 @@ No framework dependencies — only the Python standard library.
 
 JSON-facing contracts (serializable to/from dict/JSON):
     ModelSpec, ServiceSpec, ServiceEndpoint, NodeConfig,
-    LanguageResponse, SegmentationResult, AnalysisConfig,
-    AnalysisResult, AnalysisWorkspace
+    LanguageResponse, AnalysisConfig, AnalysisResult, AnalysisWorkspace
 
-Runtime-only contracts (not JSON-serializable — binary or unserializable fields):
-    RunningService    — holds an arbitrary runtime_handle
-    LanguageRequest   — contains list[bytes] for images
+Runtime/in-memory contracts (not JSON-serializable):
+    RunningService      — holds an arbitrary runtime_handle
+    LanguageRequest     — contains list[bytes] for images
     SegmentationRequest — contains bytes for image data
+    SegmentationResult  — contains list of mask objects (e.g. NumPy arrays)
 """
 
 from __future__ import annotations
@@ -123,44 +123,6 @@ class LanguageResponse:
 
 
 @dataclass
-class SegmentationResult:
-    """Result from an image segmentation model.
-
-    ``masks``: list of per-pixel mask values.
-    Each mask element represents a single segmentation mask.
-    The exact in-memory representation depends on what the
-    segmentation backend produces — typically a list of NumPy arrays
-    or 2-D boolean grids, one per detected region. These masks are
-    **not** JSON-serializable and are omitted from dict/JSON output.
-    Use the masks only within-process; encode them via the future
-    SAM API when transmitting over HTTP.
-    """
-    masks: list
-    labels: list[str]
-    confidences: list[float]
-    bounding_boxes: list
-    source_width: Optional[int] = None
-    source_height: Optional[int] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        # masks may contain non-serializable elements (e.g. numpy arrays).
-        # We omit them from the dict; reconstruction requires the
-        # original in-memory object.
-        d.pop("masks", None)
-        return d
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SegmentationResult:
-        d = dict(data)
-        d.setdefault("masks", [])
-        return cls(**d)
-
-
-@dataclass
 class AnalysisConfig:
     """Configuration for a full analysis pipeline."""
     input_path: str
@@ -241,7 +203,7 @@ class AnalysisWorkspace:
 
 
 # ---------------------------------------------------------------------------
-# Runtime-only contracts (binary / unserializable fields)
+# Runtime/in-memory contracts (not JSON-serializable)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -264,7 +226,6 @@ class RunningService:
             "spec": self.spec.to_dict(),
             "endpoint": self.endpoint.to_dict(),
         }
-
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunningService:
@@ -289,34 +250,34 @@ class LanguageRequest:
     images: Optional[list[bytes]] = None
     settings: dict[str, Any] = field(default_factory=dict)
 
-    # No to_dict / from_json — this contract is not JSON-facing.
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> LanguageRequest:
-        """Construct from a dict, but images will be ``None``."""
-        d = dict(data)
-        d.setdefault("images", None)
-        return cls(**d)
-
 
 @dataclass
 class SegmentationRequest:
     """Request to a segmentation model.
 
-    The ``image`` field carries raw binary image data. Like
-    ``LanguageRequest``, this contract is for in-memory use only — the
-    bytes are **not** serialised to JSON here. The future segmentation
-    client is responsible for encoding over the network.
+    The ``image`` field carries raw binary image data. This contract
+    is for in-memory use only — the bytes are **not** serialised to
+    JSON here. The future segmentation client is responsible for
+    encoding over the network.
     """
 
     image: bytes
     prompt: str | list[str]
 
-    # No to_dict / from_json — this contract is not JSON-facing.
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SegmentationRequest:
-        """Construct from a dict, but image will be an empty stub."""
-        d = dict(data)
-        d.setdefault("image", b"")
-        return cls(**d)
+@dataclass
+class SegmentationResult:
+    """Result from an image segmentation model.
+
+    All fields are retained exactly as provided. The ``masks`` field
+    contains the raw mask objects produced by the segmentation backend
+    (typically NumPy arrays or 2-D boolean grids). This is an in-memory-
+    only contract — no serialization methods are provided. The future
+    SAM API and segmentation client will own mask transport encoding.
+    """
+    masks: list
+    labels: list[str]
+    confidences: list[float]
+    bounding_boxes: list
+    source_width: Optional[int] = None
+    source_height: Optional[int] = None

@@ -8,7 +8,7 @@ Covers:
 - RunningService.runtime_handle is excluded from serialization
   (including a non-copyable handle).
 - Binary request data remains unchanged in memory.
-- Runtime-only contracts do not perform lossy JSON round trips.
+- SegmentationResult retains exact mask objects (in-memory only).
 - pathlib.Path values encode and reconstruct correctly.
 """
 
@@ -134,6 +134,7 @@ def test_segmentation_result_construction():
     assert res.labels == ["cat", "dog"]
     assert res.confidences == [0.95, 0.3]
     assert res.source_width == 1920
+    assert res.masks == [True, False]
 
 
 def test_analysis_config_construction():
@@ -228,23 +229,6 @@ def test_language_response_dict_roundtrip():
     d = r.to_dict()
     r2 = LanguageResponse.from_dict(d)
     assert r2.text == r.text
-
-
-def test_segmentation_result_dict_roundtrip():
-    res = SegmentationResult(
-        masks=[True, False],
-        labels=["a", "b"],
-        confidences=[0.9, 0.1],
-        bounding_boxes=[[1, 1, 2, 2]],
-        source_width=100,
-        source_height=200,
-    )
-    d = res.to_dict()
-    res2 = SegmentationResult.from_dict(d)
-    assert res2.labels == res.labels
-    assert res2.confidences == res.confidences
-    assert res2.source_width == res.source_width
-    assert res2.source_height == res.source_height
 
 
 def test_analysis_config_dict_roundtrip():
@@ -711,11 +695,6 @@ def test_language_request_binary_data_preserved():
     assert req.images[0] == b"\x89PNG\x00\x00"
     assert req.images[1] == b"JPEG_DATA"
 
-    # Round-trip through dict — images become None (by design), but the
-    # original in-memory object is untouched.
-    req2 = LanguageRequest.from_dict({"prompt": "classify", "images": None})
-    # The contract itself never touched the original images list
-
 
 def test_segmentation_request_binary_data_preserved():
     """SegmentationRequest image is never mutated by the contract."""
@@ -726,44 +705,51 @@ def test_segmentation_request_binary_data_preserved():
 
 
 # =====================================================================
-# 10. Runtime-only contracts do not perform lossy JSON round trips
+# 10. Runtime/in-memory contracts have no serialization methods
 # =====================================================================
 
-def test_language_request_no_to_json():
-    """LanguageRequest has no to_json method — it is not JSON-facing."""
+def test_language_request_no_serialization_methods():
+    """LanguageRequest has no to_dict/to_json — it is in-memory only."""
     req = LanguageRequest(prompt="test", images=[b"\x01\x02\x03"])
+    assert not hasattr(req, "to_dict")
     assert not hasattr(req, "to_json")
+    assert not hasattr(req, "from_dict")
 
 
-def test_segmentation_request_no_to_json():
-    """SegmentationRequest has no to_json method — it is not JSON-facing."""
+def test_segmentation_request_no_serialization_methods():
+    """SegmentationRequest has no to_dict/to_json — it is in-memory only."""
     req = SegmentationRequest(image=b"\x00\x01", prompt="x")
+    assert not hasattr(req, "to_dict")
     assert not hasattr(req, "to_json")
+    assert not hasattr(req, "from_dict")
 
 
-def test_segmentation_result_masks_excluded_from_dict():
-    """SegmentationResult masks are omitted from to_dict()."""
+def test_segmentation_result_no_serialization_methods():
+    """SegmentationResult has no to_dict/to_json/from_dict — it is in-memory only."""
     res = SegmentationResult(
         masks=[True, False],
         labels=["cat"],
         confidences=[0.9],
         bounding_boxes=[[10, 10, 20, 20]],
     )
-    d = res.to_dict()
-    assert "masks" not in d
+    assert not hasattr(res, "to_dict")
+    assert not hasattr(res, "to_json")
+    assert not hasattr(res, "from_dict")
 
 
-def test_segmentation_result_masks_restored_on_from_dict():
-    """from_dict provides a sensible default for masks."""
+def test_segmentation_result_retains_exact_masks():
+    """SegmentationResult retains the exact mask objects supplied to it."""
+    original_masks = [b"mask1", b"mask2", {"key": "value"}]
     res = SegmentationResult(
-        masks=[True],
-        labels=["a"],
-        confidences=[0.5],
-        bounding_boxes=[[]],
+        masks=original_masks,
+        labels=["a", "b"],
+        confidences=[0.9, 0.8],
+        bounding_boxes=[[0, 0, 10, 10], [10, 10, 20, 20]],
     )
-    d = res.to_dict()
-    res2 = SegmentationResult.from_dict(d)
-    assert res2.masks == []
+    assert res.masks is original_masks  # same object, not copied
+    assert res.masks[0] == b"mask1"
+    assert res.masks[1] == b"mask2"
+    assert res.masks[2] == {"key": "value"}
 
 
 # =====================================================================
@@ -829,14 +815,17 @@ def test_path_relative_to_absolute():
 
 
 # =====================================================================
-# 12. JSON-facing contracts have to_json; runtime-only do not
+# 12. JSON-facing contracts have to_json; runtime/in-memory do not
 # =====================================================================
 
 def test_json_facing_contracts_have_to_json():
     """Only JSON-facing contracts implement to_json()."""
     for cls in (ModelSpec, ServiceSpec, ServiceEndpoint, NodeConfig,
-                LanguageResponse, SegmentationResult,
-                AnalysisConfig, AnalysisResult, AnalysisWorkspace):
+                LanguageResponse, AnalysisConfig, AnalysisResult, AnalysisWorkspace):
         assert hasattr(cls, "to_json"), f"{cls.__name__} should have to_json()"
 
 
+def test_runtime_contracts_no_to_json():
+    """Runtime/in-memory contracts do not have to_json()."""
+    for cls in (RunningService, LanguageRequest, SegmentationRequest, SegmentationResult):
+        assert not hasattr(cls, "to_json"), f"{cls.__name__} should NOT have to_json()"
