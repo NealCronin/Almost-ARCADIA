@@ -1,14 +1,17 @@
-"""LLM runtime that launches llama-cpp-python server."""
-
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+"""LLM runtime that launches llama-cpp-python server."""
 
 import sys
 from pathlib import Path
 from typing import Callable
 
 from arcadia.contracts import ModelSpec, RunningService, ServiceEndpoint, ServiceSpec
-from arcadia.process import ProcessLauncher, ProcessSpec
-
+from arcadia.process import ProcessLauncher, ProcessSpec, RunningProcess
 
 
 # ── Exception ──────────────────────────────────────────────────────────────────
@@ -232,19 +235,34 @@ class LLMRuntime:
         import urllib.request
         import urllib.error
 
-        url = f"http://{host}:{port}/v1/health"
+        url = f"http://{host}:{port}/v1/models"
         try:
-            urllib.request.urlopen(url, timeout=2)
-            return True
+            with urllib.request.urlopen(url, timeout=2):
+                return True
         except (urllib.error.URLError, urllib.error.HTTPError, OSError):
             return False
 
-    def _wait_for_service(self, host: str, port: int) -> None:
+    def _wait_for_service(
+        self,
+        running_process: RunningProcess,
+        host: str,
+        port: int,
+    ) -> None:
         """Wait until the server is ready or timeout is reached."""
         import time
 
         deadline = time.monotonic() + self._startup_timeout
         while time.monotonic() < deadline:
+            if not self._process_launcher.is_running(running_process):
+                stderr_lines = self._process_launcher.recent_stderr(running_process)
+                stdout_lines = self._process_launcher.recent_stdout(running_process)
+                output = stderr_lines if stderr_lines else stdout_lines
+                msg = (
+                    f"llama-cpp-python server exited before becoming ready "
+                    f"on {host}:{port}.\n\nRecent output:\n"
+                    + "\n".join(output)
+                )
+                raise LLMRuntimeError(msg)
             if self._readiness_probe(host, port):
                 return
             time.sleep(self._poll_interval)
@@ -267,7 +285,22 @@ class LLMRuntime:
         running_process = self._process_launcher.start(proc_spec)
 
         host = spec.settings.get("host", "127.0.0.1")
-        self._wait_for_service(host, spec.port)
+
+        try:
+            self._wait_for_service(running_process, host, spec.port)
+        except Exception as exc:
+            try:
+                self._process_launcher.stop(running_process)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up llama-cpp-python process after startup failure"
+                )
+            if isinstance(exc, LLMRuntimeError):
+                raise
+            raise LLMRuntimeError(
+                f"Failed while waiting for llama-cpp-python server "
+                f"on {host}:{spec.port}"
+            ) from exc
 
         endpoint = ServiceEndpoint(
             host=host,
@@ -283,4 +316,8 @@ class LLMRuntime:
 
     def stop(self, service: RunningService) -> None:
         """Stop the LLM server process."""
+        if not isinstance(service.runtime_handle, RunningProcess):
+            raise LLMRuntimeError(
+                "RunningService runtime_handle must be a RunningProcess"
+            )
         self._process_launcher.stop(service.runtime_handle)
