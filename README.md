@@ -80,7 +80,13 @@ Set `services.sam3.settings.checkpoint` to that path. A missing or unloadable ch
 
 ## Configuration
 
-Use **Nodes** to name the computers that can run services, then use the **Services** page to configure and start LLM and SAM3 services. The local node is shown as **This computer** and does not need an instruction server; remote nodes use their configured instruction host and port.
+The Host portal configures this computer's instruction listener. It starts automatically with Django `runserver` on `127.0.0.1:9000` unless `config.json` contains another `host_listener` value. The IP must be assigned to a local interface: use `127.0.0.1` for local-only control, a LAN IP for trusted local-network clients, or a VPN address such as Tailscale for VPN clients.
+
+Saving Host settings serializes replacement and persistence: it stops only the Django-owned instruction-server child, starts a replacement bound directly to the saved IP and port, and waits for `/health`. The configuration is saved only after the replacement is healthy; a persistence failure restores the prior listener when possible and leaves the prior saved configuration unchanged. If automatic startup fails, Django remains available so Host can repair the listener configuration.
+
+Restarting the instruction server stops any LLM or SAM processes owned by that instruction-server process. The next Priority Map run can automatically reprovision configured services. It does not intentionally stop unrelated Django-owned local services.
+
+Remote clients must update their saved instruction-host IP and port when this listener changes. Allow the instruction port and direct inference ports through the relevant host firewall for trusted LAN/VPN clients.
 
 ### Services page
 
@@ -96,6 +102,10 @@ Both builders provide an **Additional arguments** field for a small number of se
 
 ```json
 {
+  "host_listener": {
+    "host": "127.0.0.1",
+    "port": 9000
+  },
   "nodes": {
     "local": {"mode": "local", "host": "127.0.0.1"},
     "example_remote": {"mode": "remote", "host": "192.168.1.20", "instruction_port": 9000}
@@ -130,21 +140,17 @@ Existing settings dictionaries remain compatible. The UI saves configuration ato
 
 Useful manual LLM settings include `bind_host`, `startup_timeout`, `n_ctx`, `n_gpu_layers`, `chat_format`, `model_alias`, and `extra_args`; exact Hugging Face sources use `hf_repo`, `hf_file`, and optional `hf_cache_dir`. The remote instruction API rejects executable, server-module, shell, and arbitrary command fields. Unit tests alone use the command escape hatch.
 
-## Start a host instruction server
+## Automatic host instruction server
 
-Run this on the remote compute host. `--host` is the bind address; `--public-host` is the address returned to the client for direct inference:
+When Django runs through `python manage.py runserver`, the real runserver child starts one Django-owned instruction server using the saved Host settings. Management commands, migrations, checks, imports, pytest, and the autoreloader parent do not start it. `--noreload` starts the same one listener directly.
 
-```powershell
-python -m core.services.instruction_server --host 0.0.0.0 --public-host 192.168.1.20 --port 9000 --log-dir logs
-```
-
-The host must have the Almost ARCADIA environment, llama-cpp-python, SAM3 dependencies, and the checkpoint/model paths configured for that host. The server owns children until it exits. On normal shutdown it stops owned children. A host restart loses live state; the client starts the desired service again when needed.
-
-Health check from the client:
+The listener command is equivalent to:
 
 ```powershell
-Invoke-RestMethod http://192.168.1.20:9000/health
+python -m core.services.instruction_server --host <saved-ip> --public-host <saved-ip> --port <saved-port> --log-dir logs/instruction
 ```
+
+The listener binds directly to the saved IP; it never silently falls back to `0.0.0.0`. Visit **Host** to change the IP or port. The page shows the current listener state, address, uptime, and replacement failures. Other machines must run their own Django Host portal before they can expose their own listener; this application does not remotely bootstrap them.
 
 ## Start Django
 
@@ -155,7 +161,7 @@ python manage.py migrate
 python manage.py runserver 127.0.0.1:8000
 ```
 
-Open <http://127.0.0.1:8000/>. Use **Nodes** to define local or remote hosts, **Services** to start or replace LLM/SAM3 services, and **Analysis** to set pipeline options and run one analysis. State-changing actions use POST and successful forms redirect.
+Open <http://127.0.0.1:8000/>. Use **Host** to expose this computer, **Services** to configure LLM/SAM3 service settings, and **Analysis** to set pipeline options and run one analysis. State-changing actions use POST and successful forms redirect.
 
 ## Start and test services
 
@@ -226,13 +232,7 @@ python manage.py migrate
 python manage.py runserver 127.0.0.1:8000 --noreload
 ```
 
-Migrations completed successfully. While the server was running, `/`, `/nodes/`, `/services/`, `/analysis/`, `/analysis/status/`, and `/results/` each returned HTTP `200`. Loading those pages did not start model processes.
-
-```powershell
-python -m core.services.instruction_server --host 127.0.0.1 --public-host 127.0.0.1 --port 9000 --log-dir logs/validation
-```
-
-Observed requests: `GET /health` returned `200 {"status":"ok","service":"instruction"}`; `GET /services` returned `200 []`; and a start request containing `settings.command` returned `422`. The server shut down cleanly while owning no services. Owned-child shutdown and failed-replacement cleanup are unit-tested; this smoke run did not launch a real model child.
+With the automatic listener, `runserver --noreload` starts one listener from `host_listener`. A current smoke run confirmed `GET /health` returned `200 {"status":"ok","service":"instruction"}`, the Host page displayed its running status, a save from port `9000` to `9010` stopped the old listener and made the replacement healthy, and an unassigned IP was rejected while the `9010` listener remained healthy. Owned-child shutdown and failed-replacement rollback are unit-tested; this smoke run did not launch a real model child.
 
 ### Heavyweight runtime status
 
@@ -249,11 +249,17 @@ SAM endpoint tests still use an injected test predictor. A real SAM smoke test r
 
 ## Remote smoke test
 
-On `192.168.1.20`:
+On `192.168.1.20`, run Django, open **Host**, and save the local LAN/VPN address and instruction port:
 
 ```powershell
 .venv\Scripts\Activate.ps1
-python -m core.services.instruction_server --host 0.0.0.0 --public-host 192.168.1.20 --port 9000 --log-dir logs
+python manage.py runserver 127.0.0.1:8000
+```
+
+The Host portal on that machine starts:
+
+```text
+python -m core.services.instruction_server --host 192.168.1.20 --public-host 192.168.1.20 --port 9000 --log-dir logs/instruction
 ```
 
 On the client:
@@ -263,7 +269,7 @@ Invoke-RestMethod http://192.168.1.20:9000/health
 python manage.py runserver 127.0.0.1:8000
 ```
 
-In the UI, add the remote node, assign either service to that node, start it, then use the direct inference commands above with the endpoint returned by the server. The instruction port must be reachable from the client, and the selected inference ports must be reachable directly from the client. No inference request should be sent to port `9000`.
+Configure the remote node details in that client's saved configuration or tool/model settings, then start services through the preserved remote instruction-client architecture. The instruction port must be reachable from the client, and the selected inference ports must be reachable directly from the client. No inference request should be sent to port `9000`.
 
 ## Troubleshooting
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import AppConfig, ConfigStore
+from core.config import AppConfig, ConfigStore, HostListenerConfig
 from core.errors import ConfigurationError
 
 
@@ -13,6 +13,7 @@ def test_config_defaults_include_local_node() -> None:
     config = AppConfig()
     assert config.nodes["local"].mode == "local"
     assert config.priority_map.pipeline.sam_step == 5
+    assert config.host_listener == HostListenerConfig()
 
 
 def test_missing_config_copies_sibling_default(tmp_path) -> None:
@@ -49,6 +50,7 @@ def test_legacy_configuration_migrates_without_losing_priority_map_settings(tmp_
     store.save(config)
     assert store.load().to_dict() == {
         "future_root": {"retain": ["this", {"opaque": True}]},
+        "host_listener": {"host": "127.0.0.1", "port": 9000},
         "nodes": {"local": {"mode": "local", "host": "127.0.0.1"}},
         "tools": {
             "priority-map": {
@@ -117,6 +119,41 @@ def test_modern_config_preserves_opaque_future_data_at_every_level(tmp_path: Pat
     assert restored["tools"]["priority-map"]["output"]["future_output"] == ["keep"]
     assert restored["tools"]["future-tool"] == {"version": 2, "settings": ["opaque"]}
     assert restored["tools"]["priority-map"]["pipeline"]["sam_step"] == 7
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"host": "not-an-ip", "port": 9000},
+        {"host": "2001:db8::1", "port": 9000},
+        {"host": "127.0.0.1", "port": 0},
+        {"host": "127.0.0.1", "port": 65536},
+        {"host": "127.0.0.1", "port": True},
+    ],
+)
+def test_host_listener_config_rejects_invalid_values(payload: dict[str, object]) -> None:
+    with pytest.raises(ConfigurationError):
+        HostListenerConfig.from_dict(payload)
+
+
+def test_host_listener_round_trip_preserves_unrelated_config(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    original = AppConfig.from_dict(
+        {
+            "host_listener": {"host": "127.0.0.1", "port": 9010, "future_listener": {"keep": True}},
+            "nodes": {"local": {"mode": "local", "host": "127.0.0.1"}},
+            "tools": {"priority-map": {"pipeline": {"task": "Find roads"}}},
+            "future_root": {"enabled": True},
+        }
+    )
+    store.save(original)
+    restored = store.load()
+
+    assert restored.host_listener.host == "127.0.0.1"
+    assert restored.host_listener.port == 9010
+    assert restored.to_dict()["host_listener"]["future_listener"] == {"keep": True}
+    assert restored.to_dict()["tools"]["priority-map"]["pipeline"]["task"] == "Find roads"
+    assert restored.to_dict()["future_root"] == {"enabled": True}
 
 
 def test_malformed_config_raises(tmp_path) -> None:

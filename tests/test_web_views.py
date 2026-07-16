@@ -6,8 +6,9 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
-from core.config import AppConfig, ConfigStore, NodeConfig
+from core.config import AppConfig, ConfigStore
 from core.errors import AnalysisError
+from core.services.host_listener import HostListenerRestartError, HostListenerStatus
 from core.services.specs import ServiceEndpoint
 from web.runtime import ApplicationRuntime
 from web.uploads import UploadStore
@@ -29,6 +30,32 @@ class FakeController:
 
     def get_logs(self, port):
         return "log"
+
+
+class FakeHostListener:
+    def __init__(self) -> None:
+        self.restarts = []
+        self.error: HostListenerRestartError | None = None
+        self._status = HostListenerStatus(state="running", pid=123, message="Instruction server is running")
+
+    def status(self) -> HostListenerStatus:
+        return self._status
+
+    def restart(self, config, *, rollback_config=None) -> HostListenerStatus:
+        self.restarts.append((config, rollback_config))
+        if self.error is not None:
+            raise self.error
+        self._status = HostListenerStatus(
+            state="running",
+            host=config.host,
+            port=config.port,
+            pid=456,
+            message="Instruction server is running",
+        )
+        return self._status
+
+    def close(self) -> None:
+        return None
 
 
 class FakeAnalysis:
@@ -58,8 +85,9 @@ class FakeAnalysis:
 def runtime(tmp_path: Path):
     config_path = tmp_path / "config.json"
     ConfigStore(config_path).save(AppConfig())
+    listener = FakeHostListener()
     value = ApplicationRuntime(
-        ConfigStore(config_path), FakeController(), FakeAnalysis(), UploadStore(tmp_path / "uploads")
+        ConfigStore(config_path), listener, FakeController(), FakeAnalysis(), UploadStore(tmp_path / "uploads")
     )
     return value
 
@@ -165,32 +193,6 @@ def test_analysis_post_returns_promptly(client, monkeypatch, runtime, tmp_path):
     response = client.post("/analysis/start/", {"input_path": str(tmp_path)})
     assert response.status_code == 302
     assert runtime.analysis.started[0][0] == tmp_path.resolve()
-
-
-def test_host_create_edit_and_health_test(client, monkeypatch, runtime):
-    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
-    assert client.post("/host/nodes/", {"name": "worker-1"}).status_code == 302
-    assert (
-        client.post(
-            "/host/nodes/worker-1/",
-            {"mode": "remote", "host": "192.168.1.20", "instruction_port": 9001},
-        ).status_code
-        == 302
-    )
-
-    calls = []
-
-    class HealthClient:
-        def __init__(self, host, port, timeout, retries):
-            calls.append((host, port, timeout, retries))
-
-        def health(self):
-            return True
-
-    monkeypatch.setattr("web.views.InstructionClient", HealthClient)
-    response = client.post("/host/nodes/worker-1/test/")
-    assert response.json() == {"state": "reachable", "message": "Instruction server is reachable."}
-    assert calls == [("192.168.1.20", 9001, 2.0, 0)]
 
 
 def test_run_stream_and_artifacts_are_scoped_to_current_run(client, monkeypatch, runtime, tmp_path):
@@ -300,54 +302,103 @@ def test_active_upload_delete_is_rejected_without_removing_files(client, monkeyp
     assert client.post(str(active["delete_url"])).status_code == 200
 
 
-def test_host_form_errors_retain_all_host_cards_and_save_aliases(client, monkeypatch, runtime) -> None:
+def test_host_page_configures_only_this_instruction_server(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.get("/host/")
+
+    assert response.status_code == 200
+    assert b"IP address" in response.content
+    assert b"Instruction port" in response.content
+    assert b"Listening on 127.0.0.1:9000" in response.content
+    assert b"Add remote host" not in response.content
+    assert b"Compute hosts" not in response.content
+    assert b"data-host-listener-status-url" in response.content
+    assert b"data-host-listener-save" in response.content
+    assert client.post("/host/nodes/", {"name": "worker-1"}).status_code == 404
+
+
+def test_host_save_restarts_then_persists_listener_config(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.post("/host/save/", {"host": "127.0.0.1", "port": 9010})
+
+    assert response.status_code == 302
     config = runtime.config_store.load()
-    config.nodes["worker-1"] = NodeConfig(mode="remote", host="192.168.1.20", instruction_port=9001)
+    assert config.host_listener.host == "127.0.0.1"
+    assert config.host_listener.port == 9010
+    replacement, previous = runtime.host_listener.restarts[0]
+    assert replacement.port == 9010
+    assert previous.port == 9000
+
+
+def test_host_save_preserves_unknown_listener_configuration(client, monkeypatch, runtime) -> None:
+    config = runtime.config_store.load()
+    config.host_listener.extra = {"future_listener_option": {"keep": True}}
     runtime.config_store.save(config)
     monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
 
-    assert client.get("/host/").status_code == 200
-    assert client.get("/nodes/").status_code == 200
-    assert (
-        client.post("/host/nodes/local/", {"mode": "local", "host": "localhost", "instruction_port": ""}).status_code
-        == 302
-    )
-    assert (
-        client.post("/nodes/local/save/", {"mode": "local", "host": "localhost", "instruction_port": ""}).status_code
-        == 302
-    )
+    response = client.post("/host/save/", {"host": "127.0.0.1", "port": 9010})
 
-    responses = [
-        (client.post("/host/nodes/", {"name": ""}), b"This field is required."),
-        (client.post("/host/nodes/", {"name": "worker-1"}), b"A host with that name already exists."),
-        (
-            client.post(
-                "/host/nodes/worker-1/",
-                {"mode": "remote", "host": "192.168.1.20", "instruction_port": ""},
-            ),
-            b"Remote nodes require an instruction port.",
-        ),
-        (
-            client.post(
-                "/host/nodes/local/",
-                {"mode": "remote", "host": "localhost", "instruction_port": "9000"},
-            ),
-            b"This computer must remain local.",
-        ),
-        (
-            client.post(
-                "/host/nodes/worker-1/",
-                {"mode": "local", "host": "192.168.1.20", "instruction_port": ""},
-            ),
-            b"Configured hosts must remain remote.",
-        ),
-    ]
-    for response, error in responses:
-        assert response.status_code == 400
-        assert error in response.content
-        assert b"This computer" in response.content
-        assert b"worker-1" in response.content
-        assert b"Add host" in response.content
+    assert response.status_code == 302
+    assert runtime.config_store.load().host_listener.extra == {"future_listener_option": {"keep": True}}
+
+
+def test_host_save_rolls_back_listener_when_configuration_persistence_fails(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    def fail_save(_config) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runtime.config_store, "save", fail_save)
+    response = client.post("/host/save/", {"host": "127.0.0.1", "port": 9010})
+
+    assert response.status_code == 500
+    assert b"The previous listener was restored." in response.content
+    assert runtime.config_store.load().host_listener.port == 9000
+    assert [replacement.port for replacement, _previous in runtime.host_listener.restarts] == [9010, 9000]
+
+
+def test_landing_keeps_client_before_host_without_navigation(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.content.index(b"Client") < response.content.index(b"Host")
+    assert b"<nav" not in response.content
+
+
+def test_host_failed_replacement_keeps_saved_config_and_reports_rollback(client, monkeypatch, runtime) -> None:
+    runtime.host_listener.error = HostListenerRestartError(
+        "Replacement failed: unavailable. Previous instruction server was restored.", rollback_succeeded=True
+    )
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.post("/host/save/", {"host": "127.0.0.1", "port": 9010})
+
+    assert response.status_code == 502
+    assert b"Previous instruction server was restored." in response.content
+    assert runtime.config_store.load().host_listener.port == 9000
+
+
+def test_host_listener_status_json_and_csrf_protection(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    status = client.get("/host/status/")
+
+    assert status.json() == {
+        "state": "running",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "pid": 123,
+        "uptime_seconds": None,
+        "message": "Instruction server is running",
+        "health_url": "http://127.0.0.1:9000/health",
+        "last_error": None,
+    }
+    csrf_client = Client(enforce_csrf_checks=True)
+    assert csrf_client.post("/host/save/", {"host": "127.0.0.1", "port": 9010}).status_code == 403
 
 
 def test_results_explains_in_memory_runs_and_keeps_terminal_artifacts(client, monkeypatch, runtime, tmp_path) -> None:

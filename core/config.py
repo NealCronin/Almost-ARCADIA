@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
 import tempfile
@@ -12,6 +13,44 @@ from core.errors import ConfigurationError
 from core.services.specs import ServiceSpec
 
 NodeMode = Literal["local", "remote"]
+
+
+@dataclass(slots=True)
+class HostListenerConfig:
+    host: str = "127.0.0.1"
+    port: int = 9000
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host, str) or not self.host.strip():
+            raise ConfigurationError("Host listener IP address must be a valid IPv4 address.")
+        try:
+            address = ipaddress.ip_address(self.host.strip())
+        except ValueError as exc:
+            raise ConfigurationError("Host listener IP address must be a valid IPv4 address.") from exc
+        if address.version != 4:
+            raise ConfigurationError("Host listener currently supports IPv4 addresses only.")
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            raise ConfigurationError("Host listener port must be an integer between 1 and 65535.")
+        self.host = str(address)
+
+    def to_dict(self) -> dict[str, Any]:
+        result = copy.deepcopy(self.extra)
+        result.update({"host": self.host, "port": self.port})
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> HostListenerConfig:
+        if data is None:
+            return cls()
+        if not isinstance(data, dict):
+            raise ConfigurationError("Host listener configuration must be an object.")
+        known = {"host", "port"}
+        return cls(
+            host=data.get("host", "127.0.0.1"),
+            port=data.get("port", 9000),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+        )
 
 
 @dataclass(slots=True)
@@ -208,6 +247,7 @@ class PriorityMapToolConfig:
 class AppConfig:
     nodes: dict[str, NodeConfig] = field(default_factory=dict)
     tools: dict[str, Any] = field(default_factory=lambda: {"priority-map": PriorityMapToolConfig()})
+    host_listener: HostListenerConfig = field(default_factory=HostListenerConfig)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -234,6 +274,7 @@ class AppConfig:
             {
                 "nodes": {name: node.to_dict() for name, node in self.nodes.items()},
                 "tools": tools,
+                "host_listener": self.host_listener.to_dict(),
             }
         )
         return result
@@ -246,7 +287,7 @@ class AppConfig:
         if not isinstance(raw_nodes, dict):
             raise ConfigurationError("Nodes configuration must be an object.")
         nodes = {str(name): NodeConfig.from_dict(value) for name, value in raw_nodes.items()}
-        known_root = {"nodes", "tools", "services", "pipeline", "output_root"}
+        known_root = {"nodes", "tools", "services", "pipeline", "output_root", "host_listener"}
         if "tools" in data:
             raw_tools = data["tools"]
             if not isinstance(raw_tools, dict):
@@ -273,6 +314,7 @@ class AppConfig:
         return cls(
             nodes=nodes,
             tools=tools,
+            host_listener=HostListenerConfig.from_dict(data.get("host_listener")),
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known_root}),
         )
 

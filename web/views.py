@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import threading
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import quote
@@ -9,23 +11,25 @@ from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse, S
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from core.config import ConfiguredService, NodeConfig
+from core.config import ConfiguredService
 from core.errors import ArcadiaError
 from core.inference.llm_client import LLMClient
+from core.services.host_listener import HostListenerError, HostListenerRestartError
 from core.services.instruction_client import InstructionClient
 from core.services.specs import ServiceEndpoint
 from web.artifacts import ArtifactStore
 from web.forms import (
     AnalysisForm,
     EndpointTestForm,
+    HostListenerForm,
     LLMServiceForm,
-    NodeForm,
-    NodeNameForm,
     PipelineForm,
     SAMServiceForm,
 )
 from web.runtime import get_runtime
 from web.tools import TOOLS
+
+_host_listener_save_lock = threading.RLock()
 
 
 def _service_form(name: str, config: Any, data: Any = None):
@@ -156,132 +160,77 @@ def service_logs(request: HttpRequest, port: int) -> HttpResponse:
         return HttpResponse(str(exc), status=502, content_type="text/plain")
 
 
-def _host_context(
-    config: Any,
-    *,
-    node_name_form: NodeNameForm | None = None,
-    overridden_node_forms: dict[str, NodeForm] | None = None,
-) -> dict[str, Any]:
-    forms = {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()}
-    forms.update(overridden_node_forms or {})
-    return {
-        "config": config,
-        "node_forms": forms,
-        "node_name_form": node_name_form or NodeNameForm(),
-    }
-
-
 @require_GET
 def nodes(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
     config = runtime.config_store.load()
-    return render(request, "web/nodes.html", _host_context(config))
+    return render(
+        request,
+        "web/nodes.html",
+        {
+            "form": HostListenerForm(initial=config.host_listener.to_dict()),
+            "listener": runtime.host_listener.status(),
+        },
+    )
 
 
 @require_POST
-def create_node(request: HttpRequest) -> HttpResponse:
+def save_host_listener(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
-    try:
-        runtime.analysis.assert_configuration_mutable()
-        config = runtime.config_store.load()
-        form = NodeNameForm(request.POST)
-        if not form.is_valid():
-            return render(request, "web/nodes.html", _host_context(config, node_name_form=form), status=400)
-        name = form.cleaned_data["name"]
-        if name in config.nodes:
-            form.add_error("name", "A host with that name already exists.")
-            return render(request, "web/nodes.html", _host_context(config, node_name_form=form), status=400)
-        config.nodes[name] = NodeConfig(mode="remote", host="127.0.0.1", instruction_port=9000)
-        runtime.config_store.save(config)
-        messages.success(request, f"Created host {name}.")
-    except (ArcadiaError, ValueError) as exc:
-        messages.error(request, str(exc))
-    return redirect("host")
-
-
-@require_POST
-def save_node(request: HttpRequest, node_name: str) -> HttpResponse:
-    runtime = get_runtime()
-    config = runtime.config_store.load()
-    if node_name not in config.nodes:
-        return HttpResponse("Host not found.", status=404)
-    form = NodeForm(request.POST)
-    try:
-        runtime.analysis.assert_configuration_mutable()
-        if not form.is_valid():
-            return render(
-                request,
-                "web/nodes.html",
-                _host_context(config, overridden_node_forms={node_name: form}),
-                status=400,
-            )
-        if node_name == "local":
-            if form.cleaned_data["mode"] != "local":
-                form.add_error("mode", "This computer must remain local.")
-                return render(
-                    request,
-                    "web/nodes.html",
-                    _host_context(config, overridden_node_forms={node_name: form}),
-                    status=400,
-                )
-            config.nodes["local"] = NodeConfig(mode="local", host=form.cleaned_data["host"])
-        else:
-            node = form.to_config()
-            if node.mode != "remote":
-                form.add_error("mode", "Configured hosts must remain remote.")
-                return render(
-                    request,
-                    "web/nodes.html",
-                    _host_context(config, overridden_node_forms={node_name: form}),
-                    status=400,
-                )
-            config.nodes[node_name] = node
-        runtime.config_store.save(config)
-        messages.success(request, f"Saved host {node_name}.")
-    except (ArcadiaError, ValueError) as exc:
-        form.add_error(None, str(exc))
+    form = HostListenerForm(request.POST)
+    if not form.is_valid():
         return render(
             request,
             "web/nodes.html",
-            _host_context(config, overridden_node_forms={node_name: form}),
+            {"form": form, "listener": runtime.host_listener.status()},
             status=400,
         )
-    return redirect("host")
-
-
-@require_POST
-def delete_node(request: HttpRequest, node_name: str) -> HttpResponse:
-    runtime = get_runtime()
-    try:
-        runtime.analysis.assert_configuration_mutable()
+    with _host_listener_save_lock:
         config = runtime.config_store.load()
-        if node_name not in config.nodes:
-            return HttpResponse("Host not found.", status=404)
-        if node_name == "local":
-            messages.error(request, "This computer cannot be deleted.")
-        elif any(service.node == node_name for service in config.priority_map.services.values()):
-            messages.error(request, f"Host {node_name} is used by a configured Priority Map service.")
-        else:
-            del config.nodes[node_name]
+        previous = config.host_listener
+        replacement = form.to_config()
+        replacement.extra = copy.deepcopy(previous.extra)
+        try:
+            runtime.host_listener.restart(replacement, rollback_config=previous)
+        except HostListenerRestartError as exc:
+            form.add_error(None, str(exc))
+            return render(
+                request,
+                "web/nodes.html",
+                {"form": form, "listener": runtime.host_listener.status()},
+                status=502,
+            )
+        except HostListenerError as exc:
+            form.add_error(None, f"Instruction server was not changed: {exc}")
+            return render(
+                request,
+                "web/nodes.html",
+                {"form": form, "listener": runtime.host_listener.status()},
+                status=400,
+            )
+        config.host_listener = replacement
+        try:
             runtime.config_store.save(config)
-            messages.success(request, f"Deleted host {node_name}.")
-    except (ArcadiaError, ValueError) as exc:
-        messages.error(request, str(exc))
+        except OSError as exc:
+            try:
+                runtime.host_listener.restart(previous, rollback_config=replacement)
+            except HostListenerRestartError as rollback_exc:
+                form.add_error(None, f"Configuration was not saved: {exc}. Listener rollback failed: {rollback_exc}")
+            else:
+                form.add_error(None, f"Configuration was not saved: {exc}. The previous listener was restored.")
+            return render(
+                request,
+                "web/nodes.html",
+                {"form": form, "listener": runtime.host_listener.status()},
+                status=500,
+            )
+    messages.success(request, f"Instruction server is listening on {replacement.host}:{replacement.port}.")
     return redirect("host")
 
 
-@require_POST
-def test_node(request: HttpRequest, node_name: str) -> JsonResponse:
-    runtime = get_runtime()
-    config = runtime.config_store.load()
-    node = config.nodes.get(node_name)
-    if node is None:
-        return JsonResponse({"detail": "Host not found."}, status=404)
-    if node.mode != "remote" or node.instruction_port is None:
-        return JsonResponse({"state": "unreachable", "message": "Instruction server is unreachable."}, status=400)
-    reachable = InstructionClient(node.host, node.instruction_port, timeout=2.0, retries=0).health()
-    message = "Instruction server is reachable." if reachable else "Instruction server is unreachable."
-    return JsonResponse({"state": "reachable" if reachable else "unreachable", "message": message})
+@require_GET
+def host_listener_status(request: HttpRequest) -> JsonResponse:
+    return JsonResponse(get_runtime().host_listener.status().to_dict())
 
 
 @require_GET

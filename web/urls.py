@@ -4,13 +4,9 @@ from web import views
 
 urlpatterns = [
     path("", views.home, name="home"),
-    # Portal-oriented aliases. Existing routes remain available below so the
-    # UI first pass does not break backend tests or bookmarked URLs.
     path("host/", views.nodes, name="host"),
-    path("host/nodes/", views.create_node, name="create_node"),
-    path("host/nodes/<str:node_name>/", views.save_node, name="edit_node"),
-    path("host/nodes/<str:node_name>/delete/", views.delete_node, name="delete_node"),
-    path("host/nodes/<str:node_name>/test/", views.test_node, name="test_node"),
+    path("host/save/", views.save_host_listener, name="save_host_listener"),
+    path("host/status/", views.host_listener_status, name="host_listener_status"),
     path("client/", views.client_portal, name="client"),
     path("client/priority-map/", views.analysis_page, name="priority_map"),
     path("client/priority-map/models/", views.services, name="priority_map_models"),
@@ -29,8 +25,6 @@ urlpatterns = [
     path("services/<str:service_name>/start/", views.start_service, name="start_service"),
     path("services/<str:service_name>/stop/", views.stop_service, name="stop_service"),
     path("services/logs/<int:port>/", views.service_logs, name="service_logs"),
-    path("nodes/", views.nodes, name="nodes"),
-    path("nodes/<str:node_name>/save/", views.save_node, name="save_node"),
     path("analysis/", views.analysis_page, name="analysis"),
     path("analysis/configure/", views.save_pipeline, name="save_pipeline"),
     path("analysis/start/", views.start_analysis, name="start_analysis"),

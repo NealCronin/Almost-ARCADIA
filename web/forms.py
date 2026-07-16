@@ -7,8 +7,24 @@ from typing import Any
 
 from django import forms
 
-from core.config import ConfiguredService, NodeConfig, PipelineConfig
+from core.config import ConfiguredService, HostListenerConfig, NodeConfig, PipelineConfig
+from core.errors import ConfigurationError
 from core.services.specs import ServiceSpec
+
+
+class HostListenerForm(forms.Form):
+    host = forms.CharField(label="IP address", initial="127.0.0.1")
+    port = forms.IntegerField(label="Instruction port", min_value=1, max_value=65535, initial=9000)
+
+    def clean_host(self) -> str:
+        value = self.cleaned_data["host"]
+        try:
+            return HostListenerConfig(host=value).host
+        except ConfigurationError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+
+    def to_config(self) -> HostListenerConfig:
+        return HostListenerConfig(host=self.cleaned_data["host"], port=self.cleaned_data["port"])
 
 
 class NodeForm(forms.Form):

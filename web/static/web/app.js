@@ -21,27 +21,36 @@
     }));
   });
 
-  qsa('[data-node-form]').forEach((form) => {
-    const mode = qs('select[name="mode"]', form);
-    const port = qs('[data-instruction-port]', form);
-    if (!mode || !port) return;
-    const update = () => { port.hidden = mode.value !== 'remote'; };
-    mode.addEventListener('change', update);
-    update();
-  });
-
-  qsa('[data-test-host]').forEach((button) => button.addEventListener('click', async () => {
-    button.disabled = true;
-    const original = button.textContent;
-    try {
-      const response = await fetch(button.dataset.testUrl, {method: 'POST', headers: {'X-CSRFToken': csrfToken(), 'Accept': 'application/json'}});
-      const data = await response.json();
-      button.textContent = data.message || 'Connection test failed';
-    } catch (_) {
-      button.textContent = 'Instruction server is unreachable.';
-    }
-    window.setTimeout(() => { button.textContent = original; button.disabled = false; }, 2200);
-  }));
+  const hostListener = qs('[data-host-listener-status-url]');
+  if (hostListener) {
+    const stateElement = qs('[data-host-listener-state]', hostListener);
+    const addressElement = qs('[data-host-listener-address]', hostListener);
+    const uptimeElement = qs('[data-host-listener-uptime]', hostListener);
+    const errorElement = qs('[data-host-listener-error]', hostListener);
+    const form = qs('[data-host-listener-form]', hostListener);
+    const save = qs('[data-host-listener-save]', hostListener);
+    const renderListener = (data) => {
+      const state = data.state || 'failed';
+      if (stateElement) {
+        stateElement.textContent = state.replace(/\b\w/g, (character) => character.toUpperCase());
+        stateElement.className = `status-pill status-pill--${state}`;
+      }
+      if (addressElement) addressElement.textContent = `Listening on ${data.host}:${data.port}`;
+      if (uptimeElement) uptimeElement.textContent = data.uptime_seconds == null ? '' : `Uptime: ${data.uptime_seconds} seconds`;
+      if (errorElement) { errorElement.hidden = !data.last_error; errorElement.textContent = data.last_error || ''; }
+      if (save) save.disabled = ['starting', 'restarting', 'rollback'].includes(state);
+    };
+    const refreshListener = async () => {
+      try {
+        const response = await fetch(hostListener.dataset.hostListenerStatusUrl, {headers: {'Accept': 'application/json'}});
+        if (response.ok) renderListener(await response.json());
+      } finally {
+        window.setTimeout(refreshListener, 1200);
+      }
+    };
+    form?.addEventListener('submit', () => { if (save) save.disabled = true; });
+    refreshListener();
+  }
 
   const modelSource = document.getElementById('llm_model_source');
   if (modelSource) {

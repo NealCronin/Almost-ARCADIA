@@ -1,4 +1,8 @@
 {
+  "host_listener": {
+    "host": "127.0.0.1",
+    "port": 9000
+  },
   "nodes": {
     "local": {
       "mode": "local",
