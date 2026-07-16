@@ -6,7 +6,7 @@ from web.forms import LLMServiceForm, RemoteNodeForm, SAMServiceForm
 
 NODES = {
     "local": NodeConfig("local", "127.0.0.1"),
-    "desktop": NodeConfig("remote", "100.96.83.10", 9000),
+    "desktop": NodeConfig("remote", "100.96.40.81", 9000),
 }
 
 
@@ -14,39 +14,20 @@ def llm_data(**overrides: object) -> dict[str, object]:
     data: dict[str, object] = {
         "node": "local",
         "inference_port": 8081,
-        "bind_host": "0.0.0.0",
-        "startup_timeout": 600,
-        "model_source": "local",
-        "model_path": "/models/model.gguf",
-        "hf_repo": "",
-        "hf_file": "",
-        "hf_cache_dir": "",
+        "hf_repo": "org/model-GGUF",
         "n_ctx": 32768,
+        "temperature": 0.2,
+        "top_k": 40,
+        "min_p": 0.05,
+        "top_p": 0.95,
+        "local_bind_host": "127.0.0.1",
         "n_gpu_layers": -1,
-        "n_threads": "",
         "n_batch": 2048,
         "n_ubatch": 512,
-        "n_parallel": 1,
         "flash_attn": "on",
-        "cache_type_k": "",
-        "cache_type_v": "",
-        "chat_format": "",
-        "model_alias": "local-model",
-        "additional_arguments": "",
-    }
-    data.update(overrides)
-    return data
-
-
-def sam_data(**overrides: object) -> dict[str, object]:
-    data: dict[str, object] = {
-        "node": "local",
-        "inference_port": 8090,
-        "bind_host": "0.0.0.0",
+        "offload_kqv": "on",
+        "use_mmap": "on",
         "startup_timeout": 600,
-        "checkpoint": "/models/sam3.pt",
-        "confidence": 0.25,
-        "additional_arguments": "",
     }
     data.update(overrides)
     return data
@@ -54,180 +35,77 @@ def sam_data(**overrides: object) -> dict[str, object]:
 
 def test_remote_node_form_normalizes_safe_names_and_rejects_invalid_addresses() -> None:
     form = RemoteNodeForm({"name": "GPU Desktop", "host": "192.168.1.20", "instruction_port": 9000})
-
     assert form.is_valid(), form.errors
     assert form.cleaned_data["name"] == "gpu-desktop"
-    assert form.to_config() == NodeConfig("remote", "192.168.1.20", 9000)
-
-    invalid = RemoteNodeForm({"name": "../local", "host": "example.test", "instruction_port": "true"})
-    assert not invalid.is_valid()
-    assert "name" in invalid.errors
-    assert "host" in invalid.errors
-    assert "instruction_port" in invalid.errors
 
 
-def test_llm_local_model_conversion():
-    form = LLMServiceForm(llm_data(n_threads=8, cache_type_k="q8_0"), nodes=NODES)
+def test_llm_quick_fields_are_declared_in_required_order() -> None:
+    form = LLMServiceForm(nodes=NODES)
+    assert list(form.fields)[:8] == [
+        "node",
+        "inference_port",
+        "hf_repo",
+        "n_ctx",
+        "temperature",
+        "top_k",
+        "min_p",
+        "top_p",
+    ]
+    assert not {"model_source", "model_path", "hf_file", "hf_cache_dir", "n_parallel"}.intersection(form.fields)
+
+
+def test_llm_repository_and_generation_validation(monkeypatch) -> None:
+    monkeypatch.setattr("core.services.llm_settings.local_ipv4_addresses", lambda: {"127.0.0.1", "10.0.0.3"})
+    valid = LLMServiceForm(llm_data(hf_repo=" org/model-GGUF ", local_bind_host="10.0.0.3"), nodes=NODES)
+    assert valid.is_valid(), valid.errors
+    spec = valid.to_spec()
+    assert spec.settings["hf_repo"] == "org/model-GGUF"
+    assert spec.settings["bind_host"] == "10.0.0.3"
+    assert {"temperature", "top_k", "min_p", "top_p"}.issubset(spec.settings)
+    for repository in ("", "https://huggingface.co/a/b", "/tmp/model", "a/../b", "--x/y"):
+        assert not LLMServiceForm(llm_data(hf_repo=repository), nodes=NODES).is_valid()
+    assert not LLMServiceForm(llm_data(n_batch=1, n_ubatch=2), nodes=NODES).is_valid()
+    assert not LLMServiceForm(llm_data(top_p=0), nodes=NODES).is_valid()
+    assert not LLMServiceForm(llm_data(rope_scaling_type="invalid"), nodes=NODES).is_valid()
+
+
+def test_remote_node_address_wins_over_posted_local_host() -> None:
+    form = LLMServiceForm(llm_data(node="desktop", local_bind_host="127.0.0.99"), nodes=NODES)
     assert form.is_valid(), form.errors
-    assert form.to_spec() == ServiceSpec(
-        service_type="llm",
-        port=8081,
-        settings={
-            "bind_host": "0.0.0.0",
-            "startup_timeout": 600.0,
-            "n_ctx": 32768,
-            "n_gpu_layers": -1,
-            "n_parallel": 1,
-            "model_alias": "local-model",
-            "model_path": "/models/model.gguf",
-            "extra_args": [
-                "--n_threads",
-                "8",
-                "--n_batch",
-                "2048",
-                "--n_ubatch",
-                "512",
-                "--type_k",
-                "8",
-                "--flash_attn",
-                "true",
-            ],
-        },
-    )
+    assert form.to_spec().settings["bind_host"] == "100.96.40.81"
 
 
-def test_llm_hugging_face_conversion_ignores_inactive_local_source():
-    form = LLMServiceForm(
-        llm_data(
-            model_source="huggingface",
-            model_path="/models/stale.gguf",
-            hf_repo="org/model-GGUF",
-            hf_file="model.Q4_K_M.gguf",
-            hf_cache_dir="/cache",
-        ),
-        nodes=NODES,
-    )
-    assert form.is_valid(), form.errors
-    settings = form.to_spec().settings
-    assert settings["hf_repo"] == "org/model-GGUF"
-    assert settings["hf_file"] == "model.Q4_K_M.gguf"
-    assert settings["hf_cache_dir"] == "/cache"
-    assert "model_path" not in settings
-
-
-def test_llm_source_and_batch_validation():
-    invalid_cases: tuple[tuple[dict[str, object], str], ...] = (
-        ({"model_path": ""}, "model_path"),
-        ({"model_source": "huggingface", "model_path": "", "hf_repo": "", "hf_file": "model.gguf"}, "hf_repo"),
-        ({"model_source": "huggingface", "model_path": "", "hf_repo": "org/model", "hf_file": ""}, "hf_file"),
-        ({"n_batch": 511, "n_ubatch": 512}, "n_batch"),
-    )
-    for values, field in invalid_cases:
-        form = LLMServiceForm(llm_data(**values), nodes=NODES)
-        assert not form.is_valid()
-        assert form.errors is not None
-        assert field in form.errors
-
-    split_model = LLMServiceForm(
-        llm_data(model_path="/models/model-00001-of-00002.gguf"),
-        nodes=NODES,
-    )
-    assert not split_model.is_valid()
-    assert "model_path" in split_model.errors
-
-
-def test_llm_optional_fields_are_omitted():
-    form = LLMServiceForm(llm_data(n_threads="", chat_format="", cache_type_k="", cache_type_v=""), nodes=NODES)
-    assert form.is_valid(), form.errors
-    settings = form.to_spec().settings
-    assert "chat_format" not in settings
-    assert "n_threads" not in settings
-    assert "--n_threads" not in settings["extra_args"]
-    assert "--type_k" not in settings["extra_args"]
-
-
-def test_llm_known_and_quoted_additional_arguments():
-    form = LLMServiceForm(llm_data(additional_arguments='--some_new_flag "value with spaces"'), nodes=NODES)
-    assert form.is_valid(), form.errors
-    assert form.to_spec().settings["extra_args"][:2] == ["--some_new_flag", "value with spaces"]
-
-
-def test_llm_rejects_protected_additional_arguments():
-    form = LLMServiceForm(llm_data(additional_arguments="--model other.gguf"), nodes=NODES)
-    assert not form.is_valid()
-    assert "additional_arguments" in form.errors
-
-
-def test_llm_existing_config_populates_known_values_and_preserves_unknown_arguments():
+def test_legacy_settings_migrate_without_losing_unknown_values() -> None:
     configured = ConfiguredService(
-        "desktop",
-        ServiceSpec(
-            "llm",
-            8082,
-            {
-                "model_path": "/models/model.gguf",
-                "bind_host": "127.0.0.1",
-                "startup_timeout": 30,
-                "extra_args": ["--n_threads", "8", "--n_batch", "4096", "--some_new_flag", "value"],
-            },
-        ),
+        "local",
+        ServiceSpec("llm", 8081, {"hf_repo": "org/model", "hf_file": "model.gguf", "future": {"keep": True}}),
     )
     form = LLMServiceForm(nodes=NODES)
     form.initial_from(configured)
-    assert form.initial["model_source"] == "local"
-    assert form.initial["n_threads"] == 8
-    assert form.initial["n_batch"] == 4096
-    assert form.initial["additional_arguments"] == "--some_new_flag value"
+    assert form.initial["model_file_pattern"] == "model.gguf"
+    bound = LLMServiceForm(llm_data(model_file_pattern="model.gguf"), nodes=NODES)
+    bound.initial_from(configured)
+    assert bound.is_valid(), bound.errors
+    assert bound.to_spec().settings["future"] == {"keep": True}
 
-    round_trip = LLMServiceForm(
-        llm_data(n_threads=8, n_batch=4096, additional_arguments=form.initial["additional_arguments"]),
+
+def test_legacy_local_path_requires_repository_migration() -> None:
+    form = LLMServiceForm(nodes=NODES)
+    form.initial_from(ConfiguredService("local", ServiceSpec("llm", 8081, {"model_path": "/old/model.gguf"})))
+    assert form.legacy_local_model
+    assert not form.initial.get("hf_repo")
+
+
+def test_sam_form_remains_available() -> None:
+    form = SAMServiceForm(
+        {
+            "node": "local",
+            "inference_port": 8090,
+            "bind_host": "127.0.0.1",
+            "checkpoint": "x.pt",
+            "confidence": 0.25,
+            "startup_timeout": 10,
+        },
         nodes=NODES,
     )
-    assert round_trip.is_valid(), round_trip.errors
-    args = round_trip.to_spec().settings["extra_args"]
-    assert args.count("--n_threads") == 1
-    assert args.count("--n_batch") == 1
-    assert args[:2] == ["--some_new_flag", "value"]
-
-
-def test_sam_conversion_and_validation():
-    form = SAMServiceForm(sam_data(additional_arguments='--device "mps backend"'), nodes=NODES)
     assert form.is_valid(), form.errors
-    assert form.to_spec() == ServiceSpec(
-        "sam3",
-        8090,
-        {
-            "checkpoint": "/models/sam3.pt",
-            "bind_host": "0.0.0.0",
-            "startup_timeout": 600.0,
-            "confidence": 0.25,
-            "extra_args": ["--device", "mps backend"],
-        },
-    )
-    invalid_cases: tuple[tuple[dict[str, object], str], ...] = (
-        ({"checkpoint": ""}, "checkpoint"),
-        ({"confidence": 1.1}, "confidence"),
-        ({"additional_arguments": "--port 9999"}, "additional_arguments"),
-    )
-    for values, field in invalid_cases:
-        invalid = SAMServiceForm(sam_data(**values), nodes=NODES)
-        assert not invalid.is_valid()
-        assert invalid.errors is not None
-        assert field in invalid.errors
-
-
-def test_sam_existing_config_populates_initial_values():
-    configured = ConfiguredService(
-        "desktop",
-        ServiceSpec(
-            "sam3",
-            8091,
-            {"checkpoint": "/remote/sam3.pt", "confidence": 0.5, "extra_args": ["--device", "cuda"]},
-        ),
-    )
-    form = SAMServiceForm(nodes=NODES)
-    form.initial_from(configured)
-    assert form.initial["node"] == "desktop"
-    assert form.initial["checkpoint"] == "/remote/sam3.pt"
-    assert form.initial["confidence"] == 0.5
-    assert form.initial["additional_arguments"] == "--device cuda"

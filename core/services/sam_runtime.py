@@ -201,6 +201,8 @@ def create_app(checkpoint: str | Path, predictor: Any | None = None, confidence:
         prompts = [prompt.strip() for prompt in request.prompts if prompt.strip()]
         if not prompts:
             raise HTTPException(status_code=422, detail="at least one text prompt is required")
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="SAM predictor is unavailable")
         try:
             image = _decode_image(request.image)
             with lock:

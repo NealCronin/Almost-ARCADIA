@@ -29,6 +29,9 @@ class LLMClient:
         images: Iterable[bytes | tuple[str, bytes]] | None = None,
         model: str = "local-model",
         temperature: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        top_p: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResult:
         if not prompt.strip():
@@ -50,6 +53,12 @@ class LLMClient:
         }
         if temperature is not None:
             body["temperature"] = temperature
+        if top_k is not None:
+            body["top_k"] = top_k
+        if min_p is not None:
+            body["min_p"] = min_p
+        if top_p is not None:
+            body["top_p"] = top_p
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         try:

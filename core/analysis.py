@@ -17,7 +17,13 @@ from core.inference.sam_client import SAMClient
 from core.pipeline.priority_map_adapter import PipelineResult, PriorityMapAdapter
 from core.services.controller import ServiceController
 from core.services.instruction_client import InstructionClient
-from core.services.specs import ServiceEndpoint
+from core.services.llm_settings import (
+    REMOTE_LLM_KEYS,
+    generation_settings,
+    resolve_inference_bind_host,
+    validate_llm_settings,
+)
+from core.services.specs import ServiceEndpoint, ServiceSpec
 
 AnalysisState = Literal["idle", "starting", "running", "cancelling", "cancelled", "completed", "failed"]
 
@@ -191,6 +197,7 @@ class AnalysisCoordinator:
                     return
                 self._set_status(state="running", stage="preparing_input", message="Preparing input")
                 settings = config.priority_map.pipeline.to_dict()
+                settings["llm_generation"] = generation_settings(config.priority_map.services["llm"].settings)
                 settings["output_directory"] = str(output_directory)
                 settings["input_path"] = input_path
                 self._set_status(stage="priority_map", message="Running Priority Map")
@@ -269,7 +276,13 @@ class AnalysisCoordinator:
                 raise AnalysisError(f"Remote node {configured.node!r} has no instruction port")
             if self._cancelled_checkpoint(output_directory):
                 raise ServiceError("Analysis cancelled before remote service startup.")
-            endpoint = InstructionClient(node.host, node.instruction_port).start_service(configured.spec)
+            spec = configured.spec
+            if name == "llm":
+                settings = {key: value for key, value in configured.settings.items() if key in REMOTE_LLM_KEYS}
+                settings = validate_llm_settings(settings, remote=True)
+                settings["bind_host"] = resolve_inference_bind_host(configured.node, config.nodes, None)
+                spec = ServiceSpec(service_type="llm", port=configured.port, settings=settings)
+            endpoint = InstructionClient(node.host, node.instruction_port).start_service(spec)
             if self._cancelled_checkpoint(output_directory):
                 raise ServiceError("Analysis cancelled after remote service startup.")
             self._wait_ready(

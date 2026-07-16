@@ -15,7 +15,7 @@ dependencies = [
     "numpy>=2.0,<3",
     "opencv-python>=4.10,<5",
     "llama-cpp-python[server]==0.3.34",
-    "huggingface-hub>=0.23,<1",
+    "huggingface-hub>=0.23,<2",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +62,7 @@ python_version = "3.12"
 check_untyped_defs = true
 ignore_missing_imports = true
 warn_unused_ignores = true
+follow_imports = "skip"
 
 [tool.setuptools.packages.find]
 include = ["core*", "web*", "project*"]

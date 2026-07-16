@@ -96,24 +96,20 @@ def llm_post_data(**overrides):
     data = {
         "node": "local",
         "inference_port": 8081,
-        "bind_host": "0.0.0.0",
-        "startup_timeout": 600,
-        "model_source": "local",
-        "model_path": "/models/model.gguf",
-        "hf_repo": "",
-        "hf_file": "",
-        "hf_cache_dir": "",
+        "hf_repo": "org/model",
         "n_ctx": 32768,
+        "temperature": 0.2,
+        "top_k": 40,
+        "min_p": 0.05,
+        "top_p": 0.95,
+        "local_bind_host": "127.0.0.1",
+        "startup_timeout": 600,
         "n_gpu_layers": -1,
-        "n_threads": "",
         "n_batch": 2048,
         "n_ubatch": 512,
-        "n_parallel": 1,
         "flash_attn": "on",
-        "cache_type_k": "",
-        "cache_type_v": "",
-        "chat_format": "",
-        "model_alias": "local-model",
+        "offload_kqv": "on",
+        "use_mmap": "on",
         "additional_arguments": "",
     }
     data.update(overrides)
@@ -161,7 +157,7 @@ def test_service_forms_render_without_raw_json(client, monkeypatch, runtime):
     response = client.get("/services/")
     assert response.status_code == 200
     assert b"settings_json" not in response.content
-    assert b"Local model path" in response.content
+    assert b"Hugging Face repository" in response.content
     assert b"Checkpoint path" in response.content
 
 
@@ -170,14 +166,13 @@ def test_llm_service_post_delegates_and_persists(client, monkeypatch, runtime):
     response = client.post("/services/llm/start/", llm_post_data())
     assert response.status_code == 302
     assert runtime.controller.started == []
-    assert runtime.config_store.load().priority_map.services["llm"].spec.settings["model_path"] == "/models/model.gguf"
+    assert runtime.config_store.load().priority_map.services["llm"].spec.settings["hf_repo"] == "org/model"
 
 
 def test_hugging_face_and_sam_posts_persist_builder_settings(client, monkeypatch, runtime):
     monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
     hf_response = client.post(
-        "/services/llm/start/",
-        llm_post_data(model_source="huggingface", model_path="", hf_repo="org/model", hf_file="model.gguf"),
+        "/services/llm/start/", llm_post_data(hf_repo="org/model", model_file_pattern="model.gguf")
     )
     sam_response = client.post("/services/sam3/start/", sam_post_data())
     config = runtime.config_store.load()
@@ -189,9 +184,9 @@ def test_hugging_face_and_sam_posts_persist_builder_settings(client, monkeypatch
 
 def test_invalid_service_form_returns_errors(client, monkeypatch, runtime):
     monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
-    response = client.post("/services/llm/start/", llm_post_data(model_path=""))
+    response = client.post("/services/llm/start/", llm_post_data(hf_repo=""))
     assert response.status_code == 400
-    assert b"A local model path is required." in response.content
+    assert b"This field is required." in response.content
     assert b"Compute nodes" in response.content
     assert b"This computer" in response.content
 
@@ -649,3 +644,19 @@ def test_remote_node_deletion_enforces_dependencies_and_post_csrf(client, monkey
     assert csrf.status_code == 403
     assert deleted.status_code == 302
     assert "desktop" not in runtime.config_store.load().nodes
+
+
+def test_repository_inspection_filters_split_shards(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        "web.views.LLMRuntime.list_repository_files",
+        lambda _repo: ["model.gguf", "model-00001-of-00002.gguf", "mmproj.gguf"],
+    )
+    response = client.post(
+        "/client/priority-map/models/llm/inspect-repository/",
+        data='{"hf_repo":"org/model"}',
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.json()["models"] == ["model.gguf"]
+    assert not response.json()["model_ambiguous"]

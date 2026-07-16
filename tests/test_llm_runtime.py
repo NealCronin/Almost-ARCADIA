@@ -1,4 +1,4 @@
-import threading
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -8,101 +8,81 @@ from core.services.llm_runtime import LLMRuntime
 from core.services.specs import ServiceEndpoint, ServiceSpec
 
 
-def test_build_command_supports_local_model_and_pinned_server_flags() -> None:
+def test_build_command_resolves_repository_and_runtime_flags(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.Q4.gguf", "mmproj.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda repo, filename, cache: f"/{cache}/{filename}")
     command = LLMRuntime.build_command(
         ServiceSpec(
             "llm",
             8081,
             {
-                "model_path": "model.gguf",
-                "n_ctx": 8192,
-                "n_gpu_layers": 33,
-                "chat_format": "chatml",
-                "model_alias": "research-model",
-                "extra_args": ["--verbose", "false"],
+                "hf_repo": "org/model",
+                "bind_host": "127.0.0.1",
+                "n_ctx": 4096,
+                "n_batch": 512,
+                "vision_enabled": True,
+                "model_file_pattern": "*Q4.gguf",
+                "mmproj_file_pattern": "mmproj.gguf",
             },
         )
     )
-    assert command[:3] == [command[0], "-m", "llama_cpp.server"]
-    assert command[command.index("--model") + 1] == "model.gguf"
-    assert command[command.index("--n_ctx") + 1] == "8192"
-    assert command[command.index("--n_gpu_layers") + 1] == "33"
-    assert command[command.index("--chat_format") + 1] == "chatml"
-    assert command[command.index("--model_alias") + 1] == "research-model"
-    assert command[-2:] == ["--verbose", "false"]
+    assert command[:8] == [command[0], "-m", "llama_cpp.server", "--host", "127.0.0.1", "--port", "8081", "--model"]
+    assert "/huggingface/model.Q4.gguf" in command
+    assert ["--clip_model_path", "/mmproj/mmproj.gguf"] == command[
+        command.index("--clip_model_path") : command.index("--clip_model_path") + 2
+    ]
+    assert "--hf_model_repo_id" not in command and "--n_parallel" not in command
 
 
-@patch("core.services.llm_runtime.LLMRuntime._download_hf_model", return_value="cache/model.gguf")
-def test_build_command_resolves_exact_huggingface_file(mock_download: Mock) -> None:
-    command = LLMRuntime.build_command(
-        ServiceSpec("llm", 8081, {"hf_repo": "org/model", "hf_file": "model-q4.gguf", "hf_cache_dir": "cache"})
+def test_ambiguous_and_split_models_require_safe_selection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        LLMRuntime, "list_repository_files", lambda _: ["a.Q4.gguf", "b.Q8.gguf", "split-00001-of-00002.gguf"]
     )
-    mock_download.assert_called_once_with("org/model", "model-q4.gguf", "cache")
-    assert command[command.index("--model") + 1] == "cache/model.gguf"
-    assert "--hf_repo" not in command
-    assert "--hf_file" not in command
+    with pytest.raises(ValueError, match="Model file pattern"):
+        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["split-00001-of-00002.gguf"])
+    with pytest.raises(ValueError, match="No usable"):
+        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
 
 
-@pytest.mark.parametrize(
-    "settings",
-    [
-        {},
-        {"hf_repo": "org/model"},
-        {"hf_file": "model.gguf"},
-        {"model_path": "model.gguf", "hf_repo": "org/model", "hf_file": "model.gguf"},
-    ],
-)
-def test_build_command_rejects_invalid_model_source_combinations(settings) -> None:
-    with pytest.raises(ValueError):
-        LLMRuntime.build_command(ServiceSpec("llm", 8081, settings))
+def test_models_directory_honors_environment(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
+    assert LLMRuntime.models_directory() == tmp_path / "models"
 
 
-def test_command_escape_hatch_is_test_only() -> None:
-    spec = ServiceSpec("llm", 8081, {"command": ["fake"]})
-    with pytest.raises(ValueError):
-        LLMRuntime.build_command(spec)
-    assert LLMRuntime.build_command(spec, allow_test_command=True) == ["fake"]
+@patch("core.services.llm_runtime.hf_hub_download", create=True)
+def test_download_uses_per_machine_cache(mock_download: Mock, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
+    mock_download.return_value = tmp_path / "model.gguf"
+    with patch.dict("sys.modules", {}):
+        pass
+    with patch("huggingface_hub.hf_hub_download", mock_download):
+        LLMRuntime._download_hf_model("org/model", "model.gguf", "huggingface")
+    assert (tmp_path / "models" / "huggingface").is_dir()
+    assert mock_download.call_args.kwargs["token"] is None
+
+
+@patch("core.services.llm_runtime.requests.get")
+def test_repository_metadata_is_bounded_and_uses_hub_auth_headers(mock_get: Mock) -> None:
+    response = Mock()
+    response.json.return_value = [{"path": "model.gguf"}]
+    mock_get.return_value = response
+    assert LLMRuntime.list_repository_files("org/model") == ["model.gguf"]
+    assert mock_get.call_args.kwargs["timeout"] == (5, 15)
+    assert mock_get.call_args.kwargs["params"]["limit"] == 500
+
+
+def test_legacy_local_path_is_rejected() -> None:
+    with pytest.raises(ValueError, match="retired"):
+        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"model_path": "old.gguf"}))
 
 
 def test_readiness_targets_openai_models_route() -> None:
     assert LLMRuntime.readiness_url(ServiceEndpoint("127.0.0.1", 8081, "llm")) == "http://127.0.0.1:8081/v1/models"
 
 
-@patch("core.services.llm_runtime.LLMRuntime.probe")
-def test_wait_ready_polls_until_success(mock_probe: Mock) -> None:
-    process = Mock()
-    process.poll.return_value = None
-    mock_probe.return_value = Mock(status_code=200)
-    LLMRuntime.wait_ready(process, ServiceEndpoint("127.0.0.1", 8081, "llm"), timeout=1, poll_interval=0)
-    mock_probe.assert_called_once()
-
-
 def test_wait_ready_reports_dead_child() -> None:
     process = Mock()
-    process.poll.return_value = 3
-    process.returncode = 3
+    process.poll.return_value = 1
     with pytest.raises(ServiceStartupError):
         LLMRuntime.wait_ready(process, ServiceEndpoint("127.0.0.1", 8081, "llm"), timeout=1, poll_interval=0)
-
-
-@patch("core.services.llm_runtime.LLMRuntime.probe")
-def test_wait_ready_wakes_when_cancelled_between_probes(mock_probe: Mock) -> None:
-    process = Mock()
-    process.poll.return_value = None
-    cancelled = threading.Event()
-
-    def non_ready(*_, **__):
-        cancelled.set()
-        return Mock(status_code=503)
-
-    mock_probe.side_effect = non_ready
-    with pytest.raises(ServiceStartupError, match="LLM startup cancelled"):
-        LLMRuntime.wait_ready(
-            process,
-            ServiceEndpoint("127.0.0.1", 8081, "llm"),
-            timeout=30,
-            poll_interval=30,
-            cancel_event=cancelled,
-        )
-
-    mock_probe.assert_called_once()

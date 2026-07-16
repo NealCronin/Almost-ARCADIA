@@ -42,31 +42,13 @@ pip install -e ".[dev,sam,pipeline]"
 
 The `pipeline` extra installs Priority Map at commit `ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d`, whose `PriorityMapRunner` constructor imports and instantiates `priority_map.runner.SceneUnderstanding` and `Segment`. The `sam` extra installs the Ultralytics package used by the current Priority Map SAM3 implementation. If the external SAM3 source has a newer installation procedure, install that source in the same environment and keep the checkpoint path in `config.json` accurate.
 
-### llama-cpp-python variants
+### llama-cpp-python and Hugging Face models
 
-Almost ARCADIA pins `llama-cpp-python[server]==0.3.34`. Its server CLI generates flags from Pydantic field names. The builder uses `--n_ctx`, `--n_gpu_layers`, `--chat_format`, `--model_alias`, `--n_threads`, `--n_batch`, `--n_ubatch`, `--flash_attn`, `--type_k`, and `--type_v`; cache choices map to the server's verified GGML numeric values: F16 → `1`, Q8_0 → `8`, Q4_0 → `2`. This pinned server has no `--n_parallel` flag, so the builder retains that value in the settings dictionary for compatibility rather than passing an invalid option. Readiness probes `/v1/models`, an endpoint exposed by that server release.
+Almost ARCADIA pins `llama-cpp-python[server]==0.3.34`. The LLM builder launches its verified server flags directly, including context, GPU/CPU, batch, cache, memory, tensor split, RoPE/YaRN, model alias, and MMProj controls. It does not expose unsupported `--n_parallel`, and it does not use `--hf_model_repo_id`: Almost ARCADIA resolves GGUF files itself.
 
-CPU:
+Choose a Hugging Face `owner/repository`; normal Hugging Face login/environment credentials are honored for private or gated repositories. Each compute machine owns its cache at `workspace/models/huggingface` and `workspace/models/mmproj`, or beneath `ARCADIA_MODELS_DIR` when set. Caches are never sent to or deleted by another machine. An uncached offline or unauthenticated repository cannot start, but remains saveable.
 
-```powershell
-$env:CMAKE_ARGS="-DGGML_NATIVE=OFF"
-pip install "llama-cpp-python[server]==0.3.34"
-```
-
-CUDA (a compatible CUDA toolkit and Visual C++ build tools are required on Windows):
-
-```powershell
-$env:CMAKE_ARGS="-DGGML_CUDA=on"
-pip install "llama-cpp-python[server]==0.3.34"
-```
-
-Apple Metal:
-
-```bash
-CMAKE_ARGS="-DGGML_METAL=on" pip install "llama-cpp-python[server]==0.3.34"
-```
-
-Do not use split GGUF files. Configure either one exact `model_path`, or both `hf_repo` and `hf_file`. `hf_repo`/`hf_file` are resolved with `huggingface-hub` into a local cached GGUF before the server starts; they are not passed as unsupported llama-cpp server flags. Downloading uses `token=False`, so gated Hugging Face repositories are not supported.
+Model discovery considers only unsplit `.gguf` files. MMProj/projector names are excluded from the main model selection; split shards are rejected. A single usable file is selected automatically. Multiple candidates require **Advanced settings → Model file pattern**; vision similarly requires a unique projector pattern when needed. Request-time generation controls—temperature, top-k, min-p, and top-p—are sent on every Priority Map LLM request, not as server startup flags.
 
 ### SAM3 checkpoint
 
@@ -88,19 +70,14 @@ Restarting the instruction server stops any LLM or SAM processes owned by that i
 
 Remote clients must update their saved instruction-host IP and port when this listener changes. Allow the instruction port and direct inference ports through the relevant host firewall for trusted LAN/VPN clients.
 
+
 ### Priority Map Models page
 
-**Client → Priority Map → Model settings** owns Priority Map compute-node selection. It lists **This computer** plus configured remote computers, tests a remote instruction server with a bounded `/health` request, and requires an explicit **Save anyway** when that server is unreachable. Remote-node names are normalized, use IPv4 addresses and instruction ports, and are available immediately in both **Run on** selectors. Renaming a node migrates Priority Map LLM/SAM3 assignments atomically; deletion is blocked while either service references it. This does not proxy inference: the client starts remote services through the instruction port, then connects directly to their returned inference endpoints.
+**Client → Priority Map → Model settings** retains local and remote compute-node CRUD. Remote node fields are **Instruction-server IP** and **Instruction port**; those control the FastAPI listener. LLM **Inference bind host** is separate: local runs accept only an IPv4 address assigned to this computer and default to `127.0.0.1`; remote runs always bind exactly to the selected node address and do not accept a browser-supplied override.
 
-The LLM builder selects either one local GGUF path or an exact public Hugging Face repository/filename pair. It exposes context, GPU layers, CPU threads, batch and microbatch sizes, flash attention, K/V cache types, chat format, model alias, bind host, port, and startup timeout. Do not use split GGUF files or gated repositories.
+The LLM card has quick controls for compute node, inference port, repository, context size, temperature, top-k, min-p, and top-p. Advanced settings contain model pattern/alias/chat format, optional MMProj vision, local networking, performance, memory/cache, context extension, timeout, and safe additional server arguments. Repository inspection lists bounded filename suggestions without downloading files or changing saved settings.
 
-The SAM3 builder accepts the checkpoint path on the selected compute node, default confidence, bind host, port, and startup timeout. A remote checkpoint path is not checked on the Django machine; startup on the target node is authoritative.
-
-Both builders provide an **Additional arguments** field for a small number of server options not represented by controls. It is parsed as command-line arguments, not as JSON or a shell command. Builder-owned settings—including model/checkpoint source, host, port, llama context and batch settings, cache types, and command/executable selection—cannot be overridden there.
-
-### Manual `config.json`
-
-`default_config.json` is the committed starting configuration. On first load, a missing sibling `config.json` is atomically seeded with that exact content; the resulting `config.json` is ignored by Git and is the portable persistence format for manual editing and automation. Each service entry has a node name, service type, inference port, and flexible runtime settings dictionary:
+Direct inference ports require trusted LAN/VPN firewall access. The remote instruction server must run this same code with `--host` and `--public-host` equal to its configured node IP; it rejects commands, cache paths, unknown LLM launch fields, and a bind-host mismatch.
 
 ```json
 {

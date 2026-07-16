@@ -20,9 +20,15 @@
       "service_type": "llm",
       "port": 8081,
       "settings": {
-        "model_path": "models/model.gguf",
+        "hf_repo": "TheBloke/Llama-2-7B-Chat-GGUF",
+        "models_cache_subdir": "huggingface",
         "bind_host": "127.0.0.1",
-        "startup_timeout": 600
+        "startup_timeout": 600,
+        "n_ctx": 32768,
+        "temperature": 0.2,
+        "top_k": 40,
+        "min_p": 0.05,
+        "top_p": 0.95
       }
     },
     "sam3": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,6 +17,8 @@ from core.errors import ArcadiaError
 from core.inference.llm_client import LLMClient
 from core.services.host_listener import HostListenerError, HostListenerRestartError
 from core.services.instruction_client import InstructionClient
+from core.services.llm_runtime import LLMRuntime
+from core.services.llm_settings import PROJECTOR_RE, SPLIT_GGUF_RE, validate_hf_repository
 from core.services.specs import ServiceEndpoint
 from web.artifacts import ArtifactStore
 from web.forms import (
@@ -97,6 +100,25 @@ def _models_context(
         "services": runtime.controller.list_services(),
         "log_port": request.GET.get("log_port"),
         "log_text": None,
+        "llm_advanced_open": bool(
+            (llm_form and (llm_form.errors or llm_form.legacy_local_model))
+            or (llm_form and llm_form.initial.get("vision_enabled"))
+            or (
+                llm_form
+                and any(
+                    llm_form.initial.get(key) not in (None, "", default)
+                    for key, default in {
+                        "model_file_pattern": "",
+                        "model_alias": "local-model",
+                        "chat_format": "",
+                        "n_gpu_layers": -1,
+                        "n_batch": 2048,
+                        "n_ubatch": 512,
+                    }.items()
+                )
+            )
+        ),
+        "node_hosts": {name: node.host for name, node in config.nodes.items()},
     }
     if request.GET.get("log_port"):
         try:
@@ -149,6 +171,45 @@ def services(request: HttpRequest) -> HttpResponse:
             initial={"name": editing_node, "host": node.host, "instruction_port": node.instruction_port}
         )
     return _render_models(request, config, editing_node=editing_node, edit_node_form=edit_node_form)
+
+
+@require_POST
+def inspect_llm_repository(request: HttpRequest) -> JsonResponse:
+    try:
+        payload = json.loads(request.body)
+        if not isinstance(payload, dict):
+            raise ValueError("JSON object required.")
+        repository = validate_hf_repository(str(payload.get("hf_repo", "")))
+        mmproj_repository = payload.get("mmproj_repo")
+        if mmproj_repository:
+            mmproj_repository = validate_hf_repository(str(mmproj_repository))
+        files = LLMRuntime.list_repository_files(repository)
+        models = [
+            Path(item).name
+            for item in files
+            if item.lower().endswith(".gguf")
+            and not PROJECTOR_RE.search(Path(item).name)
+            and not SPLIT_GGUF_RE.search(Path(item).name)
+        ]
+        projector_files = files if not mmproj_repository else LLMRuntime.list_repository_files(mmproj_repository)
+        projectors = [
+            Path(item).name
+            for item in projector_files
+            if item.lower().endswith(".gguf")
+            and PROJECTOR_RE.search(Path(item).name)
+            and not SPLIT_GGUF_RE.search(Path(item).name)
+        ]
+        return JsonResponse(
+            {
+                "models": models[:50],
+                "mmproj": projectors[:50],
+                "model_ambiguous": len(models) != 1,
+                "mmproj_ambiguous": bool(projectors) and len(projectors) != 1,
+                "message": "Repository inspected without downloading model files.",
+            }
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
 
 
 def _remote_node_reachable(node: NodeConfig) -> bool:

@@ -10,6 +10,11 @@ urlpatterns = [
     path("client/", views.client_portal, name="client"),
     path("client/priority-map/", views.analysis_page, name="priority_map"),
     path("client/priority-map/models/", views.services, name="priority_map_models"),
+    path(
+        "client/priority-map/models/llm/inspect-repository/",
+        views.inspect_llm_repository,
+        name="inspect_llm_repository",
+    ),
     path("client/priority-map/models/nodes/add/", views.add_remote_node, name="add_remote_node"),
     path("client/priority-map/models/nodes/<str:node_name>/edit/", views.edit_remote_node, name="edit_remote_node"),
     path(

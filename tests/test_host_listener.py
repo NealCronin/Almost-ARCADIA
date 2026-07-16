@@ -116,8 +116,8 @@ def test_restart_rolls_back_when_listener_log_directory_cannot_be_created(
 
 def test_local_address_discovery_uses_interface_addresses_only(monkeypatch) -> None:
     result = Mock(stdout="inet 192.168.1.20 netmask 0xffffff00\n")
-    monkeypatch.setattr("core.services.host_listener.shutil.which", lambda command: "/sbin/ifconfig")
-    monkeypatch.setattr("core.services.host_listener.subprocess.run", lambda *args, **kwargs: result)
+    monkeypatch.setattr("core.networking.shutil.which", lambda command: "/sbin/ifconfig")
+    monkeypatch.setattr("core.networking.subprocess.run", lambda *args, **kwargs: result)
 
     from core.services.host_listener import local_ipv4_addresses
 
@@ -127,10 +127,10 @@ def test_local_address_discovery_uses_interface_addresses_only(monkeypatch) -> N
 def test_local_address_discovery_uses_windows_interface_addresses(monkeypatch) -> None:
     result = Mock(stdout="   IPv4 Address. . . . . . . . . . . : 10.0.0.42\n")
     monkeypatch.setattr(
-        "core.services.host_listener.shutil.which",
+        "core.networking.shutil.which",
         lambda command: r"C:\Windows\System32\ipconfig.exe" if command == "ipconfig" else None,
     )
-    monkeypatch.setattr("core.services.host_listener.subprocess.run", lambda *args, **kwargs: result)
+    monkeypatch.setattr("core.networking.subprocess.run", lambda *args, **kwargs: result)
 
     from core.services.host_listener import local_ipv4_addresses
 

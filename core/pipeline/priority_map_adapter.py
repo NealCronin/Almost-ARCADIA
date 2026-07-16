@@ -30,6 +30,7 @@ class _RemoteSceneUnderstanding:
         llm_client: LLMClient,
         configured_prompts: list[str] | None = None,
         model: str = "local-model",
+        llm_generation: dict[str, float | int] | None = None,
         debug: bool = False,
         **_: Any,
     ) -> None:
@@ -37,6 +38,7 @@ class _RemoteSceneUnderstanding:
         self.configured_prompts = configured_prompts or []
         self.model = model
         self.debug = debug
+        self.llm_generation = llm_generation or {}
         self.vocabulary: dict[str, float] = {}
 
     def get_labels(self, image: np.ndarray, task: str, recent_graph_context: dict[str, Any] | None = None):
@@ -50,7 +52,15 @@ class _RemoteSceneUnderstanding:
             "not SAM, detection, or visual confidence. "
             f"Task: {task}. Recent graph context: {json.dumps(recent_graph_context or {})}"
         )
-        response = self.llm_client.chat(prompt, images=[("image/jpeg", encoded.tobytes())], model=self.model)
+        response = self.llm_client.chat(
+            prompt,
+            images=[("image/jpeg", encoded.tobytes())],
+            model=self.model,
+            temperature=float(self.llm_generation["temperature"]) if "temperature" in self.llm_generation else None,
+            top_k=int(self.llm_generation["top_k"]) if "top_k" in self.llm_generation else None,
+            min_p=float(self.llm_generation["min_p"]) if "min_p" in self.llm_generation else None,
+            top_p=float(self.llm_generation["top_p"]) if "top_p" in self.llm_generation else None,
+        )
         try:
             payload = json.loads(response.text.strip().replace("```json", "").replace("```", "").strip())
         except json.JSONDecodeError as exc:
@@ -150,7 +160,7 @@ class _RemoteSegment:
     ) -> tuple[int, int] | None:
         if centroid is None:
             return None
-        height, width = map_x.shape[:2]
+        height, width = map_x.shape[:2]  # type: ignore[index]
         x = max(0, min(width - 1, int(round(centroid[0]))))
         y = max(0, min(height - 1, int(round(centroid[1]))))
         new_x = int(round(x - (map_x[y, x] - x)))
@@ -164,7 +174,7 @@ class _RemoteSegment:
         if self.prev_gray is None:
             return
         map_x, map_y = self._get_flow_map(image)
-        height, width = image.shape[:2]
+        height, width = image.shape[:2]  # type: ignore[index]
         for segmentation in self.segmentations:
             mask = np.asarray(segmentation.mask, dtype=np.uint8)
             if mask.shape[:2] != (height, width):
@@ -203,7 +213,7 @@ class _RemoteSegment:
             resize=self.sam_resize,
         )
         elapsed = time.perf_counter() - started
-        height, width = image.shape[:2]
+        height, width = image.shape[:2]  # type: ignore[index]
         replacement: list[Any] = []
         for index, raw_mask in enumerate(result.masks):
             mask = np.asarray(raw_mask, dtype=np.uint8)
@@ -356,6 +366,7 @@ class PriorityMapAdapter:
                 llm_client,
                 configured_prompts=settings.get("prompts", []),
                 model=settings.get("scene_model") or "local-model",
+                llm_generation=settings.get("llm_generation"),
                 debug=bool(settings.get("debug", False)),
             )
             priority_runner.Segment = lambda **kwargs: _RemoteSegment(

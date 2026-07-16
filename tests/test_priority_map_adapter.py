@@ -87,9 +87,11 @@ class FakeLLMClient:
     def __init__(self, response: str) -> None:
         self.response = response
         self.prompts: list[str] = []
+        self.calls: list[dict[str, object]] = []
 
-    def chat(self, prompt, **_):
+    def chat(self, prompt, **kwargs):
         self.prompts.append(prompt)
+        self.calls.append(kwargs)
         return LLMResult(self.response)
 
 
@@ -145,6 +147,17 @@ def test_scene_understanding_requests_and_retains_semantic_score() -> None:
     assert result.labels["car"]["score"] == 87.0
     assert "numeric 0–100 mission-relevance score" in client.prompts[0]
     assert "not SAM, detection, or visual confidence" in client.prompts[0]
+
+
+def test_scene_understanding_passes_all_generation_settings() -> None:
+    client = FakeLLMClient('{"labels":{"car":{"score":87}}}')
+    _RemoteSceneUnderstanding(
+        client, llm_generation={"temperature": 0.3, "top_k": 12, "min_p": 0.1, "top_p": 0.8}
+    ).get_labels(image(), "Find mission targets")
+    assert client.calls[0]["temperature"] == 0.3
+    assert client.calls[0]["top_k"] == 12
+    assert client.calls[0]["min_p"] == 0.1
+    assert client.calls[0]["top_p"] == 0.8
 
 
 def test_remote_segment_propagates_non_sam_frame_without_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,10 +266,11 @@ def test_adapter_restores_priority_map_symbols_after_construction(
         output_directory=tmp_path,
         llm_client=object(),
         sam_client=object(),
-        settings={},
+        settings={"llm_generation": {"temperature": 0.3, "top_k": 12, "min_p": 0.1, "top_p": 0.8}},
     )
     assert callable(runner.scene)
     assert callable(runner.segment)
+    assert runner.scene().llm_generation == {"temperature": 0.3, "top_k": 12, "min_p": 0.1, "top_p": 0.8}
     assert runner_module.SceneUnderstanding is old_scene
     assert runner_module.Segment is old_segment
 

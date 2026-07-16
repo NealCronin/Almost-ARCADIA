@@ -52,12 +52,55 @@
     refreshListener();
   }
 
-  const modelSource = document.getElementById('llm_model_source');
-  if (modelSource) {
-    const sourceFields = qsa('[data-model-source]');
-    const updateSource = () => sourceFields.forEach((field) => { field.hidden = field.dataset.modelSource !== modelSource.value; });
-    modelSource.addEventListener('change', updateSource);
-    updateSource();
+  const llmForm = qs('[data-llm-form]');
+  if (llmForm) {
+    const node = qs('#llm_node', llmForm);
+    const bind = qs('#llm_local_bind_host', llmForm);
+    const bindSection = qs('[data-local-bind-section]', llmForm);
+    const remoteNotice = qs('[data-remote-bind-notice]', llmForm);
+    const advanced = qs('[data-llm-advanced]', llmForm);
+    const nodeHosts = JSON.parse(qs('#llm-node-hosts', llmForm)?.textContent || '{}');
+    const updateBindHost = () => {
+      const remote = node && node.value !== 'local';
+      if (bind) bind.disabled = !!remote;
+      if (bindSection) bindSection.hidden = !!remote;
+      if (remoteNotice) {
+        remoteNotice.hidden = !remote;
+        remoteNotice.textContent = remote ? `Inference will listen on ${nodeHosts[node.value] || 'the selected remote computer'} because this is the selected remote computer's address.` : '';
+      }
+    };
+    node?.addEventListener('change', updateBindHost);
+    updateBindHost();
+    qs('[data-inspect-repository]', llmForm)?.addEventListener('click', async () => {
+      const status = qs('[data-inspect-status]', llmForm);
+      if (advanced) advanced.open = true;
+      if (status) status.textContent = 'Inspecting repository…';
+      try {
+        const response = await fetch(llmForm.dataset.inspectUrl || '', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
+          body: JSON.stringify({
+            hf_repo: qs('#llm_hf_repo', llmForm)?.value || '',
+            mmproj_repo: qs('#llm_mmproj_repo', llmForm)?.value || '',
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Inspection failed.');
+        const fill = (inputId, listId, values) => {
+          const input = qs(inputId, llmForm);
+          const list = qs(listId, llmForm);
+          if (input && list) {
+            input.setAttribute('list', list.id);
+            list.replaceChildren(...values.map((value) => Object.assign(document.createElement('option'), {value})));
+          }
+        };
+        fill('#llm_model_file_pattern', '#model-patterns', data.models || []);
+        fill('#llm_mmproj_file_pattern', '#mmproj-patterns', data.mmproj || []);
+        if (status) status.textContent = data.message || 'Repository inspected.';
+      } catch (error) {
+        if (status) status.textContent = error.message || 'Inspection failed.';
+      }
+    });
   }
 
   const computeNodes = qs('[data-compute-nodes]');

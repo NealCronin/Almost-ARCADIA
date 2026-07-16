@@ -18,13 +18,13 @@
   {% if node_error %}<p class="inline-error">{{ node_error }}</p>{% endif %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Address</th><th>Connection</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Type</th><th>Instruction-server IP</th><th>Instruction port</th><th>Connection</th><th>Actions</th></tr></thead>
       <tbody>
       {% for node_name, node in nodes %}
         <tr>
           <td>{% if node_name == 'local' %}This computer{% else %}{{ node_name }}{% endif %}</td>
           <td>{% if node_name == 'local' %}Local{% else %}Remote{% endif %}</td>
-          <td>{{ node.host }}{% if node.instruction_port %}:{{ node.instruction_port }}{% endif %}</td>
+          <td>{{ node.host }}</td><td>{% if node.instruction_port %}{{ node.instruction_port }}{% else %}—{% endif %}</td>
           <td><span class="status-pill" data-node-state="{{ node_name }}">{% if node_name == 'local' %}Local{% else %}Not checked{% endif %}</span></td>
           <td>
             {% if node_name != 'local' %}
@@ -37,7 +37,7 @@
           </td>
         </tr>
         {% if editing_node == node_name and edit_node_form %}
-        <tr id="edit-node"><td colspan="5">
+        <tr id="edit-node"><td colspan="6">
           <form method="post" action="{% url 'edit_remote_node' node_name %}" class="form-grid" data-remote-node-form>
             {% csrf_token %}
             {{ edit_node_form.non_field_errors }}
@@ -78,48 +78,61 @@
       <div><p class="eyebrow">Scene understanding</p><h2>LLM service</h2></div>
       {% if config.priority_map.services.llm %}<span class="status-pill">Port {{ config.priority_map.services.llm.port }}</span>{% endif %}
     </div>
-    <form method="post" action="{% url 'start_service' 'llm' %}" class="stack">
+    {% if llm_form.legacy_local_model %}<p class="inline-error">This saved local model must be migrated: choose a Hugging Face repository before saving.</p>{% endif %}
+    <form method="post" action="{% url 'start_service' 'llm' %}" class="stack" data-llm-form data-inspect-url="{% url 'inspect_llm_repository' %}">
+      {{ node_hosts|json_script:"llm-node-hosts" }}
       {% csrf_token %}
       {{ llm_form.non_field_errors }}
-      <fieldset class="settings-group">
-        <legend>Location</legend>
-        <div class="form-grid">
-          <div class="form-field">{{ llm_form.node.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.inference_port.as_field_group }}</div>
-          <div class="form-field form-field--full">{{ llm_form.bind_host.as_field_group }}</div>
-        </div>
-      </fieldset>
-      <fieldset class="settings-group">
-        <legend>Model</legend>
-        <div class="form-grid">
-          <div class="form-field form-field--full">{{ llm_form.model_source.as_field_group }}</div>
-          <div class="form-field form-field--full" data-model-source="local">{{ llm_form.model_path.as_field_group }}</div>
-          <div class="form-field form-field--full" data-model-source="huggingface">{{ llm_form.hf_repo.as_field_group }}</div>
-          <div class="form-field" data-model-source="huggingface">{{ llm_form.hf_file.as_field_group }}</div>
-          <div class="form-field" data-model-source="huggingface">{{ llm_form.hf_cache_dir.as_field_group }}</div>
-        </div>
-      </fieldset>
-      <fieldset class="settings-group">
-        <legend>Runtime</legend>
-        <div class="form-grid">
-          <div class="form-field">{{ llm_form.n_ctx.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.n_gpu_layers.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.n_threads.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.n_parallel.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.n_batch.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.n_ubatch.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.cache_type_k.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.cache_type_v.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.chat_format.as_field_group }}</div>
-          <div class="form-field">{{ llm_form.model_alias.as_field_group }}</div>
-          <div class="form-field form-field--full checkbox-field">{{ llm_form.flash_attn.as_field_group }}</div>
-        </div>
-      </fieldset>
-      <details class="disclosure">
+      <div class="form-grid llm-quick-grid">
+        <div class="form-field">{{ llm_form.node.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.inference_port.as_field_group }}</div>
+        <div class="form-field form-field--full">{{ llm_form.hf_repo.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.n_ctx.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.temperature.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.top_k.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.min_p.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.top_p.as_field_group }}</div>
+      </div>
+      <details class="disclosure" data-llm-advanced {% if llm_advanced_open %}open{% endif %}>
         <summary>Advanced settings</summary>
-        <div class="form-grid disclosure__body">
-          <div class="form-field">{{ llm_form.startup_timeout.as_field_group }}</div>
-          <div class="form-field form-field--full">{{ llm_form.additional_arguments.as_field_group }}</div>
+        <div class="disclosure__body stack">
+          <fieldset class="settings-group"><legend>Model selection</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.model_file_pattern.as_field_group }}<datalist id="model-patterns"></datalist></div>
+            <div class="form-field">{{ llm_form.model_alias.as_field_group }}</div>
+            <div class="form-field form-field--full">{{ llm_form.chat_format.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Vision / MMProj</legend><div class="form-grid">
+            <div class="form-field form-field--full checkbox-field">{{ llm_form.vision_enabled.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.mmproj_repo.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.mmproj_file_pattern.as_field_group }}<datalist id="mmproj-patterns"></datalist></div>
+          </div></fieldset>
+          <fieldset class="settings-group" data-local-bind-section><legend>Local networking</legend>
+            <div class="form-field">{{ llm_form.local_bind_host.as_field_group }}</div>
+          </fieldset>
+          <p class="help-copy" data-remote-bind-notice hidden></p>
+          <fieldset class="settings-group"><legend>Performance</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.n_gpu_layers.as_field_group }}</div><div class="form-field">{{ llm_form.n_threads.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.n_batch.as_field_group }}</div><div class="form-field">{{ llm_form.n_ubatch.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.main_gpu.as_field_group }}</div><div class="form-field">{{ llm_form.tensor_split.as_field_group }}</div>
+            <div class="form-field checkbox-field">{{ llm_form.flash_attn.as_field_group }}</div><div class="form-field checkbox-field">{{ llm_form.offload_kqv.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Memory and cache</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.cache_type_k.as_field_group }}</div><div class="form-field">{{ llm_form.cache_type_v.as_field_group }}</div>
+            <div class="form-field checkbox-field">{{ llm_form.use_mmap.as_field_group }}</div><div class="form-field checkbox-field">{{ llm_form.use_mlock.as_field_group }}</div>
+            <div class="form-field checkbox-field">{{ llm_form.numa.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Context extension</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.rope_scaling_type.as_field_group }}</div><div class="form-field">{{ llm_form.rope_freq_base.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.rope_freq_scale.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_ext_factor.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.yarn_attn_factor.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_beta_fast.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.yarn_beta_slow.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_orig_ctx.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Server</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.startup_timeout.as_field_group }}</div>
+            <div class="form-field form-field--full">{{ llm_form.additional_arguments.as_field_group }}</div>
+          </div></fieldset>
+          <button class="button button--ghost" type="button" data-inspect-repository>Inspect repository</button>
+          <p class="help-copy" role="status" data-inspect-status></p>
         </div>
       </details>
       <div class="form-actions"><button class="button button--primary" type="submit">Save LLM settings</button></div>

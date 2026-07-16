@@ -3,7 +3,6 @@ from __future__ import annotations
 import ipaddress
 import re
 import shlex
-from collections.abc import Callable
 from typing import Any
 
 from django import forms
@@ -30,7 +29,7 @@ class HostListenerForm(forms.Form):
 
 class RemoteNodeForm(forms.Form):
     name = forms.CharField(label="Name", max_length=63)
-    host = forms.CharField(label="IP address", max_length=255)
+    host = forms.CharField(label="Instruction-server IP", max_length=255)
     instruction_port = forms.IntegerField(label="Instruction port", min_value=1, max_value=65535)
 
     def clean_name(self) -> str:
@@ -95,257 +94,237 @@ class ServiceForm(forms.Form):
 
 
 class LLMServiceForm(ServiceForm):
-    CACHE_TYPE_CHOICES = [
-        ("", "Default"),
-        ("f16", "F16"),
-        ("q8_0", "Q8_0"),
-        ("q4_0", "Q4_0"),
-    ]
-    _CACHE_TYPE_FLAGS = {"f16": "1", "q8_0": "8", "q4_0": "2"}
-    _SPLIT_GGUF_PATTERN = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
-    _OWNED_FLAGS = {
-        "--model",
-        "--model_alias",
-        "--host",
-        "--port",
-        "--hf_repo",
-        "--hf_file",
-        "--n_ctx",
-        "--n_gpu_layers",
-        "--n_threads",
-        "--n_batch",
-        "--n_ubatch",
-        "--flash_attn",
-        "--type_k",
-        "--type_v",
-        "--chat_format",
-    }
-    _DISALLOWED_ARGUMENTS = {
-        "--",
-        "-c",
-        "-m",
-        "-h",
-        "--help",
-        "--command",
-        "--config_file",
-        "--python_executable",
-        "--server_module",
-        "bash",
-        "cmd",
-        "powershell",
-        "python",
-        "python3",
-        "sh",
-        "zsh",
-    }
-    _KNOWN_EXTRA_ARGS: dict[str, tuple[str, Callable[[str], Any]]] = {
-        "--n_ctx": ("n_ctx", int),
-        "--n_gpu_layers": ("n_gpu_layers", int),
-        "--n_threads": ("n_threads", int),
-        "--n_batch": ("n_batch", int),
-        "--n_ubatch": ("n_ubatch", int),
-        "--flash_attn": ("flash_attn", lambda value: value.lower() in {"1", "true", "yes", "on"}),
-        "--type_k": ("cache_type_k", str),
-        "--type_v": ("cache_type_v", str),
-        "--chat_format": ("chat_format", str),
-        "--model_alias": ("model_alias", str),
-    }
+    CACHE_TYPE_CHOICES = [("", "Default"), ("f16", "F16"), ("q8_0", "Q8_0"), ("q4_0", "Q4_0")]
 
-    model_source = forms.ChoiceField(
-        label="Source type",
-        choices=[("local", "Local GGUF file"), ("huggingface", "Hugging Face")],
-        initial="local",
-    )
-    model_path = forms.CharField(label="Local model path", required=False)
-    hf_repo = forms.CharField(label="Hugging Face repository", required=False)
-    hf_file = forms.CharField(label="Exact filename", required=False)
-    hf_cache_dir = forms.CharField(label="Cache directory", required=False)
+    hf_repo = forms.CharField(label="Hugging Face repository", required=True)
     n_ctx = forms.IntegerField(label="Context size", min_value=1, initial=32768)
-    n_gpu_layers = forms.IntegerField(
-        label="GPU layers",
-        min_value=-1,
-        initial=-1,
-        help_text="Use -1 to offload all supported layers.",
-    )
-    n_threads = forms.IntegerField(
-        label="CPU threads",
-        min_value=1,
-        required=False,
-        help_text="Leave empty to use llama-cpp-python's default.",
-    )
-    n_batch = forms.IntegerField(label="Batch size", min_value=1, initial=2048)
-    n_ubatch = forms.IntegerField(label="Microbatch size", min_value=1, initial=512)
-    n_parallel = forms.IntegerField(
-        label="Parallel slots",
-        min_value=1,
-        initial=1,
-        help_text="Stored for compatibility; llama-cpp-python 0.3.34 has no parallel-slots server flag.",
-    )
+    temperature = forms.FloatField(label="Temperature", min_value=0, initial=0.2)
+    top_k = forms.IntegerField(label="Top K", min_value=0, initial=40)
+    min_p = forms.FloatField(label="Min P", min_value=0, max_value=1, initial=0.05)
+    top_p = forms.FloatField(label="Top P", min_value=0, max_value=1, initial=0.95)
+    model_file_pattern = forms.CharField(label="Model file pattern", required=False)
+    model_alias = forms.CharField(label="Model alias", required=False, initial="local-model")
+    chat_format = forms.CharField(label="Chat format", required=False)
+    vision_enabled = forms.BooleanField(label="Enable vision / MMProj", required=False)
+    mmproj_repo = forms.CharField(label="MMProj repository", required=False)
+    mmproj_file_pattern = forms.CharField(label="MMProj file pattern", required=False)
+    local_bind_host = forms.CharField(label="Local bind host", required=False, initial="127.0.0.1")
+    n_gpu_layers = forms.IntegerField(label="GPU layers", min_value=-1, required=False, initial=-1)
+    n_threads = forms.IntegerField(label="CPU threads", min_value=1, required=False)
+    n_batch = forms.IntegerField(label="Batch size", min_value=1, required=False, initial=2048)
+    n_ubatch = forms.IntegerField(label="Microbatch size", min_value=1, required=False, initial=512)
+    main_gpu = forms.IntegerField(label="Main GPU", min_value=0, required=False)
+    tensor_split = forms.CharField(label="Tensor split", required=False)
     flash_attn = forms.BooleanField(label="Flash attention", required=False, initial=True)
+    offload_kqv = forms.BooleanField(label="Offload K/Q/V", required=False, initial=True)
     cache_type_k = forms.ChoiceField(label="K-cache type", choices=CACHE_TYPE_CHOICES, required=False)
     cache_type_v = forms.ChoiceField(label="V-cache type", choices=CACHE_TYPE_CHOICES, required=False)
-    chat_format = forms.CharField(label="Chat format", required=False)
-    model_alias = forms.CharField(label="Model alias", initial="local-model")
+    use_mmap = forms.BooleanField(label="Use mmap", required=False, initial=True)
+    use_mlock = forms.BooleanField(label="Use mlock", required=False)
+    numa = forms.BooleanField(label="NUMA", required=False)
+    rope_scaling_type = forms.IntegerField(label="RoPE scaling type", min_value=-1, max_value=3, required=False)
+    rope_freq_base = forms.FloatField(label="RoPE frequency base", required=False)
+    rope_freq_scale = forms.FloatField(label="RoPE frequency scale", required=False)
+    yarn_ext_factor = forms.FloatField(label="YaRN extension factor", required=False)
+    yarn_attn_factor = forms.FloatField(label="YaRN attention factor", required=False)
+    yarn_beta_fast = forms.FloatField(label="YaRN beta fast", required=False)
+    yarn_beta_slow = forms.FloatField(label="YaRN beta slow", required=False)
+    yarn_orig_ctx = forms.IntegerField(label="YaRN original context", min_value=1, required=False)
     additional_arguments = forms.CharField(
         label="Additional server arguments",
         required=False,
         widget=forms.Textarea,
-        help_text="Optional llama-cpp-python server arguments not covered above.",
+        help_text="Arguments not controlled above. Shell syntax and owned options are rejected.",
     )
 
-    @staticmethod
-    def _parse_arguments(value: str) -> list[str]:
-        try:
-            return shlex.split(value)
-        except ValueError as exc:
-            raise forms.ValidationError(f"Invalid additional argument syntax: {exc}") from exc
+    def __init__(self, *args: Any, nodes: dict[str, NodeConfig] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, nodes=nodes, **kwargs)
+        self.nodes = nodes or {"local": NodeConfig("local", "127.0.0.1")}
+        self.fields.pop("bind_host")
+        self.fields.pop("startup_timeout")
+        self.fields["startup_timeout"] = forms.FloatField(
+            label="Startup timeout", min_value=1, initial=600, required=False
+        )
+        self._prior_settings: dict[str, Any] = {}
+        self.legacy_local_model = False
 
-    @classmethod
-    def _validate_additional_arguments(cls, args: list[str]) -> None:
-        for argument in args:
-            if argument in cls._DISALLOWED_ARGUMENTS or any(
-                argument == flag or argument.startswith(f"{flag}=") for flag in cls._OWNED_FLAGS
-            ):
-                raise forms.ValidationError(f"Additional arguments cannot override {argument!r}.")
-            if any(character in argument for character in (";", "|", "&", "`", "$", "<", ">")):
-                raise forms.ValidationError("Additional arguments cannot contain shell-related syntax.")
+    def clean_hf_repo(self) -> str:
+        from core.services.llm_settings import validate_hf_repository
+
+        try:
+            return validate_hf_repository(self.cleaned_data["hf_repo"])
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+
+    def clean_model_file_pattern(self) -> str | None:
+        from core.services.llm_settings import validate_gguf_pattern
+
+        try:
+            return validate_gguf_pattern(self.cleaned_data.get("model_file_pattern"))
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+
+    def clean_mmproj_repo(self) -> str:
+        from core.services.llm_settings import validate_hf_repository
+
+        value = self.cleaned_data.get("mmproj_repo", "")
+        if not value.strip():
+            return ""
+        try:
+            return validate_hf_repository(value)
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+
+    def clean_top_p(self) -> float:
+        value = self.cleaned_data["top_p"]
+        if value <= 0:
+            raise forms.ValidationError("Top P must be greater than zero.")
+        return value
+
+    def clean_mmproj_file_pattern(self) -> str | None:
+        from core.services.llm_settings import validate_gguf_pattern
+
+        try:
+            return validate_gguf_pattern(self.cleaned_data.get("mmproj_file_pattern"))
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
 
     def clean_additional_arguments(self) -> list[str]:
-        args = self._parse_arguments(self.cleaned_data.get("additional_arguments", ""))
-        self._validate_additional_arguments(args)
-        return args
+        from core.services.llm_settings import parse_additional_server_arguments
+
+        try:
+            return parse_additional_server_arguments(self.cleaned_data.get("additional_arguments", ""))
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
 
     def clean(self) -> dict[str, Any]:
         cleaned = super().clean()
-        if cleaned.get("n_batch") is not None and cleaned.get("n_ubatch") is not None:
-            if cleaned["n_batch"] < cleaned["n_ubatch"]:
-                self.add_error("n_batch", "Batch size must be at least the microbatch size.")
-        source = cleaned.get("model_source")
-        if source == "local":
-            model_path = cleaned.get("model_path", "").strip()
-            if not model_path:
-                self.add_error("model_path", "A local model path is required.")
-            elif self._SPLIT_GGUF_PATTERN.search(model_path):
-                self.add_error("model_path", "Split GGUF files are not supported.")
-        if source == "huggingface":
-            hf_file = cleaned.get("hf_file", "").strip()
-            if not cleaned.get("hf_repo", "").strip():
-                self.add_error("hf_repo", "A Hugging Face repository is required.")
-            if not hf_file:
-                self.add_error("hf_file", "An exact Hugging Face filename is required.")
-            elif self._SPLIT_GGUF_PATTERN.search(hf_file):
-                self.add_error("hf_file", "Split GGUF files are not supported.")
+        if cleaned.get("n_batch") and cleaned.get("n_ubatch") and cleaned["n_batch"] < cleaned["n_ubatch"]:
+            self.add_error("n_batch", "Batch size must be at least the microbatch size.")
+        split = cleaned.get("tensor_split", "").strip()
+        if split:
+            try:
+                values = [float(value.strip()) for value in split.split(",")]
+                if (
+                    not values
+                    or any(not value >= 0 or not value < float("inf") for value in values)
+                    or sum(values) <= 0
+                ):
+                    raise ValueError
+            except ValueError:
+                self.add_error("tensor_split", "Tensor split must be finite non-negative values with a positive total.")
+            else:
+                cleaned["tensor_split"] = ",".join(str(value) for value in values)
         return cleaned
 
     def to_spec(self) -> ServiceSpec:
+        from core.services.llm_settings import RETIRED_SOURCE_KEYS, resolve_inference_bind_host
+
         cleaned = self.cleaned_data
-        settings: dict[str, Any] = {
-            "bind_host": cleaned["bind_host"],
-            "startup_timeout": cleaned["startup_timeout"],
-            "n_ctx": cleaned["n_ctx"],
-            "n_gpu_layers": cleaned["n_gpu_layers"],
-            "n_parallel": cleaned["n_parallel"],
-            "model_alias": cleaned["model_alias"],
-        }
-        if cleaned["model_source"] == "local":
-            settings["model_path"] = cleaned["model_path"].strip()
-        else:
-            settings["hf_repo"] = cleaned["hf_repo"].strip()
-            settings["hf_file"] = cleaned["hf_file"].strip()
-            if cleaned["hf_cache_dir"].strip():
-                settings["hf_cache_dir"] = cleaned["hf_cache_dir"].strip()
-        if cleaned.get("chat_format", "").strip():
-            settings["chat_format"] = cleaned["chat_format"].strip()
-        extra_args = list(cleaned["additional_arguments"])
-        for field_name, flag in (
-            ("n_threads", "--n_threads"),
-            ("n_batch", "--n_batch"),
-            ("n_ubatch", "--n_ubatch"),
-            ("cache_type_k", "--type_k"),
-            ("cache_type_v", "--type_v"),
+        settings = {key: value for key, value in self._prior_settings.items() if key not in RETIRED_SOURCE_KEYS}
+        settings.update(
+            {
+                "hf_repo": cleaned["hf_repo"],
+                "models_cache_subdir": "huggingface",
+                "bind_host": resolve_inference_bind_host(cleaned["node"], self.nodes, cleaned.get("local_bind_host")),
+                "n_ctx": cleaned["n_ctx"],
+                "temperature": cleaned["temperature"],
+                "top_k": cleaned["top_k"],
+                "min_p": cleaned["min_p"],
+                "top_p": cleaned["top_p"],
+            }
+        )
+        for key in (
+            "model_file_pattern",
+            "model_alias",
+            "chat_format",
+            "mmproj_repo",
+            "mmproj_file_pattern",
+            "n_gpu_layers",
+            "n_threads",
+            "n_batch",
+            "n_ubatch",
+            "main_gpu",
+            "tensor_split",
+            "cache_type_k",
+            "cache_type_v",
+            "rope_scaling_type",
+            "rope_freq_base",
+            "rope_freq_scale",
+            "yarn_ext_factor",
+            "yarn_attn_factor",
+            "yarn_beta_fast",
+            "yarn_beta_slow",
+            "yarn_orig_ctx",
+            "startup_timeout",
         ):
-            value = cleaned.get(field_name)
+            value = cleaned.get(key)
             if value not in (None, ""):
-                if field_name in ("cache_type_k", "cache_type_v"):
-                    value = self._CACHE_TYPE_FLAGS[value]
-                extra_args.extend([flag, str(value)])
-        extra_args.extend(["--flash_attn", str(cleaned["flash_attn"]).lower()])
-        if extra_args:
-            settings["extra_args"] = extra_args
+                settings[key] = value
+            else:
+                settings.pop(key, None)
+        for key in ("vision_enabled", "flash_attn", "offload_kqv", "use_mmap", "use_mlock", "numa"):
+            settings[key] = bool(cleaned.get(key))
+        if cleaned["additional_arguments"]:
+            settings["extra_args"] = list(cleaned["additional_arguments"])
+        else:
+            settings.pop("extra_args", None)
         return ServiceSpec(service_type="llm", port=cleaned["inference_port"], settings=settings)
 
-    @classmethod
-    def _extract_known_extra_args(cls, args: list[str]) -> tuple[dict[str, Any], list[str]]:
-        initial: dict[str, Any] = {}
-        unknown: list[str] = []
-        index = 0
-        while index < len(args):
-            argument = args[index]
-            flag, separator, value = argument.partition("=")
-            known = cls._KNOWN_EXTRA_ARGS.get(flag)
-            if known is None:
-                unknown.append(argument)
-                index += 1
-                continue
-            if not separator:
-                if index + 1 >= len(args):
-                    unknown.append(argument)
-                    index += 1
-                    continue
-                value = args[index + 1]
-                index += 2
-            else:
-                index += 1
-            field_name, converter = known
-            try:
-                parsed_value = converter(value)
-                if field_name in ("cache_type_k", "cache_type_v"):
-                    parsed_value = next(
-                        choice for choice, flag_value in cls._CACHE_TYPE_FLAGS.items() if flag_value == parsed_value
-                    )
-                initial[field_name] = parsed_value
-            except (StopIteration, TypeError, ValueError):
-                unknown.extend([argument] if separator else [argument, value])
-        return initial, unknown
-
     def initial_from(self, configured: ConfiguredService | None) -> None:
-        super().initial_from(configured)
         if configured is None:
             return
         settings = configured.settings
-        initial: dict[str, Any] = {
-            name: settings[name]
-            for name in (
+        self._prior_settings = dict(settings)
+        self.initial.update({"node": configured.node, "inference_port": configured.port})
+        if settings.get("model_path"):
+            self.legacy_local_model = True
+        initial = {
+            key: settings[key]
+            for key in (
+                "hf_repo",
+                "model_file_pattern",
+                "model_alias",
+                "chat_format",
+                "vision_enabled",
+                "mmproj_repo",
+                "mmproj_file_pattern",
                 "n_ctx",
+                "temperature",
+                "top_k",
+                "min_p",
+                "top_p",
                 "n_gpu_layers",
                 "n_threads",
                 "n_batch",
                 "n_ubatch",
-                "n_parallel",
+                "main_gpu",
+                "tensor_split",
                 "flash_attn",
+                "offload_kqv",
                 "cache_type_k",
                 "cache_type_v",
-                "chat_format",
-                "model_alias",
+                "use_mmap",
+                "use_mlock",
+                "numa",
+                "rope_scaling_type",
+                "rope_freq_base",
+                "rope_freq_scale",
+                "yarn_ext_factor",
+                "yarn_attn_factor",
+                "yarn_beta_fast",
+                "yarn_beta_slow",
+                "yarn_orig_ctx",
+                "startup_timeout",
             )
-            if name in settings
+            if key in settings
         }
-        if settings.get("model_path"):
-            initial.update({"model_source": "local", "model_path": settings["model_path"]})
-        elif settings.get("hf_repo") or settings.get("hf_file"):
-            initial.update(
-                {
-                    "model_source": "huggingface",
-                    "hf_repo": settings.get("hf_repo", ""),
-                    "hf_file": settings.get("hf_file", ""),
-                    "hf_cache_dir": settings.get("hf_cache_dir", ""),
-                }
-            )
-        extra_args = settings.get("extra_args", [])
-        if isinstance(extra_args, list) and all(isinstance(argument, str) for argument in extra_args):
-            known_initial, unknown = self._extract_known_extra_args(extra_args)
-            initial.update(known_initial)
-            initial["additional_arguments"] = shlex.join(unknown)
+        initial["local_bind_host"] = settings.get("bind_host", "127.0.0.1")
+        extra_args = settings.get("extra_args")
+        if isinstance(extra_args, list) and all(isinstance(item, str) for item in extra_args):
+            initial["additional_arguments"] = shlex.join(extra_args)
+        if settings.get("hf_repo") and settings.get("hf_file") and not settings.get("model_file_pattern"):
+            initial["model_file_pattern"] = settings["hf_file"]
         self.initial.update(initial)
 
 

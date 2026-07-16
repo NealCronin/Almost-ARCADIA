@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.errors import ServiceError
 from core.services.controller import ServiceController
+from core.services.llm_settings import validate_llm_settings
 from core.services.specs import ServiceSpec
 
 
@@ -24,21 +25,30 @@ class StopServiceRequest(BaseModel):
     port: int = Field(ge=1, le=65535)
 
 
-def _reject_remote_commands(settings: dict[str, Any]) -> None:
-    forbidden = {"command", "shell", "executable", "python_executable", "server_module"}
+def _reject_remote_commands(settings: dict[str, Any], *, service_type: str, public_host: str) -> dict[str, Any]:
+    forbidden = {"command", "shell", "executable", "python_executable", "server_module", "model_path", "hf_cache_dir"}
     present = forbidden.intersection(settings)
     if present:
+        raise HTTPException(status_code=422, detail=f"Remote settings cannot include: {', '.join(sorted(present))}")
+    if service_type != "llm":
+        return settings
+    if settings.get("models_cache_subdir", "huggingface") != "huggingface":
+        raise HTTPException(status_code=422, detail="Remote LLM cache must use the local huggingface cache.")
+    if settings.get("bind_host") != public_host:
         raise HTTPException(
-            status_code=422,
-            detail=f"Remote settings cannot include: {', '.join(sorted(present))}",
+            status_code=422, detail="Remote LLM bind host must equal the instruction server public host."
         )
-    extra_args = settings.get("extra_args", [])
-    if not isinstance(extra_args, list) or not all(isinstance(item, str) for item in extra_args):
-        raise HTTPException(status_code=422, detail="extra_args must be a list of strings")
+    try:
+        validated = validate_llm_settings(settings, remote=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    validated["bind_host"] = public_host
+    return validated
 
 
 def create_app(controller: ServiceController | None = None, *, public_host: str | None = None) -> FastAPI:
     service_controller = controller or ServiceController(public_host=public_host or "127.0.0.1")
+    controller_public_host = getattr(service_controller, "public_host", public_host or "127.0.0.1")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -56,14 +66,12 @@ def create_app(controller: ServiceController | None = None, *, public_host: str 
 
     @app.post("/services/start", response_model=dict)
     def start_service(request: StartServiceRequest) -> dict[str, Any]:
-        _reject_remote_commands(request.settings)
+        settings = _reject_remote_commands(
+            request.settings, service_type=request.service_type, public_host=controller_public_host
+        )
         try:
             endpoint = service_controller.start(
-                ServiceSpec(
-                    service_type=request.service_type,
-                    port=request.port,
-                    settings=request.settings,
-                )
+                ServiceSpec(service_type=request.service_type, port=request.port, settings=settings)
             )
         except (ServiceError, ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
