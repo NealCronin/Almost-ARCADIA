@@ -178,14 +178,29 @@ class AppConfig:
 
 
 class ConfigStore:
-    """Load and atomically save one JSON configuration file."""
+    """Load and atomically save one JSON configuration file.
 
-    def __init__(self, path: str | Path = "config.json") -> None:
+    A sibling ``default_config.json`` seeds a missing runtime configuration
+    without making local settings part of source control.
+    """
+
+    def __init__(self, path: str | Path = "config.json", default_path: str | Path | None = None) -> None:
         self.path = Path(path)
+        self.default_path = (
+            Path(default_path) if default_path is not None else self.path.with_name("default_config.json")
+        )
 
     def load(self) -> AppConfig:
         if not self.path.exists():
-            return AppConfig()
+            if not self.default_path.exists():
+                return AppConfig()
+            try:
+                payload = self.default_path.read_text(encoding="utf-8")
+                config = AppConfig.from_dict(json.loads(payload))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ConfigurationError(f"Could not read default configuration {self.default_path}: {exc}") from exc
+            self._write_payload(payload)
+            return config
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -193,8 +208,10 @@ class ConfigStore:
         return AppConfig.from_dict(data)
 
     def save(self, config: AppConfig) -> None:
+        self._write_payload(json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n")
+
+    def _write_payload(self, payload: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n"
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

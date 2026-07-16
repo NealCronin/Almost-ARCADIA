@@ -92,7 +92,7 @@ Both builders provide an **Additional arguments** field for a small number of se
 
 ### Manual `config.json`
 
-`config.json` remains the portable persistence format for manual editing and automation. Each service entry has a node name, service type, inference port, and flexible runtime settings dictionary:
+`default_config.json` is the committed starting configuration. On first load, a missing sibling `config.json` is atomically seeded with that exact content; the resulting `config.json` is ignored by Git and is the portable persistence format for manual editing and automation. Each service entry has a node name, service type, inference port, and flexible runtime settings dictionary:
 
 ```json
 {
