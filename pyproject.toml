@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "almost-arcadia"
+version = "0.1.0"
+description = "Prototype orchestration UI for local and remote model services."
+requires-python = ">=3.11"
+dependencies = [
+    "django>=5.1,<6",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "requests>=2.32,<3",
+    "numpy>=2.0,<3",
+    "opencv-python>=4.10,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-django>=4.9,<5",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "project.settings"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "web*", "project*"]

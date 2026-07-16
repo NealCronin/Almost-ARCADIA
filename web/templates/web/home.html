@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Almost ARCADIA</title>
+    <style>
+        body { max-width: 900px; margin: 2rem auto; font-family: sans-serif; }
+        form { border: 1px solid #ccc; padding: 1rem; margin-bottom: 2rem; }
+        textarea { width: 100%; min-height: 8rem; }
+        pre { white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>Almost ARCADIA Prototype</h1>
+
+    {% if message %}<p><strong>{{ message }}</strong></p>{% endif %}
+    {% if response %}<pre>{{ response }}</pre>{% endif %}
+
+    <h2>Start service</h2>
+    <form method="post">
+        {% csrf_token %}
+        {{ service_form.as_p }}
+        <button name="action" value="start">Start</button>
+    </form>
+
+    <h2>Test LLM endpoint</h2>
+    <form method="post">
+        {% csrf_token %}
+        {{ prompt_form.as_p }}
+        <button name="action" value="prompt">Send prompt</button>
+    </form>
+</body>
+</html>

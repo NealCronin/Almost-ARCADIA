@@ -1,0 +1,8 @@
+{
+  "nodes": {},
+  "services": {},
+  "pipeline": {
+    "sam_step": 5,
+    "run_at_source_fps": false
+  }
+}
