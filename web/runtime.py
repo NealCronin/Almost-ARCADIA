@@ -3,9 +3,9 @@ from __future__ import annotations
 import atexit
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 
 from django.conf import settings
 
@@ -24,6 +24,7 @@ class ApplicationRuntime:
     controller: ServiceController
     analysis: AnalysisCoordinator
     uploads: UploadStore
+    config_lock: RLock = field(default_factory=RLock, repr=False)
 
 
 _runtime: ApplicationRuntime | None = None

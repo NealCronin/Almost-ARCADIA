@@ -88,7 +88,9 @@ Restarting the instruction server stops any LLM or SAM processes owned by that i
 
 Remote clients must update their saved instruction-host IP and port when this listener changes. Allow the instruction port and direct inference ports through the relevant host firewall for trusted LAN/VPN clients.
 
-### Services page
+### Priority Map Models page
+
+**Client → Priority Map → Model settings** owns Priority Map compute-node selection. It lists **This computer** plus configured remote computers, tests a remote instruction server with a bounded `/health` request, and requires an explicit **Save anyway** when that server is unreachable. Remote-node names are normalized, use IPv4 addresses and instruction ports, and are available immediately in both **Run on** selectors. Renaming a node migrates Priority Map LLM/SAM3 assignments atomically; deletion is blocked while either service references it. This does not proxy inference: the client starts remote services through the instruction port, then connects directly to their returned inference endpoints.
 
 The LLM builder selects either one local GGUF path or an exact public Hugging Face repository/filename pair. It exposes context, GPU layers, CPU threads, batch and microbatch sizes, flash attention, K/V cache types, chat format, model alias, bind host, port, and startup timeout. Do not use split GGUF files or gated repositories.
 

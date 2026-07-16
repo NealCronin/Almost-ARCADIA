@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from core.config import ConfiguredService, NodeConfig
 from core.services.specs import ServiceSpec
-from web.forms import LLMServiceForm, SAMServiceForm
+from web.forms import LLMServiceForm, RemoteNodeForm, SAMServiceForm
 
 NODES = {
     "local": NodeConfig("local", "127.0.0.1"),
@@ -50,6 +50,20 @@ def sam_data(**overrides: object) -> dict[str, object]:
     }
     data.update(overrides)
     return data
+
+
+def test_remote_node_form_normalizes_safe_names_and_rejects_invalid_addresses() -> None:
+    form = RemoteNodeForm({"name": "GPU Desktop", "host": "192.168.1.20", "instruction_port": 9000})
+
+    assert form.is_valid(), form.errors
+    assert form.cleaned_data["name"] == "gpu-desktop"
+    assert form.to_config() == NodeConfig("remote", "192.168.1.20", 9000)
+
+    invalid = RemoteNodeForm({"name": "../local", "host": "example.test", "instruction_port": "true"})
+    assert not invalid.is_valid()
+    assert "name" in invalid.errors
+    assert "host" in invalid.errors
+    assert "instruction_port" in invalid.errors
 
 
 def test_llm_local_model_conversion():

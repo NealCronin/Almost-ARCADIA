@@ -5,10 +5,72 @@
   <div>
     <p class="eyebrow">Priority Map</p>
     <h1>Model settings</h1>
-    <p class="page-heading__copy">Configure the LLM and SAM3 services used by Priority Map. Services start automatically when a run begins; manual controls remain available for testing.</p>
+    <p class="page-heading__copy">Choose the compute computers for Priority Map's LLM and SAM3. Services start automatically when a run begins; inference connects directly to the selected service endpoint.</p>
   </div>
   <a class="button button--ghost" href="{% url 'priority_map' %}">Back to Priority Map</a>
 </header>
+
+<section class="panel service-registry" data-compute-nodes>
+  <div class="panel__header">
+    <div><p class="eyebrow">Priority Map Models</p><h2>Compute nodes</h2></div>
+  </div>
+  <p class="help-copy">Remote computers run model services through their own instruction server. Priority Map processing and direct inference remain on this computer.</p>
+  {% if node_error %}<p class="inline-error">{{ node_error }}</p>{% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Address</th><th>Connection</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for node_name, node in nodes %}
+        <tr>
+          <td>{% if node_name == 'local' %}This computer{% else %}{{ node_name }}{% endif %}</td>
+          <td>{% if node_name == 'local' %}Local{% else %}Remote{% endif %}</td>
+          <td>{{ node.host }}{% if node.instruction_port %}:{{ node.instruction_port }}{% endif %}</td>
+          <td><span class="status-pill" data-node-state="{{ node_name }}">{% if node_name == 'local' %}Local{% else %}Not checked{% endif %}</span></td>
+          <td>
+            {% if node_name != 'local' %}
+              <button class="button button--ghost button--small" type="button" data-node-test data-node-test-url="{% url 'test_remote_node' node_name %}" data-node-state-target="{{ node_name }}">Test</button>
+              <a class="button button--ghost button--small" href="{% url 'priority_map_models' %}?edit={{ node_name|urlencode }}#edit-node">Edit</a>
+              <form method="post" action="{% url 'delete_remote_node' node_name %}" class="inline-form" data-node-delete>
+                {% csrf_token %}<button class="button button--danger button--small" type="submit">Delete</button>
+              </form>
+            {% else %}<span class="muted">Built in</span>{% endif %}
+          </td>
+        </tr>
+        {% if editing_node == node_name and edit_node_form %}
+        <tr id="edit-node"><td colspan="5">
+          <form method="post" action="{% url 'edit_remote_node' node_name %}" class="form-grid" data-remote-node-form>
+            {% csrf_token %}
+            {{ edit_node_form.non_field_errors }}
+            <div class="form-field">{{ edit_node_form.name.as_field_group }}</div>
+            <div class="form-field">{{ edit_node_form.host.as_field_group }}</div>
+            <div class="form-field">{{ edit_node_form.instruction_port.as_field_group }}</div>
+            <div class="form-actions form-field--full">
+              <button class="button button--primary" type="submit">Save remote computer</button>
+              {% if allow_save_anyway %}<button class="button button--ghost" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
+              <a class="button button--ghost" href="{% url 'priority_map_models' %}">Cancel</a>
+            </div>
+          </form>
+        </td></tr>
+        {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <details class="disclosure" {% if node_form.is_bound and not editing_node %}open{% endif %}>
+    <summary>Add remote computer</summary>
+    <form method="post" action="{% url 'add_remote_node' %}" class="form-grid disclosure__body" data-remote-node-form>
+      {% csrf_token %}
+      {{ node_form.non_field_errors }}
+      <div class="form-field">{{ node_form.name.as_field_group }}</div>
+      <div class="form-field">{{ node_form.host.as_field_group }}</div>
+      <div class="form-field">{{ node_form.instruction_port.as_field_group }}</div>
+      <div class="form-actions form-field--full">
+        <button class="button button--primary" type="submit">Save remote computer</button>
+        {% if allow_save_anyway and not editing_node %}<button class="button button--ghost" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
+      </div>
+    </form>
+  </details>
+</section>
 
 <div class="settings-layout service-grid">
   <section class="panel settings-card">
@@ -60,15 +122,9 @@
           <div class="form-field form-field--full">{{ llm_form.additional_arguments.as_field_group }}</div>
         </div>
       </details>
-      <div class="form-actions">
-        <button class="button button--primary" type="submit">Save LLM settings</button>
-      </div>
+      <div class="form-actions"><button class="button button--primary" type="submit">Save LLM settings</button></div>
     </form>
-    {% if config.priority_map.services.llm %}
-    <form method="post" action="{% url 'stop_service' 'llm' %}" class="inline-form">
-      {% csrf_token %}<button class="button button--danger button--small" type="submit">Stop LLM</button>
-    </form>
-    {% endif %}
+    {% if config.priority_map.services.llm %}<form method="post" action="{% url 'stop_service' 'llm' %}" class="inline-form">{% csrf_token %}<button class="button button--danger button--small" type="submit">Stop LLM</button></form>{% endif %}
   </section>
 
   <section class="panel settings-card">
@@ -103,11 +159,7 @@
       </details>
       <div class="form-actions"><button class="button button--primary" type="submit">Save SAM3 settings</button></div>
     </form>
-    {% if config.priority_map.services.sam3 %}
-    <form method="post" action="{% url 'stop_service' 'sam3' %}" class="inline-form">
-      {% csrf_token %}<button class="button button--danger button--small" type="submit">Stop SAM3</button>
-    </form>
-    {% endif %}
+    {% if config.priority_map.services.sam3 %}<form method="post" action="{% url 'stop_service' 'sam3' %}" class="inline-form">{% csrf_token %}<button class="button button--danger button--small" type="submit">Stop SAM3</button></form>{% endif %}
   </section>
 </div>
 

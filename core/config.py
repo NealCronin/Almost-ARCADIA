@@ -63,11 +63,17 @@ class NodeConfig:
     def __post_init__(self) -> None:
         if self.mode not in ("local", "remote"):
             raise ConfigurationError("Node mode must be 'local' or 'remote'.")
+        if not isinstance(self.host, str):
+            raise ConfigurationError("Node host cannot be empty.")
         self.host = self.host.strip()
         if not self.host:
             raise ConfigurationError("Node host cannot be empty.")
-        if self.instruction_port is not None and not 1 <= self.instruction_port <= 65535:
-            raise ConfigurationError("Instruction port must be between 1 and 65535.")
+        if self.instruction_port is not None and (
+            isinstance(self.instruction_port, bool)
+            or not isinstance(self.instruction_port, int)
+            or not 1 <= self.instruction_port <= 65535
+        ):
+            raise ConfigurationError("Instruction port must be an integer between 1 and 65535.")
         if self.mode == "remote" and self.instruction_port is None:
             raise ConfigurationError("Remote nodes require instruction_port.")
 

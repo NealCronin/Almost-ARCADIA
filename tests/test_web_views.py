@@ -6,7 +6,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
-from core.config import AppConfig, ConfigStore
+from core.config import AppConfig, ConfigStore, NodeConfig
 from core.errors import AnalysisError
 from core.services.host_listener import HostListenerRestartError, HostListenerStatus
 from core.services.specs import ServiceEndpoint
@@ -134,6 +134,20 @@ def sam_post_data(**overrides):
     return data
 
 
+def remote_health(monkeypatch, reachable: bool) -> list[tuple[str, int, float, int]]:
+    calls: list[tuple[str, int, float, int]] = []
+
+    class FakeInstructionClient:
+        def __init__(self, host, port, *, timeout, retries):
+            calls.append((host, port, timeout, retries))
+
+        def health(self):
+            return reachable
+
+    monkeypatch.setattr("web.views.InstructionClient", FakeInstructionClient)
+    return calls
+
+
 def test_pages_load(client, monkeypatch, runtime):
     monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
     assert client.get("/").status_code == 200
@@ -178,6 +192,8 @@ def test_invalid_service_form_returns_errors(client, monkeypatch, runtime):
     response = client.post("/services/llm/start/", llm_post_data(model_path=""))
     assert response.status_code == 400
     assert b"A local model path is required." in response.content
+    assert b"Compute nodes" in response.content
+    assert b"This computer" in response.content
 
 
 def test_service_post_is_blocked_during_analysis(client, monkeypatch, runtime):
@@ -330,6 +346,9 @@ def test_host_save_restarts_then_persists_listener_config(client, monkeypatch, r
     replacement, previous = runtime.host_listener.restarts[0]
     assert replacement.port == 9010
     assert previous.port == 9000
+    host_page = client.get("/host/")
+    assert b"Compute nodes" not in host_page.content
+    assert b"Add remote computer" not in host_page.content
 
 
 def test_host_save_preserves_unknown_listener_configuration(client, monkeypatch, runtime) -> None:
@@ -428,3 +447,205 @@ def test_results_explains_in_memory_runs_and_keeps_terminal_artifacts(client, mo
 
     assert artifacts["artifacts"][0]["inline_url"].endswith("/preview.jpg/")
     assert artifacts["artifacts"][0]["download_url"].endswith("/preview.jpg/?download=1")
+
+
+def test_models_page_renders_compute_nodes_and_model_forms(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.get("/client/priority-map/models/")
+
+    assert response.status_code == 200
+    assert b"Compute nodes" in response.content
+    assert b"This computer" in response.content
+    assert b"Add remote computer" in response.content
+    assert b"LLM service" in response.content
+    assert b"SAM3 service" in response.content
+
+
+def test_add_reachable_remote_node_preserves_config_and_updates_model_choices(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    calls = remote_health(monkeypatch, reachable=True)
+    config = runtime.config_store.load()
+    config.host_listener.extra = {"listener_extension": True}
+    config.extra = {"root_extension": {"preserve": True}}
+    runtime.config_store.save(config)
+
+    response = client.post(
+        "/client/priority-map/models/nodes/add/",
+        {"name": "GPU Desktop", "host": "192.168.1.20", "instruction_port": 9000},
+    )
+    saved = runtime.config_store.load()
+    page = client.get("/client/priority-map/models/")
+
+    assert response.status_code == 302
+    assert saved.nodes["gpu-desktop"] == NodeConfig("remote", "192.168.1.20", 9000)
+    assert saved.host_listener.extra == {"listener_extension": True}
+    assert saved.extra == {"root_extension": {"preserve": True}}
+    assert calls == [("192.168.1.20", 9000, 2.0, 0)]
+    assert page.content.count(b'value="gpu-desktop"') == 2
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"name": "local", "host": "192.168.1.20", "instruction_port": 9000}, b"reserved"),
+        ({"name": "desktop", "host": "not-an-ip", "instruction_port": 9000}, b"valid IPv4"),
+        ({"name": "desktop", "host": "192.168.1.20", "instruction_port": 0}, b"greater than or equal to 1"),
+    ],
+)
+def test_add_remote_node_validation_keeps_complete_models_context(client, monkeypatch, runtime, data, message) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    response = client.post("/client/priority-map/models/nodes/add/", data)
+
+    assert response.status_code == 400
+    assert message in response.content
+    assert b"Compute nodes" in response.content
+    assert b"LLM service" in response.content
+    assert b"SAM3 service" in response.content
+
+
+def test_duplicate_remote_node_name_is_rejected(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    remote_health(monkeypatch, reachable=True)
+    config = runtime.config_store.load()
+    config.nodes["desktop"] = NodeConfig("remote", "192.168.1.20", 9000)
+    runtime.config_store.save(config)
+
+    response = client.post(
+        "/client/priority-map/models/nodes/add/",
+        {"name": "desktop", "host": "192.168.1.21", "instruction_port": 9001},
+    )
+
+    assert response.status_code == 400
+    assert b"already exists" in response.content
+    assert runtime.config_store.load().nodes["desktop"].host == "192.168.1.20"
+
+
+def test_unreachable_remote_node_requires_explicit_save_anyway(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    remote_health(monkeypatch, reachable=False)
+    payload = {"name": "desktop", "host": "192.168.1.20", "instruction_port": 9000}
+
+    first = client.post("/client/priority-map/models/nodes/add/", payload)
+
+    assert first.status_code == 400
+    assert b"Instruction server is unreachable" in first.content
+    assert b"Save anyway" in first.content
+    assert "desktop" not in runtime.config_store.load().nodes
+    saved = client.post("/client/priority-map/models/nodes/add/", {**payload, "save_anyway": "1"})
+    assert saved.status_code == 302
+    assert runtime.config_store.load().nodes["desktop"].host == "192.168.1.20"
+
+
+def test_remote_node_save_failure_reports_error_without_persisting(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    remote_health(monkeypatch, reachable=True)
+    monkeypatch.setattr(runtime.config_store, "save", lambda config: (_ for _ in ()).throw(OSError("disk full")))
+
+    response = client.post(
+        "/client/priority-map/models/nodes/add/",
+        {"name": "desktop", "host": "192.168.1.20", "instruction_port": 9000},
+    )
+
+    assert response.status_code == 500
+    assert b"Could not save remote computer: disk full" in response.content
+    assert "desktop" not in runtime.config_store.load().nodes
+
+
+def test_remote_node_test_endpoint_reports_bounded_reachability(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    config = runtime.config_store.load()
+    config.nodes["desktop"] = NodeConfig("remote", "192.168.1.20", 9000)
+    runtime.config_store.save(config)
+    calls = remote_health(monkeypatch, reachable=True)
+
+    reachable = client.post("/client/priority-map/models/nodes/desktop/test/")
+    monkeypatch.setattr(
+        "web.views.InstructionClient", lambda *args, **kwargs: type("Client", (), {"health": lambda self: False})()
+    )
+    unreachable = client.post("/client/priority-map/models/nodes/desktop/test/")
+
+    assert reachable.json() == {"state": "reachable", "message": "Instruction server is reachable."}
+    assert unreachable.json() == {"state": "unreachable", "message": "Instruction server is unreachable."}
+    assert calls == [("192.168.1.20", 9000, 2.0, 0)]
+    assert client.post("/client/priority-map/models/nodes/missing/test/").status_code == 404
+    assert client.post("/client/priority-map/models/nodes/local/test/").status_code == 400
+
+
+def test_edit_remote_node_renames_service_references_and_preserves_extras(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    remote_health(monkeypatch, reachable=True)
+    config = runtime.config_store.load()
+    config.nodes["desktop"] = NodeConfig("remote", "192.168.1.20", 9000, {"node_extension": {"keep": True}})
+    runtime.config_store.save(config)
+    client.post("/services/llm/start/", llm_post_data(node="desktop"))
+
+    response = client.post(
+        "/client/priority-map/models/nodes/desktop/edit/",
+        {"name": "gpu-desktop", "host": "192.168.1.21", "instruction_port": 9001},
+    )
+    saved = runtime.config_store.load()
+
+    assert response.status_code == 302
+    assert "desktop" not in saved.nodes
+    assert saved.nodes["gpu-desktop"].host == "192.168.1.21"
+    assert saved.nodes["gpu-desktop"].extra == {"node_extension": {"keep": True}}
+    assert saved.priority_map.services["llm"].node == "gpu-desktop"
+
+
+def test_edit_remote_node_rejects_duplicate_and_supports_save_anyway(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    config = runtime.config_store.load()
+    config.nodes["desktop"] = NodeConfig("remote", "192.168.1.20", 9000)
+    config.nodes["gpu"] = NodeConfig("remote", "192.168.1.21", 9001)
+    runtime.config_store.save(config)
+    remote_health(monkeypatch, reachable=False)
+
+    duplicate = client.post(
+        "/client/priority-map/models/nodes/desktop/edit/",
+        {"name": "gpu", "host": "192.168.1.20", "instruction_port": 9000},
+    )
+    first = client.post(
+        "/client/priority-map/models/nodes/desktop/edit/",
+        {"name": "desktop", "host": "192.168.1.22", "instruction_port": 9002},
+    )
+    saved = client.post(
+        "/client/priority-map/models/nodes/desktop/edit/",
+        {"name": "desktop", "host": "192.168.1.22", "instruction_port": 9002, "save_anyway": "1"},
+    )
+
+    assert duplicate.status_code == 400
+    assert b"already exists" in duplicate.content
+    assert first.status_code == 400
+    assert b"Save anyway" in first.content
+    assert b"desktop" in first.content and b"gpu" in first.content
+    assert saved.status_code == 302
+    assert runtime.config_store.load().nodes["desktop"].host == "192.168.1.22"
+
+
+def test_remote_node_deletion_enforces_dependencies_and_post_csrf(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    config = runtime.config_store.load()
+    config.nodes["desktop"] = NodeConfig("remote", "192.168.1.20", 9000)
+    runtime.config_store.save(config)
+    remote_health(monkeypatch, reachable=True)
+    client.post("/services/llm/start/", llm_post_data(node="desktop"))
+
+    referenced = client.post("/client/priority-map/models/nodes/desktop/delete/")
+    local = client.post("/client/priority-map/models/nodes/local/delete/")
+    get_delete = client.get("/client/priority-map/models/nodes/desktop/delete/")
+    csrf_client = Client(enforce_csrf_checks=True)
+    csrf = csrf_client.post("/client/priority-map/models/nodes/desktop/delete/")
+    config = runtime.config_store.load()
+    del config.priority_map.services["llm"]
+    runtime.config_store.save(config)
+    deleted = client.post("/client/priority-map/models/nodes/desktop/delete/")
+
+    assert referenced.status_code == 409
+    assert b"used by LLM" in referenced.content
+    assert local.status_code == 400
+    assert get_delete.status_code == 405
+    assert csrf.status_code == 403
+    assert deleted.status_code == 302
+    assert "desktop" not in runtime.config_store.load().nodes

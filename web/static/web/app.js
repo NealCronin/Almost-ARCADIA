@@ -60,6 +60,36 @@
     updateSource();
   }
 
+  const computeNodes = qs('[data-compute-nodes]');
+  if (computeNodes) {
+    const nodeState = (name) => qsa('[data-node-state]', computeNodes).find((element) => element.dataset.nodeState === name);
+    qsa('[data-node-test]', computeNodes).forEach((button) => button.addEventListener('click', async () => {
+      const state = nodeState(button.dataset.nodeStateTarget || '');
+      button.disabled = true;
+      try {
+        const response = await fetch(button.dataset.nodeTestUrl || '', {
+          method: 'POST',
+          headers: {'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
+        });
+        const data = await response.json();
+        if (state) {
+          state.textContent = data.message || 'Instruction server is unreachable.';
+          state.className = `status-pill status-pill--${data.state || 'unreachable'}`;
+        }
+      } catch (_) {
+        if (state) {
+          state.textContent = 'Instruction server is unreachable.';
+          state.className = 'status-pill status-pill--unreachable';
+        }
+      } finally {
+        button.disabled = false;
+      }
+    }));
+    qsa('[data-node-delete]', computeNodes).forEach((form) => form.addEventListener('submit', (event) => {
+      if (!window.confirm('Delete this remote computer?')) event.preventDefault();
+    }));
+  }
+
   const fileInput = document.getElementById('priority-map-files');
   const folderInput = document.getElementById('priority-map-folder');
   const filePanel = qs('[data-selected-files]');

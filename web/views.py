@@ -11,7 +11,7 @@ from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse, S
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from core.config import ConfiguredService
+from core.config import ConfiguredService, NodeConfig
 from core.errors import ArcadiaError
 from core.inference.llm_client import LLMClient
 from core.services.host_listener import HostListenerError, HostListenerRestartError
@@ -24,12 +24,14 @@ from web.forms import (
     HostListenerForm,
     LLMServiceForm,
     PipelineForm,
+    RemoteNodeForm,
     SAMServiceForm,
 )
 from web.runtime import get_runtime
 from web.tools import TOOLS
 
 _host_listener_save_lock = threading.RLock()
+_models_node_lock = threading.RLock()
 
 
 def _service_form(name: str, config: Any, data: Any = None):
@@ -66,25 +68,260 @@ def client_portal(request: HttpRequest) -> HttpResponse:
     )
 
 
-@require_GET
-def services(request: HttpRequest) -> HttpResponse:
+def _models_context(
+    request: HttpRequest,
+    config: Any,
+    *,
+    llm_form: LLMServiceForm | None = None,
+    sam_form: SAMServiceForm | None = None,
+    node_form: RemoteNodeForm | None = None,
+    editing_node: str | None = None,
+    edit_node_form: RemoteNodeForm | None = None,
+    allow_save_anyway: bool = False,
+    node_error: str | None = None,
+) -> dict[str, Any]:
     runtime = get_runtime()
-    config = runtime.config_store.load()
-    context = {
+    context: dict[str, Any] = {
         "config": config,
-        "llm_form": _service_form("llm", config),
-        "sam_form": _service_form("sam3", config),
+        "llm_form": llm_form or _service_form("llm", config),
+        "sam_form": sam_form or _service_form("sam3", config),
+        "node_form": node_form or RemoteNodeForm(),
+        "editing_node": editing_node,
+        "edit_node_form": edit_node_form,
+        "allow_save_anyway": allow_save_anyway,
+        "node_error": node_error,
+        "nodes": sorted(config.nodes.items(), key=lambda item: (item[0] != "local", item[0])),
+        "node_reachability": {
+            name: "local" if node.mode == "local" else "not_checked" for name, node in config.nodes.items()
+        },
         "services": runtime.controller.list_services(),
         "log_port": request.GET.get("log_port"),
         "log_text": None,
     }
     if request.GET.get("log_port"):
         try:
-            port = int(request.GET["log_port"])
-            context["log_text"] = runtime.controller.get_logs(port)
+            context["log_text"] = runtime.controller.get_logs(int(request.GET["log_port"]))
         except (ValueError, ArcadiaError) as exc:
             context["log_text"] = str(exc)
-    return render(request, "web/services.html", context)
+    return context
+
+
+def _render_models(
+    request: HttpRequest,
+    config: Any,
+    *,
+    llm_form: LLMServiceForm | None = None,
+    sam_form: SAMServiceForm | None = None,
+    node_form: RemoteNodeForm | None = None,
+    editing_node: str | None = None,
+    edit_node_form: RemoteNodeForm | None = None,
+    allow_save_anyway: bool = False,
+    node_error: str | None = None,
+    status: int = 200,
+) -> HttpResponse:
+    return render(
+        request,
+        "web/services.html",
+        _models_context(
+            request,
+            config,
+            llm_form=llm_form,
+            sam_form=sam_form,
+            node_form=node_form,
+            editing_node=editing_node,
+            edit_node_form=edit_node_form,
+            allow_save_anyway=allow_save_anyway,
+            node_error=node_error,
+        ),
+        status=status,
+    )
+
+
+@require_GET
+def services(request: HttpRequest) -> HttpResponse:
+    runtime = get_runtime()
+    config = runtime.config_store.load()
+    editing_node = request.GET.get("edit")
+    edit_node_form = None
+    if editing_node and editing_node in config.nodes and editing_node != "local":
+        node = config.nodes[editing_node]
+        edit_node_form = RemoteNodeForm(
+            initial={"name": editing_node, "host": node.host, "instruction_port": node.instruction_port}
+        )
+    return _render_models(request, config, editing_node=editing_node, edit_node_form=edit_node_form)
+
+
+def _remote_node_reachable(node: NodeConfig) -> bool:
+    return InstructionClient(node.host, node.instruction_port or 9000, timeout=2.0, retries=0).health()
+
+
+def _save_remote_node(
+    config: Any,
+    *,
+    old_name: str | None,
+    form: RemoteNodeForm,
+) -> tuple[str, NodeConfig]:
+    name = form.cleaned_data["name"]
+    if name in config.nodes and name != old_name:
+        form.add_error("name", f"A compute node named '{name}' already exists.")
+        raise ValueError("duplicate node name")
+    previous = config.nodes.get(old_name) if old_name else None
+    node = form.to_config(extra=copy.deepcopy(previous.extra) if previous else {})
+    if old_name is not None:
+        del config.nodes[old_name]
+    config.nodes[name] = node
+    if old_name is not None and name != old_name:
+        for configured in config.priority_map.services.values():
+            if configured.node == old_name:
+                configured.node = name
+    return name, node
+
+
+def _node_form_failure(
+    request: HttpRequest,
+    config: Any,
+    form: RemoteNodeForm,
+    *,
+    editing_node: str | None = None,
+    allow_save_anyway: bool = False,
+    status: int = 400,
+) -> HttpResponse:
+    return _render_models(
+        request,
+        config,
+        node_form=form if editing_node is None else None,
+        editing_node=editing_node,
+        edit_node_form=form if editing_node is not None else None,
+        allow_save_anyway=allow_save_anyway,
+        status=status,
+    )
+
+
+@require_POST
+def add_remote_node(request: HttpRequest) -> HttpResponse:
+    runtime = get_runtime()
+    form = RemoteNodeForm(request.POST)
+    if not form.is_valid():
+        return _node_form_failure(request, runtime.config_store.load(), form)
+    with runtime.config_lock, _models_node_lock:
+        try:
+            runtime.analysis.assert_configuration_mutable()
+            config = runtime.config_store.load()
+            name = form.cleaned_data["name"]
+            if name in config.nodes:
+                form.add_error("name", f"A compute node named '{name}' already exists.")
+                return _node_form_failure(request, config, form)
+            node = form.to_config()
+            reachable = _remote_node_reachable(node)
+            if not reachable and request.POST.get("save_anyway") != "1":
+                form.add_error(None, "Instruction server is unreachable. Test the address or choose Save anyway.")
+                return _node_form_failure(request, config, form, allow_save_anyway=True)
+            config.nodes[name] = node
+            runtime.config_store.save(config)
+        except (ArcadiaError, OSError) as exc:
+            form.add_error(None, f"Could not save remote computer: {exc}")
+            return _node_form_failure(request, runtime.config_store.load(), form, status=500)
+    messages.success(
+        request,
+        f"Saved remote computer '{name}'{' without a reachable instruction server' if not reachable else ''}.",
+    )
+    return redirect("priority_map_models")
+
+
+@require_POST
+def edit_remote_node(request: HttpRequest, node_name: str) -> HttpResponse:
+    runtime = get_runtime()
+    form = RemoteNodeForm(request.POST)
+    with runtime.config_lock, _models_node_lock:
+        config = runtime.config_store.load()
+        previous = config.nodes.get(node_name)
+        if previous is None:
+            return HttpResponse("Unknown compute node.", status=404)
+        if node_name == "local" or previous.mode != "remote":
+            return _node_form_failure(request, config, form, editing_node=node_name, status=400)
+        if not form.is_valid():
+            return _node_form_failure(request, config, form, editing_node=node_name)
+        try:
+            runtime.analysis.assert_configuration_mutable()
+            name = form.cleaned_data["name"]
+            if name in config.nodes and name != node_name:
+                form.add_error("name", f"A compute node named '{name}' already exists.")
+                return _node_form_failure(request, config, form, editing_node=node_name)
+            replacement = form.to_config(extra=copy.deepcopy(previous.extra))
+            reachable = _remote_node_reachable(replacement)
+            if not reachable and request.POST.get("save_anyway") != "1":
+                form.add_error(None, "Instruction server is unreachable. Test the address or choose Save anyway.")
+                return _node_form_failure(
+                    request,
+                    config,
+                    form,
+                    editing_node=node_name,
+                    allow_save_anyway=True,
+                )
+            _save_remote_node(config, old_name=node_name, form=form)
+            runtime.config_store.save(config)
+        except (ArcadiaError, OSError) as exc:
+            form.add_error(None, f"Could not save remote computer: {exc}")
+            return _node_form_failure(request, runtime.config_store.load(), form, editing_node=node_name, status=500)
+    messages.success(
+        request,
+        f"Saved remote computer '{name}'{' without a reachable instruction server' if not reachable else ''}.",
+    )
+    return redirect("priority_map_models")
+
+
+@require_POST
+def delete_remote_node(request: HttpRequest, node_name: str) -> HttpResponse:
+    runtime = get_runtime()
+    with runtime.config_lock, _models_node_lock:
+        try:
+            runtime.analysis.assert_configuration_mutable()
+            config = runtime.config_store.load()
+            node = config.nodes.get(node_name)
+            if node is None:
+                return HttpResponse("Unknown compute node.", status=404)
+            if node_name == "local" or node.mode != "remote":
+                return _render_models(request, config, node_error="This computer cannot be deleted.", status=400)
+            references = [
+                name.upper()
+                for name, configured in config.priority_map.services.items()
+                if configured.node == node_name
+            ]
+            if references:
+                return _render_models(
+                    request,
+                    config,
+                    node_error=(
+                        f"Cannot delete '{node_name}'; it is used by {', '.join(references)}. Move that service first."
+                    ),
+                    status=409,
+                )
+            del config.nodes[node_name]
+            runtime.config_store.save(config)
+        except (ArcadiaError, OSError) as exc:
+            return _render_models(
+                request, runtime.config_store.load(), node_error=f"Could not delete remote computer: {exc}", status=500
+            )
+    messages.success(request, f"Deleted remote computer '{node_name}'.")
+    return redirect("priority_map_models")
+
+
+@require_POST
+def test_remote_node(request: HttpRequest, node_name: str) -> JsonResponse:
+    runtime = get_runtime()
+    with runtime.config_lock:
+        config = runtime.config_store.load()
+        node = config.nodes.get(node_name)
+    if node is None:
+        return JsonResponse({"state": "unknown", "message": "Unknown compute node."}, status=404)
+    if node_name == "local" or node.mode != "remote":
+        return JsonResponse(
+            {"state": "local", "message": "This computer does not require remote health testing."},
+            status=400,
+        )
+    if _remote_node_reachable(node):
+        return JsonResponse({"state": "reachable", "message": "Instruction server is reachable."})
+    return JsonResponse({"state": "unreachable", "message": "Instruction server is unreachable."})
 
 
 @require_POST
@@ -92,34 +329,31 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
     if service_name not in ("llm", "sam3"):
         return HttpResponse("Unknown service", status=404)
     runtime = get_runtime()
-    try:
-        runtime.analysis.assert_configuration_mutable()
-        config = runtime.config_store.load()
-        form = _service_form(service_name, config, request.POST)
-        if not form.is_valid():
-            return render(
-                request,
-                "web/services.html",
-                {
-                    "config": config,
-                    "llm_form": form if service_name == "llm" else _service_form("llm", config),
-                    "sam_form": form if service_name == "sam3" else _service_form("sam3", config),
-                    "services": runtime.controller.list_services(),
-                },
-                status=400,
+    with runtime.config_lock:
+        try:
+            runtime.analysis.assert_configuration_mutable()
+            config = runtime.config_store.load()
+            form = _service_form(service_name, config, request.POST)
+            if not form.is_valid():
+                return _render_models(
+                    request,
+                    config,
+                    llm_form=form if service_name == "llm" else None,
+                    sam_form=form if service_name == "sam3" else None,
+                    status=400,
+                )
+            spec = form.to_spec()
+            previous = config.priority_map.services.get(service_name)
+            config.priority_map.services[service_name] = ConfiguredService(
+                node=form.cleaned_data["node"], spec=spec, extra=previous.extra if previous else {}
             )
-        spec = form.to_spec()
-        previous = config.priority_map.services.get(service_name)
-        config.priority_map.services[service_name] = ConfiguredService(
-            node=form.cleaned_data["node"], spec=spec, extra=previous.extra if previous else {}
-        )
-        runtime.config_store.save(config)
-        messages.success(
-            request, f"Saved {service_name.upper()} settings. Priority Map starts configured services for a run."
-        )
-    except (ArcadiaError, ValueError, OSError) as exc:
-        messages.error(request, str(exc))
-    return redirect("services")
+            runtime.config_store.save(config)
+            messages.success(
+                request, f"Saved {service_name.upper()} settings. Priority Map starts configured services for a run."
+            )
+        except (ArcadiaError, ValueError, OSError) as exc:
+            messages.error(request, str(exc))
+    return redirect("priority_map_models")
 
 
 @require_POST
@@ -139,7 +373,7 @@ def stop_service(request: HttpRequest, service_name: str) -> HttpResponse:
         messages.success(request, f"Stopped {service_name} on port {configured.port}.")
     except (ArcadiaError, ValueError, OSError) as exc:
         messages.error(request, str(exc))
-    return redirect("services")
+    return redirect("priority_map_models")
 
 
 @require_GET
@@ -185,7 +419,7 @@ def save_host_listener(request: HttpRequest) -> HttpResponse:
             {"form": form, "listener": runtime.host_listener.status()},
             status=400,
         )
-    with _host_listener_save_lock:
+    with runtime.config_lock, _host_listener_save_lock:
         config = runtime.config_store.load()
         previous = config.host_listener
         replacement = form.to_config()
@@ -252,27 +486,28 @@ def analysis_page(request: HttpRequest) -> HttpResponse:
 @require_POST
 def save_pipeline(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
-    try:
-        runtime.analysis.assert_configuration_mutable()
-        config = runtime.config_store.load()
-        form = PipelineForm(request.POST)
-        if not form.is_valid():
-            return render(
-                request,
-                "web/analysis.html",
-                {
-                    "config": config,
-                    "pipeline_form": form,
-                    "analysis_form": AnalysisForm(),
-                    "analysis": runtime.analysis.status(),
-                },
-                status=400,
-            )
-        config.priority_map.pipeline = form.to_config()
-        runtime.config_store.save(config)
-        messages.success(request, "Saved pipeline settings.")
-    except (ArcadiaError, ValueError) as exc:
-        messages.error(request, str(exc))
+    with runtime.config_lock:
+        try:
+            runtime.analysis.assert_configuration_mutable()
+            config = runtime.config_store.load()
+            form = PipelineForm(request.POST)
+            if not form.is_valid():
+                return render(
+                    request,
+                    "web/analysis.html",
+                    {
+                        "config": config,
+                        "pipeline_form": form,
+                        "analysis_form": AnalysisForm(),
+                        "analysis": runtime.analysis.status(),
+                    },
+                    status=400,
+                )
+            config.priority_map.pipeline = form.to_config()
+            runtime.config_store.save(config)
+            messages.success(request, "Saved pipeline settings.")
+        except (ArcadiaError, ValueError, OSError) as exc:
+            messages.error(request, str(exc))
     return redirect("analysis")
 
 

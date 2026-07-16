@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 import shlex
 from collections.abc import Callable
@@ -27,36 +28,38 @@ class HostListenerForm(forms.Form):
         return HostListenerConfig(host=self.cleaned_data["host"], port=self.cleaned_data["port"])
 
 
-class NodeForm(forms.Form):
-    mode = forms.ChoiceField(choices=[("local", "Local"), ("remote", "Remote")])
-    host = forms.CharField(max_length=255, initial="127.0.0.1")
-    instruction_port = forms.IntegerField(min_value=1, max_value=65535, required=False, initial=9000)
-
-    def clean(self) -> dict[str, Any]:
-        cleaned = super().clean()
-        if cleaned.get("mode") == "remote" and not cleaned.get("instruction_port"):
-            self.add_error("instruction_port", "Remote nodes require an instruction port.")
-        return cleaned
-
-    def to_config(self) -> NodeConfig:
-        return NodeConfig(
-            mode=self.cleaned_data["mode"],
-            host=self.cleaned_data["host"],
-            instruction_port=self.cleaned_data.get("instruction_port"),
-        )
-
-
-class NodeNameForm(forms.Form):
-    name = forms.RegexField(
-        regex=r"^[a-z][a-z0-9-]{0,62}$",
-        error_messages={"invalid": "Use 1–63 lowercase letters, numbers, or hyphens; start with a letter."},
-    )
+class RemoteNodeForm(forms.Form):
+    name = forms.CharField(label="Name", max_length=63)
+    host = forms.CharField(label="IP address", max_length=255)
+    instruction_port = forms.IntegerField(label="Instruction port", min_value=1, max_value=65535)
 
     def clean_name(self) -> str:
-        name = self.cleaned_data["name"]
-        if name == "local":
+        value = re.sub(r"\s+", "-", self.cleaned_data["name"].strip().lower())
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", value):
+            raise forms.ValidationError(
+                "Use 1–63 letters, numbers, spaces, hyphens, or underscores; start with a letter or number."
+            )
+        if value == "local":
             raise forms.ValidationError("'local' is reserved for this computer.")
-        return name
+        return value
+
+    def clean_host(self) -> str:
+        value = self.cleaned_data["host"].strip()
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise forms.ValidationError("IP address must be a valid IPv4 address.") from exc
+        if address.version != 4:
+            raise forms.ValidationError("IP address must be a valid IPv4 address.")
+        return str(address)
+
+    def to_config(self, *, extra: dict[str, Any] | None = None) -> NodeConfig:
+        return NodeConfig(
+            mode="remote",
+            host=self.cleaned_data["host"],
+            instruction_port=self.cleaned_data["instruction_port"],
+            extra=extra or {},
+        )
 
 
 class ServiceForm(forms.Form):
