@@ -1,0 +1,6 @@
+{% extends 'web/base.html' %}
+{% block title %}Results | Almost ARCADIA{% endblock %}
+{% block content %}
+<h2>Analysis results</h2>
+<section class="card"><p class="state {{ analysis.state }}">{{ analysis.state }}</p><p>{{ analysis.message }}</p>{% if analysis.error %}<h3>Failure</h3><pre>{{ analysis.error }}</pre>{% endif %}{% if analysis.output_directory %}<p>Output directory: <code>{{ analysis.output_directory }}</code></p>{% endif %}{% if analysis.output_paths %}<h3>Generated files</h3><ul>{% for path in analysis.output_paths %}<li><code>{{ path }}</code></li>{% endfor %}</ul>{% endif %}<a class="button" href="{% url 'analysis' %}">Back to analysis</a></section>
+{% endblock %}

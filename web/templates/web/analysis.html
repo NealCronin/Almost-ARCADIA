@@ -1,0 +1,10 @@
+{% extends 'web/base.html' %}
+{% block title %}Analysis | Almost ARCADIA{% endblock %}
+{% block content %}
+<h2>Client-side Priority Map analysis</h2>
+<section class="card"><h3>Pipeline settings</h3><form method="post" action="{% url 'save_pipeline' %}">{% csrf_token %}{{ pipeline_form.as_p }}<button type="submit">Save pipeline settings</button></form></section>
+<section class="card"><h3>Start one analysis</h3><form method="post" action="{% url 'start_analysis' %}">{% csrf_token %}{{ analysis_form.as_p }}<button type="submit">Start analysis</button></form><p>Source media remains on this machine. Only encoded inference frames leave it.</p></section>
+<section class="card"><h3>Current state</h3><p id="analysis-state" class="state {{ analysis.state }}">{{ analysis.state }}</p><p id="analysis-message">{{ analysis.message }}</p><p>Frames: <span id="analysis-frames">{{ analysis.frames_processed }}</span></p><script>
+async function refreshAnalysis(){const response=await fetch('{% url "analysis_status" %}'); if(!response.ok)return; const data=await response.json(); document.getElementById('analysis-state').textContent=data.state; document.getElementById('analysis-message').textContent=data.error||data.message; document.getElementById('analysis-frames').textContent=data.frames_processed; if(data.state==='starting'||data.state==='running')setTimeout(refreshAnalysis,1500);} if('{{ analysis.state }}'==='starting'||'{{ analysis.state }}'==='running')refreshAnalysis();
+</script></section>
+{% endblock %}

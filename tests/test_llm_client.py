@@ -1,23 +1,36 @@
 from unittest.mock import Mock, patch
 
+import pytest
+
+from core.errors import InferenceError
 from core.inference.llm_client import LLMClient
 from core.services.specs import ServiceEndpoint
 
 
 @patch("core.inference.llm_client.requests.post")
-def test_chat_returns_message(mock_post: Mock) -> None:
+def test_chat_returns_typed_message(mock_post: Mock) -> None:
     response = Mock()
-    response.json.return_value = {
-        "choices": [{"message": {"content": "hello"}}]
-    }
+    response.json.return_value = {"choices": [{"message": {"content": "hello"}}]}
     mock_post.return_value = response
+    result = LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi")
+    assert result.text == "hello"
+    assert mock_post.call_args.kwargs["json"]["messages"][0]["content"][0]["text"] == "Hi"
 
-    client = LLMClient(
-        ServiceEndpoint(
-            host="127.0.0.1",
-            port=8081,
-            service_type="llm",
-        )
-    )
 
-    assert client.chat("Hi") == "hello"
+@patch("core.inference.llm_client.requests.post")
+def test_chat_encodes_image_bytes(mock_post: Mock) -> None:
+    response = Mock()
+    response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+    mock_post.return_value = response
+    LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("describe", images=[("image/png", b"abc")])
+    image_item = mock_post.call_args.kwargs["json"]["messages"][0]["content"][1]
+    assert image_item["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@patch("core.inference.llm_client.requests.post")
+def test_chat_rejects_malformed_response(mock_post: Mock) -> None:
+    response = Mock()
+    response.json.return_value = {"choices": []}
+    mock_post.return_value = response
+    with pytest.raises(InferenceError):
+        LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi")

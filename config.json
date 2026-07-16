@@ -1,8 +1,49 @@
 {
-  "nodes": {},
-  "services": {},
+  "nodes": {
+    "local": {
+      "mode": "local",
+      "host": "127.0.0.1"
+    },
+    "example_remote": {
+      "mode": "remote",
+      "host": "192.168.1.20",
+      "instruction_port": 9000
+    }
+  },
+  "services": {
+    "llm": {
+      "node": "local",
+      "service_type": "llm",
+      "port": 8081,
+      "settings": {
+        "model_path": "models/model.gguf",
+        "bind_host": "0.0.0.0",
+        "startup_timeout": 600
+      }
+    },
+    "sam3": {
+      "node": "local",
+      "service_type": "sam3",
+      "port": 8090,
+      "settings": {
+        "checkpoint": "checkpoints/sam3.pt",
+        "bind_host": "0.0.0.0"
+      }
+    }
+  },
   "pipeline": {
     "sam_step": 5,
-    "run_at_source_fps": false
-  }
+    "run_at_source_fps": false,
+    "sam_resize": null,
+    "task": "Find cars",
+    "debrief": "",
+    "prompts": [],
+    "sam_confidence": 0.25,
+    "max_image_edge": 640,
+    "debug": false,
+    "record": true,
+    "panoramic": false,
+    "graph_agent": false
+  },
+  "output_root": "outputs"
 }

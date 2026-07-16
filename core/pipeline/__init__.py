@@ -1,3 +1,3 @@
-from .priority_map_adapter import PriorityMapAdapter
+from .priority_map_adapter import PipelineResult, PriorityMapAdapter
 
-__all__ = ["PriorityMapAdapter"]
+__all__ = ["PipelineResult", "PriorityMapAdapter"]

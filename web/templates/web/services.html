@@ -1,0 +1,9 @@
+{% extends 'web/base.html' %}
+{% block title %}Services | Almost ARCADIA{% endblock %}
+{% block content %}
+<h2>Inference services</h2>
+<p>Control requests use the instruction port; inference traffic goes directly to each service port.</p>
+<div class="grid"><section class="card"><h3>LLM</h3><form method="post" action="{% url 'start_service' 'llm' %}">{% csrf_token %}{{ llm_form.as_p }}<button type="submit">Start or replace LLM</button></form>{% if config.services.llm %}<form method="post" action="{% url 'stop_service' 'llm' %}">{% csrf_token %}<button class="danger" type="submit">Stop LLM :{{ config.services.llm.port }}</button></form>{% endif %}</section>
+<section class="card"><h3>SAM3</h3><form method="post" action="{% url 'start_service' 'sam3' %}">{% csrf_token %}{{ sam_form.as_p }}<button type="submit">Start or replace SAM3</button></form>{% if config.services.sam3 %}<form method="post" action="{% url 'stop_service' 'sam3' %}">{% csrf_token %}<button class="danger" type="submit">Stop SAM3 :{{ config.services.sam3.port }}</button></form>{% endif %}</section></div>
+<section class="card"><h3>Local service registry</h3><ul>{% for service in services %}<li>{{ service.service_type }} :{{ service.port }} — {{ service.running }} — <a href="{% url 'service_logs' service.port %}">logs</a></li>{% empty %}<li>No locally owned services.</li>{% endfor %}</ul>{% if log_text is not None %}<h3>Log tail for :{{ log_port }}</h3><pre>{{ log_text }}</pre>{% endif %}</section>
+{% endblock %}

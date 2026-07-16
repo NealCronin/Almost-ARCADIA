@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "almost-arcadia"
 version = "0.1.0"
-description = "Prototype orchestration UI for local and remote model services."
+description = "Trusted-network orchestration UI for direct LLM/SAM inference and Priority Map."
 requires-python = ">=3.11"
 dependencies = [
     "django>=5.1,<6",
@@ -14,18 +14,49 @@ dependencies = [
     "requests>=2.32,<3",
     "numpy>=2.0,<3",
     "opencv-python>=4.10,<5",
+    "llama-cpp-python>=0.3",
 ]
 
 [project.optional-dependencies]
+sam = ["ultralytics>=8.3"]
+pipeline = ["priority-map @ git+https://github.com/josephletobar/priority_map.git"]
 dev = [
     "pytest>=8.3,<9",
     "pytest-django>=4.9,<5",
+    "pytest-cov>=6,<7",
+    "ruff>=0.9,<1",
+    "mypy>=1.14,<2",
 ]
+all = [
+    "ultralytics>=8.3",
+    "priority-map @ git+https://github.com/josephletobar/priority_map.git",
+    "pytest>=8.3,<9",
+    "pytest-django>=4.9,<5",
+    "pytest-cov>=6,<7",
+    "ruff>=0.9,<1",
+    "mypy>=1.14,<2",
+]
+
+[project.scripts]
+arcadia-instruction-server = "core.services.instruction_server:main"
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "project.settings"
 python_files = ["test_*.py"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true
 
 [tool.setuptools.packages.find]
 include = ["core*", "web*", "project*"]

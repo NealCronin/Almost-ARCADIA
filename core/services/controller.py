@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from .specs import ServiceEndpoint, ServiceSpec
+from core.errors import ServiceError, ServiceNotRunningError, ServiceStartupError
+from core.services.llm_runtime import LLMRuntime
+from core.services.specs import ServiceEndpoint, ServiceSpec, ServiceStatus
 
 
 @dataclass(slots=True)
@@ -16,74 +18,65 @@ class RunningService:
     process: subprocess.Popen[str]
     log_path: Path
     log_handle: IO[str]
+    endpoint: ServiceEndpoint
 
 
 class ServiceController:
-    """Starts, replaces, and stops services owned by this process."""
+    """Own only subprocesses launched by this controller instance."""
 
-    def __init__(self, public_host: str = "127.0.0.1", log_dir: str = "logs") -> None:
+    def __init__(
+        self,
+        public_host: str = "127.0.0.1",
+        log_dir: str | Path = "logs",
+        *,
+        startup_timeout: float = 600.0,
+        allow_test_commands: bool = False,
+    ) -> None:
         self.public_host = public_host
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.startup_timeout = startup_timeout
+        self.allow_test_commands = allow_test_commands
         self._services: dict[int, RunningService] = {}
         self._lock = threading.RLock()
         atexit.register(self.stop_all)
 
     def start(self, spec: ServiceSpec) -> ServiceEndpoint:
         with self._lock:
+            self._reap_dead_locked()
             if spec.port in self._services:
                 self.stop(spec.port)
-
-            command = self._build_command(spec)
+            runtime = self._runtime_for(spec)
             log_path = self.log_dir / f"{spec.service_type}-{spec.port}.log"
-            log_handle = log_path.open("a", encoding="utf-8")
-
             try:
-                process = subprocess.Popen(
-                    command,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    text=True,
+                process, log_handle, endpoint = runtime.launch(
+                    spec,
+                    public_host=self.public_host,
+                    log_path=log_path,
+                    allow_test_command=self.allow_test_commands,
                 )
-            except Exception:
-                log_handle.close()
-                raise
-
-            self._services[spec.port] = RunningService(
-                spec=spec,
-                process=process,
-                log_path=log_path,
-                log_handle=log_handle,
-            )
-
-            return ServiceEndpoint(
-                host=self.public_host,
-                port=spec.port,
-                service_type=spec.service_type,
-            )
+                running = RunningService(spec, process, log_path, log_handle, endpoint)
+                self._services[spec.port] = running
+                startup_timeout = float(spec.settings.get("startup_timeout", self.startup_timeout))
+                runtime.wait_ready(process, endpoint, timeout=startup_timeout)
+                return endpoint
+            except Exception as exc:
+                if spec.port in self._services:
+                    self._stop_running_locked(spec.port)
+                if isinstance(exc, (ServiceError, ValueError, FileNotFoundError)):
+                    raise
+                raise ServiceStartupError(f"Could not start {spec.service_type} on port {spec.port}: {exc}") from exc
 
     def stop(self, port: int) -> None:
         with self._lock:
-            running = self._services.pop(port, None)
-            if running is None:
+            if port not in self._services:
                 return
-
-            process = running.process
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-            finally:
-                running.log_handle.close()
+            self._stop_running_locked(port)
 
     def stop_all(self) -> None:
         with self._lock:
             for port in list(self._services):
-                self.stop(port)
+                self._stop_running_locked(port)
 
     def is_running(self, port: int) -> bool:
         with self._lock:
@@ -91,87 +84,60 @@ class ServiceController:
             if running is None:
                 return False
             if running.process.poll() is not None:
-                self._services.pop(port, None)
-                running.log_handle.close()
+                self._stop_running_locked(port)
                 return False
             return True
 
-    def list_services(self) -> list[dict[str, object]]:
+    def list_services(self) -> list[ServiceStatus]:
         with self._lock:
-            result: list[dict[str, object]] = []
-            for port, running in list(self._services.items()):
-                result.append(
-                    {
-                        "port": port,
-                        "service_type": running.spec.service_type,
-                        "running": self.is_running(port),
-                        "settings": dict(running.spec.settings),
-                        "log_path": str(running.log_path),
-                    }
+            self._reap_dead_locked()
+            return [
+                ServiceStatus(
+                    port=running.spec.port,
+                    service_type=running.spec.service_type,
+                    running=running.process.poll() is None,
+                    settings=dict(running.spec.settings),
+                    log_path=str(running.log_path),
                 )
-            return result
+                for running in self._services.values()
+            ]
 
-    def _build_command(self, spec: ServiceSpec) -> list[str]:
-        settings = spec.settings
+    def get_logs(self, port: int, tail: int = 200) -> str:
+        with self._lock:
+            running = self._services.get(port)
+            if running is None:
+                raise ServiceNotRunningError(f"No owned service is registered on port {port}.")
+            try:
+                lines = running.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError as exc:
+                raise ServiceError(f"Could not read service log: {exc}") from exc
+            return "\n".join(lines[-max(1, min(tail, 5000)) :])
 
-        if "command" in settings:
-            command = settings["command"]
-            if not isinstance(command, list) or not all(
-                isinstance(item, str) for item in command
-            ):
-                raise ValueError("'command' must be a list of strings.")
-            return list(command)
-
+    def _runtime_for(self, spec: ServiceSpec):
         if spec.service_type == "llm":
-            executable = str(settings.get("executable", "llama-server"))
-            command = [
-                executable,
-                "--host",
-                str(settings.get("bind_host", "0.0.0.0")),
-                "--port",
-                str(spec.port),
-            ]
-
-            hf_repo = settings.get("hf_repo")
-            hf_file = settings.get("hf_file")
-            model_path = settings.get("model_path")
-
-            if hf_repo and hf_file:
-                command.extend(["--hf-repo", str(hf_repo), "--hf-file", str(hf_file)])
-            elif model_path:
-                command.extend(["--model", str(model_path)])
-            else:
-                raise ValueError(
-                    "LLM service requires either hf_repo + hf_file or model_path."
-                )
-
-            extra_args = settings.get("extra_args", [])
-            if not isinstance(extra_args, list):
-                raise ValueError("'extra_args' must be a list.")
-            command.extend(str(item) for item in extra_args)
-            return command
-
+            return LLMRuntime
         if spec.service_type == "sam3":
-            script = settings.get("script")
-            checkpoint = settings.get("checkpoint")
-            if not script or not checkpoint:
-                raise ValueError("SAM3 service requires script and checkpoint settings.")
+            from core.services.sam_runtime import SAMRuntime
 
-            executable = str(settings.get("python_executable", "python"))
-            command = [
-                executable,
-                str(script),
-                "--host",
-                str(settings.get("bind_host", "0.0.0.0")),
-                "--port",
-                str(spec.port),
-                "--checkpoint",
-                str(checkpoint),
-            ]
-            extra_args = settings.get("extra_args", [])
-            if not isinstance(extra_args, list):
-                raise ValueError("'extra_args' must be a list.")
-            command.extend(str(item) for item in extra_args)
-            return command
-
+            return SAMRuntime
         raise ValueError(f"Unsupported service type: {spec.service_type}")
+
+    def _stop_running_locked(self, port: int) -> None:
+        running = self._services.pop(port, None)
+        if running is None:
+            return
+        try:
+            if running.process.poll() is None:
+                running.process.terminate()
+                try:
+                    running.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    running.process.kill()
+                    running.process.wait(timeout=5)
+        finally:
+            running.log_handle.close()
+
+    def _reap_dead_locked(self) -> None:
+        for port, running in list(self._services.items()):
+            if running.process.poll() is not None:
+                self._stop_running_locked(port)

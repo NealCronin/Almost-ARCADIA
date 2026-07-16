@@ -1,0 +1,3 @@
+{% extends 'web/base.html' %}
+{% block title %}Endpoint test | Almost ARCADIA{% endblock %}
+{% block content %}<h2>Direct LLM endpoint test</h2><section class="card"><form method="post" action="{% url 'run_endpoint_test' %}">{% csrf_token %}{{ form.as_p }}<button type="submit">Send directly</button></form>{% if response_text %}<h3>Response</h3><pre>{{ response_text }}</pre>{% endif %}</section>{% endblock %}

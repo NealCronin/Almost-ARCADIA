@@ -1,0 +1,24 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Almost ARCADIA{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'web/app.css' %}">
+</head>
+<body>
+<header><h1>Almost ARCADIA</h1><nav>
+  <a href="{% url 'home' %}">Dashboard</a>
+  <a href="{% url 'nodes' %}">Nodes</a>
+  <a href="{% url 'services' %}">Services</a>
+  <a href="{% url 'analysis' %}">Analysis</a>
+  <a href="{% url 'results' %}">Results</a>
+  <a href="{% url 'endpoint_test' %}">Endpoint test</a>
+</nav></header>
+<main>
+{% if messages %}<section class="messages">{% for message in messages %}<p class="message {{ message.tags }}">{{ message }}</p>{% endfor %}</section>{% endif %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

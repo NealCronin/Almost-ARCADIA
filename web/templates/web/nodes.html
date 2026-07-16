@@ -1,0 +1,7 @@
+{% extends 'web/base.html' %}
+{% block title %}Nodes | Almost ARCADIA{% endblock %}
+{% block content %}
+<h2>Compute nodes</h2>
+<p>Nodes are trusted LAN/VPN hosts. Remote nodes require an instruction server.</p>
+{% for name, form in node_forms.items %}<section class="card"><h3>{{ name }}</h3><form method="post" action="{% url 'save_node' name %}">{% csrf_token %}{{ form.as_p }}<button type="submit">Save node</button></form></section>{% endfor %}
+{% endblock %}

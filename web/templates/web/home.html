@@ -1,33 +1,10 @@
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <title>Almost ARCADIA</title>
-    <style>
-        body { max-width: 900px; margin: 2rem auto; font-family: sans-serif; }
-        form { border: 1px solid #ccc; padding: 1rem; margin-bottom: 2rem; }
-        textarea { width: 100%; min-height: 8rem; }
-        pre { white-space: pre-wrap; }
-    </style>
-</head>
-<body>
-    <h1>Almost ARCADIA Prototype</h1>
-
-    {% if message %}<p><strong>{{ message }}</strong></p>{% endif %}
-    {% if response %}<pre>{{ response }}</pre>{% endif %}
-
-    <h2>Start service</h2>
-    <form method="post">
-        {% csrf_token %}
-        {{ service_form.as_p }}
-        <button name="action" value="start">Start</button>
-    </form>
-
-    <h2>Test LLM endpoint</h2>
-    <form method="post">
-        {% csrf_token %}
-        {{ prompt_form.as_p }}
-        <button name="action" value="prompt">Send prompt</button>
-    </form>
-</body>
-</html>
+{% extends 'web/base.html' %}
+{% block title %}Dashboard | Almost ARCADIA{% endblock %}
+{% block content %}
+<h2>Dashboard</h2>
+<div class="grid">
+<section class="card"><h3>Nodes</h3><ul>{% for name, node in config.nodes.items %}<li><strong>{{ name }}</strong>: {{ node.mode }} at {{ node.host }}</li>{% empty %}<li>No nodes configured.</li>{% endfor %}</ul><a class="button" href="{% url 'nodes' %}">Configure nodes</a></section>
+<section class="card"><h3>Owned local services</h3><ul>{% for service in services %}<li>{{ service.service_type }} :{{ service.port }} — {% if service.running %}running{% else %}stopped{% endif %}</li>{% empty %}<li>No local services.</li>{% endfor %}</ul><a class="button" href="{% url 'services' %}">Manage services</a></section>
+<section class="card"><h3>Analysis</h3><p class="state {{ analysis.state }}">{{ analysis.state }}</p><p>{{ analysis.message }}</p><a class="button" href="{% url 'analysis' %}">Configure analysis</a></section>
+</div>
+{% endblock %}
