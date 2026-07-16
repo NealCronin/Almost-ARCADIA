@@ -10,6 +10,7 @@ venv/
 .coverage
 htmlcov/
 db.sqlite3
+config.json
 *.log
 logs/
 outputs/
