@@ -129,11 +129,19 @@ class SAMRuntime:
 
     @classmethod
     def wait_ready(
-        cls, process: subprocess.Popen[str], endpoint: ServiceEndpoint, *, timeout: float, poll_interval: float = 0.5
+        cls,
+        process: subprocess.Popen[str],
+        endpoint: ServiceEndpoint,
+        *,
+        timeout: float,
+        poll_interval: float = 0.5,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         deadline = time.monotonic() + timeout
         last_error = "service is still loading"
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ServiceStartupError("SAM3 startup cancelled.")
             if process.poll() is not None:
                 raise ServiceStartupError(f"SAM3 process exited during startup with code {process.returncode}.")
             try:
@@ -143,7 +151,12 @@ class SAMRuntime:
                 last_error = f"readiness returned HTTP {response.status_code}"
             except requests.RequestException as exc:
                 last_error = str(exc)
-            time.sleep(poll_interval)
+            remaining = deadline - time.monotonic()
+            if cancel_event is not None:
+                if cancel_event.wait(min(poll_interval, max(0.0, remaining))):
+                    raise ServiceStartupError("SAM3 startup cancelled.")
+            else:
+                time.sleep(poll_interval)
         raise ServiceStartupError(f"SAM3 readiness timed out: {last_error}")
 
     @classmethod

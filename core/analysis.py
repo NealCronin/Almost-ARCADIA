@@ -123,10 +123,17 @@ class AnalysisCoordinator:
             if self._status.state not in ("starting", "running", "cancelling"):
                 raise AnalysisError("No active analysis can be cancelled.")
             if self._status.state != "cancelling":
+                stage = self._status.stage
+                if stage == "preparing_input":
+                    message = "Cancelling after current preparation step"
+                elif stage in ("validating", "starting_llm", "starting_sam3"):
+                    message = "Cancelling after current startup step"
+                else:
+                    message = "Cancelling after current frame"
                 self._cancel_event.set()
                 self._status.state = "cancelling"
                 self._status.stage = "cancelling"
-                self._status.message = "Cancelling after current frame"
+                self._status.message = message
                 self._preview_condition.notify_all()
             return self.status()
 
@@ -164,17 +171,31 @@ class AnalysisCoordinator:
         with log_path.open("a", encoding="utf-8") as log:
             try:
                 self._set_status(stage="validating", message="Validating run")
+                if self._cancelled_checkpoint(output_directory):
+                    return
                 self._write_effective_settings(config, input_path, output_directory, run_id)
+                if self._cancelled_checkpoint(output_directory):
+                    return
                 self._log(log, "analysis starting")
                 self._set_status(stage="starting_llm", message="Starting LLM service")
-                llm_endpoint = self._ensure_service("llm", config)
+                llm_endpoint = self._ensure_service("llm", config, output_directory)
+                if self._cancelled_checkpoint(output_directory):
+                    return
                 self._set_status(stage="starting_sam3", message="Starting SAM3 service")
-                sam_endpoint = self._ensure_service("sam3", config)
+                if self._cancelled_checkpoint(output_directory):
+                    return
+                sam_endpoint = self._ensure_service("sam3", config, output_directory)
+                if self._cancelled_checkpoint(output_directory):
+                    return
+                if self._cancelled_checkpoint(output_directory):
+                    return
                 self._set_status(state="running", stage="preparing_input", message="Preparing input")
                 settings = config.priority_map.pipeline.to_dict()
                 settings["output_directory"] = str(output_directory)
                 settings["input_path"] = input_path
                 self._set_status(stage="priority_map", message="Running Priority Map")
+                if self._cancelled_checkpoint(output_directory):
+                    return
                 result = self._run_adapter(input_path, output_directory, llm_endpoint, sam_endpoint, settings)
                 self._set_status(stage="finalizing", message="Finalizing output")
                 if self._cancel_event.is_set():
@@ -225,11 +246,15 @@ class AnalysisCoordinator:
                     (exc.service_type,) if isinstance(exc, InferenceError) and exc.service_type else ("llm", "sam3")
                 )
                 for service_name in service_names:
-                    self._endpoints[service_name] = self._ensure_service(service_name, self._config or AppConfig())
+                    if self._cancelled_checkpoint(output_directory):
+                        raise ServiceError("Analysis cancelled before service restart.") from exc
+                    self._endpoints[service_name] = self._ensure_service(
+                        service_name, self._config or AppConfig(), output_directory
+                    )
                 llm_endpoint = self._endpoints["llm"]
                 sam_endpoint = self._endpoints["sam3"]
 
-    def _ensure_service(self, name: str, config: AppConfig) -> ServiceEndpoint:
+    def _ensure_service(self, name: str, config: AppConfig, output_directory: Path) -> ServiceEndpoint:
         configured = config.priority_map.services.get(name)
         if configured is None:
             raise AnalysisError(f"Required service configuration is missing: {name}")
@@ -238,33 +263,51 @@ class AnalysisCoordinator:
             raise AnalysisError(f"Service {name} references unknown node {configured.node!r}")
         if node.mode == "local":
             # ServiceController.start() waits on the direct service data plane.
-            endpoint = self.controller.start(configured.spec)
+            endpoint = self.controller.start(configured.spec, cancel_event=self._cancel_event)
         else:
             if node.instruction_port is None:
                 raise AnalysisError(f"Remote node {configured.node!r} has no instruction port")
+            if self._cancelled_checkpoint(output_directory):
+                raise ServiceError("Analysis cancelled before remote service startup.")
             endpoint = InstructionClient(node.host, node.instruction_port).start_service(configured.spec)
-            self._wait_ready(endpoint, float(configured.settings.get("startup_timeout", 600)))
+            if self._cancelled_checkpoint(output_directory):
+                raise ServiceError("Analysis cancelled after remote service startup.")
+            self._wait_ready(
+                endpoint,
+                float(configured.settings.get("startup_timeout", 600)),
+                cancel_event=self._cancel_event,
+            )
         self._endpoints[name] = endpoint
         return endpoint
 
     @staticmethod
-    def _wait_ready(endpoint: ServiceEndpoint, timeout: float) -> None:
+    def _wait_ready(endpoint: ServiceEndpoint, timeout: float, *, cancel_event: threading.Event | None = None) -> None:
         path = "/v1/models" if endpoint.service_type == "llm" else "/health"
         deadline = time.monotonic() + max(1.0, timeout)
         while True:
-            try:
-                response = requests.get(
-                    f"{endpoint.base_url}{path}", timeout=min(2.0, max(0.1, deadline - time.monotonic()))
+            if cancel_event is not None and cancel_event.is_set():
+                raise ServiceError(f"{endpoint.service_type} startup cancelled.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ServiceError(
+                    f"Timed out waiting for {endpoint.service_type} readiness at {endpoint.base_url}{path}"
                 )
+            try:
+                response = requests.get(f"{endpoint.base_url}{path}", timeout=min(2.0, max(0.1, remaining)))
                 if response.status_code == 200:
                     return
             except requests.RequestException:
                 pass
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise ServiceError(
                     f"Timed out waiting for {endpoint.service_type} readiness at {endpoint.base_url}{path}"
                 )
-            time.sleep(0.1)
+            if cancel_event is not None:
+                if cancel_event.wait(min(0.1, remaining)):
+                    raise ServiceError(f"{endpoint.service_type} startup cancelled.")
+            else:
+                time.sleep(min(0.1, remaining))
 
     def _write_effective_settings(
         self, config: AppConfig, input_path: str, output_directory: Path, run_id: str
@@ -285,8 +328,11 @@ class AnalysisCoordinator:
     def _progress(self, progress: dict[str, Any]) -> None:
         with self._lock:
             self._status.frames_processed = int(progress.get("frames_processed", self._status.frames_processed) or 0)
-            frame_index = progress.get("frame_index")
-            self._status.message = f"Processed frame {frame_index}" if frame_index is not None else "Processing frames"
+            if self._status.state != "cancelling":
+                frame_index = progress.get("frame_index")
+                self._status.message = (
+                    f"Processed frame {frame_index}" if frame_index is not None else "Processing frames"
+                )
 
     def _publish_preview(self, jpeg: bytes) -> None:
         with self._preview_condition:
@@ -300,9 +346,18 @@ class AnalysisCoordinator:
                 setattr(self._status, key, value)
             self._preview_condition.notify_all()
 
+    def _cancelled_checkpoint(self, output_directory: Path) -> bool:
+        if not self._cancel_event.is_set():
+            return False
+        self._finish_cancelled(output_directory)
+        return True
+
     def _finish_completed(self, result: PipelineResult, log: Any) -> None:
         self._log(log, "analysis completed")
         with self._preview_condition:
+            if self._cancel_event.is_set():
+                self._finish_cancelled(Path(result.output_directory), result.frames_processed)
+                return
             self._status.state = "completed"
             self._status.stage = "finalizing"
             self._status.message = "Analysis completed"

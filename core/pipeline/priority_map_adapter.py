@@ -46,6 +46,8 @@ class _RemoteSceneUnderstanding:
         prompt = (
             "Return only JSON with this shape: "
             '{"labels":{"label":{"reasoning":"short reason","score":0,"edges":[]}}}. '
+            "For every label, score must be a numeric 0–100 mission-relevance score for the task, "
+            "not SAM, detection, or visual confidence. "
             f"Task: {task}. Recent graph context: {json.dumps(recent_graph_context or {})}"
         )
         response = self.llm_client.chat(prompt, images=[("image/jpeg", encoded.tobytes())], model=self.model)
@@ -227,6 +229,8 @@ class _RemoteSegment:
                     mask=mask,
                     label=label,
                     id="",
+                    # Priority Map defines this as scene_dict[label]["score"], a semantic priority score,
+                    # not SAM confidence.
                     score=self._score_for(label, scene_dict),
                     centroid=centroid,
                     geo_pos=None,
@@ -272,7 +276,14 @@ class PriorityMapAdapter:
         output_path.mkdir(parents=True, exist_ok=True)
         settings = dict(pipeline_settings or {})
         input_source = Path(input_path)
-        image_folder = self._prepare_input(input_source, output_path)
+        image_folder = self._prepare_input(input_source, output_path, cancel_event=cancel_event)
+        if image_folder is None or (cancel_event is not None and cancel_event.is_set()):
+            return PipelineResult(
+                str(output_path),
+                None,
+                [str(path) for path in output_path.rglob("*") if path.is_file()],
+                0,
+            )
         source_fps = self._source_fps(input_source)
         runner = self._make_runner(
             image_folder=image_folder,
@@ -285,7 +296,6 @@ class PriorityMapAdapter:
             result = self._run_runner(
                 runner,
                 progress_callback,
-                image_folder=image_folder,
                 cancel_event=cancel_event,
                 preview_callback=preview_callback,
                 run_at_source_fps=bool(settings.get("run_at_source_fps", False)),
@@ -379,7 +389,6 @@ class PriorityMapAdapter:
         runner: Any,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         *,
-        image_folder: Path,
         cancel_event: threading.Event | None,
         preview_callback: Callable[[bytes], None] | None,
         run_at_source_fps: bool,
@@ -399,19 +408,11 @@ class PriorityMapAdapter:
                         }
                     )
                 if preview_callback:
-                    image_name = getattr(frame_result, "image_name", None)
-                    if image_name:
-                        candidate = image_folder / Path(str(image_name)).name
-                        if candidate.is_file():
-                            raw = candidate.read_bytes()
-                            if candidate.suffix.lower() in {".jpg", ".jpeg"}:
-                                preview_callback(raw)
-                            else:
-                                image = cv2.imread(str(candidate))
-                                if image is not None:
-                                    ok, encoded = cv2.imencode(".jpg", image)
-                                    if ok:
-                                        preview_callback(encoded.tobytes())
+                    output_frame = getattr(frame_result, "output_frame", None)
+                    if output_frame is not None:
+                        ok, encoded = cv2.imencode(".jpg", output_frame)
+                        if ok:
+                            preview_callback(encoded.tobytes())
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 if not getattr(frame_result, "keep_running", True):
@@ -444,7 +445,11 @@ class PriorityMapAdapter:
         return fps if fps > 0 else None
 
     @staticmethod
-    def _prepare_input(input_path: Path, output_path: Path) -> Path:
+    def _prepare_input(
+        input_path: Path, output_path: Path, *, cancel_event: threading.Event | None = None
+    ) -> Path | None:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if input_path.is_dir():
             return input_path
         if not input_path.exists():
@@ -452,6 +457,8 @@ class PriorityMapAdapter:
         frames_dir = output_path / "input_frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         if input_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             shutil.copy2(input_path, frames_dir / input_path.name)
             return frames_dir
         capture = cv2.VideoCapture(str(input_path))
@@ -460,12 +467,16 @@ class PriorityMapAdapter:
         index = 0
         try:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
                 ok, frame = capture.read()
                 if not ok:
                     break
                 if not cv2.imwrite(str(frames_dir / f"frame_{index:06d}.jpg"), frame):
                     raise AnalysisError(f"Could not write extracted frame {index}")
                 index += 1
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
         finally:
             capture.release()
         if index == 0:

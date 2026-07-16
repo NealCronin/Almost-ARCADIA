@@ -105,7 +105,10 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
                 status=400,
             )
         spec = form.to_spec()
-        config.priority_map.services[service_name] = ConfiguredService(node=form.cleaned_data["node"], spec=spec)
+        previous = config.priority_map.services.get(service_name)
+        config.priority_map.services[service_name] = ConfiguredService(
+            node=form.cleaned_data["node"], spec=spec, extra=previous.extra if previous else {}
+        )
         runtime.config_store.save(config)
         messages.success(
             request, f"Saved {service_name.upper()} settings. Priority Map starts configured services for a run."
@@ -153,19 +156,26 @@ def service_logs(request: HttpRequest, port: int) -> HttpResponse:
         return HttpResponse(str(exc), status=502, content_type="text/plain")
 
 
+def _host_context(
+    config: Any,
+    *,
+    node_name_form: NodeNameForm | None = None,
+    overridden_node_forms: dict[str, NodeForm] | None = None,
+) -> dict[str, Any]:
+    forms = {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()}
+    forms.update(overridden_node_forms or {})
+    return {
+        "config": config,
+        "node_forms": forms,
+        "node_name_form": node_name_form or NodeNameForm(),
+    }
+
+
 @require_GET
 def nodes(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
     config = runtime.config_store.load()
-    return render(
-        request,
-        "web/nodes.html",
-        {
-            "config": config,
-            "node_forms": {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()},
-            "node_name_form": NodeNameForm(),
-        },
-    )
+    return render(request, "web/nodes.html", _host_context(config))
 
 
 @require_POST
@@ -176,20 +186,11 @@ def create_node(request: HttpRequest) -> HttpResponse:
         config = runtime.config_store.load()
         form = NodeNameForm(request.POST)
         if not form.is_valid():
-            return render(
-                request,
-                "web/nodes.html",
-                {
-                    "config": config,
-                    "node_forms": {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()},
-                    "node_name_form": form,
-                },
-                status=400,
-            )
+            return render(request, "web/nodes.html", _host_context(config, node_name_form=form), status=400)
         name = form.cleaned_data["name"]
         if name in config.nodes:
             form.add_error("name", "A host with that name already exists.")
-            return render(request, "web/nodes.html", {"config": config, "node_name_form": form}, status=400)
+            return render(request, "web/nodes.html", _host_context(config, node_name_form=form), status=400)
         config.nodes[name] = NodeConfig(mode="remote", host="127.0.0.1", instruction_port=9000)
         runtime.config_store.save(config)
         messages.success(request, f"Created host {name}.")
@@ -201,28 +202,27 @@ def create_node(request: HttpRequest) -> HttpResponse:
 @require_POST
 def save_node(request: HttpRequest, node_name: str) -> HttpResponse:
     runtime = get_runtime()
+    config = runtime.config_store.load()
+    if node_name not in config.nodes:
+        return HttpResponse("Host not found.", status=404)
+    form = NodeForm(request.POST)
     try:
         runtime.analysis.assert_configuration_mutable()
-        config = runtime.config_store.load()
-        if node_name not in config.nodes:
-            return HttpResponse("Host not found.", status=404)
-        form = NodeForm(request.POST)
         if not form.is_valid():
             return render(
                 request,
                 "web/nodes.html",
-                {
-                    "config": config,
-                    "node_forms": {node_name: form},
-                    "node_name_form": NodeNameForm(),
-                },
+                _host_context(config, overridden_node_forms={node_name: form}),
                 status=400,
             )
         if node_name == "local":
             if form.cleaned_data["mode"] != "local":
                 form.add_error("mode", "This computer must remain local.")
                 return render(
-                    request, "web/nodes.html", {"config": config, "node_forms": {node_name: form}}, status=400
+                    request,
+                    "web/nodes.html",
+                    _host_context(config, overridden_node_forms={node_name: form}),
+                    status=400,
                 )
             config.nodes["local"] = NodeConfig(mode="local", host=form.cleaned_data["host"])
         else:
@@ -230,13 +230,22 @@ def save_node(request: HttpRequest, node_name: str) -> HttpResponse:
             if node.mode != "remote":
                 form.add_error("mode", "Configured hosts must remain remote.")
                 return render(
-                    request, "web/nodes.html", {"config": config, "node_forms": {node_name: form}}, status=400
+                    request,
+                    "web/nodes.html",
+                    _host_context(config, overridden_node_forms={node_name: form}),
+                    status=400,
                 )
             config.nodes[node_name] = node
         runtime.config_store.save(config)
         messages.success(request, f"Saved host {node_name}.")
     except (ArcadiaError, ValueError) as exc:
-        messages.error(request, str(exc))
+        form.add_error(None, str(exc))
+        return render(
+            request,
+            "web/nodes.html",
+            _host_context(config, overridden_node_forms={node_name: form}),
+            status=400,
+        )
     return redirect("host")
 
 
@@ -352,12 +361,16 @@ def uploads(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"upload": _upload_payload(manifest)}, status=201)
 
 
-@require_http_methods(["DELETE", "POST"])
+@require_POST
 def delete_upload(request: HttpRequest, upload_id: str) -> JsonResponse:
-    if request.method == "POST" and request.GET.get("_method") != "DELETE":
-        return JsonResponse({"detail": "Use DELETE."}, status=405)
+    runtime = get_runtime()
     try:
-        get_runtime().uploads.delete(upload_id)
+        input_path = runtime.uploads.input_path(upload_id)
+        analysis = runtime.analysis
+        active_input = analysis.status().input_path
+        if analysis.is_active() and active_input and input_path.resolve() == Path(active_input).resolve():
+            return JsonResponse({"detail": "Cannot delete the upload used by the active run."}, status=409)
+        runtime.uploads.delete(upload_id)
     except FileNotFoundError:
         return JsonResponse({"detail": "Upload not found."}, status=404)
     except (ArcadiaError, ValueError, OSError) as exc:
@@ -373,7 +386,7 @@ def _upload_payload(manifest: dict[str, Any]) -> dict[str, Any]:
         "file_count": manifest["file_count"],
         "size_bytes": manifest["size_bytes"],
         "created_at": manifest["created_at"],
-        "delete_url": f"/client/priority-map/uploads/{upload_id}/",
+        "delete_url": f"/client/priority-map/uploads/{upload_id}/delete/",
     }
 
 

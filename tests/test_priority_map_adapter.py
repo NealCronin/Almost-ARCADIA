@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
 from core.errors import AnalysisError
-from core.inference.results import SegmentationResult
-from core.pipeline.priority_map_adapter import PriorityMapAdapter, _RemoteSegment
+from core.inference.results import LLMResult, SegmentationResult
+from core.pipeline.priority_map_adapter import PriorityMapAdapter, _RemoteSceneUnderstanding, _RemoteSegment
 
 
 @dataclass
@@ -30,6 +32,28 @@ class FakeRunner:
 
     def close(self):
         self.closed = True
+
+
+class FrameRunner(FakeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.has_frames = True
+
+    def has_next(self) -> bool:
+        return self.has_frames
+
+    def run_frame(self):
+        self.has_frames = False
+        self.frames_processed = 1
+        return types.SimpleNamespace(
+            frame_index=0,
+            image_name="source.jpg",
+            output_frame=np.full((8, 8, 3), (0, 0, 255), dtype=np.uint8),
+            keep_running=False,
+        )
+
+    def result(self):
+        return FakeResult(frames_processed=self.frames_processed)
 
 
 @dataclass
@@ -57,6 +81,16 @@ class FakeSAMClient:
     def segment(self, image, prompts, confidence, *, resize):
         self.calls.append({"image": image, "prompts": prompts, "confidence": confidence, "resize": resize})
         return self.results.pop(0)
+
+
+class FakeLLMClient:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.prompts: list[str] = []
+
+    def chat(self, prompt, **_):
+        self.prompts.append(prompt)
+        return LLMResult(self.response)
 
 
 def install_segment_types(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,6 +134,17 @@ def test_remote_segment_first_sam_frame_replaces_segmentations(monkeypatch: pyte
     assert remote.prev_gray is not None
     assert result.flow_transform == (0.0, 0.0)
     assert len(remote.sam_client.calls) == 1
+
+
+def test_scene_understanding_requests_and_retains_semantic_score() -> None:
+    client = FakeLLMClient('{"labels":{"car":{"reasoning":"mission target","score":87,"edges":[]}}}')
+
+    result = _RemoteSceneUnderstanding(client).get_labels(image(), "Find mission targets")
+
+    assert result is not None
+    assert result.labels["car"]["score"] == 87.0
+    assert "numeric 0–100 mission-relevance score" in client.prompts[0]
+    assert "not SAM, detection, or visual confidence" in client.prompts[0]
 
 
 def test_remote_segment_propagates_non_sam_frame_without_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,6 +259,82 @@ def test_adapter_restores_priority_map_symbols_after_construction(
     assert callable(runner.segment)
     assert runner_module.SceneUnderstanding is old_scene
     assert runner_module.Segment is old_segment
+
+
+def test_adapter_preview_uses_rendered_runner_frame(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    cv2.imwrite(str(source / "source.jpg"), np.full((8, 8, 3), (255, 0, 0), dtype=np.uint8))
+    previews: list[bytes] = []
+
+    result = PriorityMapAdapter(FrameRunner).run(
+        input_path=str(source),
+        output_directory=str(tmp_path / "output"),
+        llm_client=object(),
+        sam_client=object(),
+        preview_callback=previews.append,
+    )
+
+    decoded = cv2.imdecode(np.frombuffer(previews[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert result.frames_processed == 1
+    assert len(previews) == 1
+    assert decoded is not None
+    assert decoded[0, 0, 2] > 240
+    assert decoded[0, 0, 0] < 15
+
+
+def test_adapter_cancellation_during_video_preparation_keeps_partial_frames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "input.mp4"
+    source.write_bytes(b"video")
+    cancelled = threading.Event()
+    created: list[Path] = []
+
+    class Capture:
+        released = False
+
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self):
+            return True, np.zeros((2, 2, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = Capture()
+
+    def write_frame(path: str, _frame: np.ndarray) -> bool:
+        frame_path = Path(path)
+        frame_path.write_bytes(b"frame")
+        created.append(frame_path)
+        cancelled.set()
+        return True
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _: capture)
+    monkeypatch.setattr(cv2, "imwrite", write_frame)
+    factory_called = False
+
+    def factory(**_):
+        nonlocal factory_called
+        factory_called = True
+        return FakeRunner()
+
+    result = PriorityMapAdapter(factory).run(
+        input_path=str(source),
+        output_directory=str(tmp_path / "output"),
+        llm_client=object(),
+        sam_client=object(),
+        cancel_event=cancelled,
+    )
+
+    assert capture.released
+    assert not factory_called
+    assert result.result is None
+    assert result.frames_processed == 0
+    assert created == [tmp_path / "output" / "input_frames" / "frame_000000.jpg"]
+    assert created[0].is_file()
 
 
 def test_adapter_restores_priority_map_symbols_after_constructor_failure(

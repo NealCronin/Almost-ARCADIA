@@ -41,8 +41,10 @@ class ServiceController:
         self._lock = threading.RLock()
         atexit.register(self.stop_all)
 
-    def start(self, spec: ServiceSpec) -> ServiceEndpoint:
+    def start(self, spec: ServiceSpec, *, cancel_event: threading.Event | None = None) -> ServiceEndpoint:
         with self._lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ServiceStartupError(f"{spec.service_type} startup cancelled.")
             self._reap_dead_locked()
             replacing = spec.port in self._services
             if replacing:
@@ -59,7 +61,7 @@ class ServiceController:
                 running = RunningService(spec, process, log_path, log_handle, endpoint)
                 self._services[spec.port] = running
                 startup_timeout = float(spec.settings.get("startup_timeout", self.startup_timeout))
-                runtime.wait_ready(process, endpoint, timeout=startup_timeout)
+                runtime.wait_ready(process, endpoint, timeout=startup_timeout, cancel_event=cancel_event)
                 return endpoint
             except Exception as exc:
                 if spec.port in self._services:

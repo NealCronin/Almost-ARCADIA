@@ -79,14 +79,29 @@
       const row = document.createElement('div');
       row.className = 'artifact-row';
       const title = document.createElement('span');
-      title.textContent = `${upload.source_type}: ${upload.file_count} file${upload.file_count === 1 ? '' : 's'} (${upload.size_bytes} bytes)`;
+      title.textContent = `${upload.source_type}: ${upload.file_count} file${upload.file_count === 1 ? '' : 's'}, ${upload.size_bytes} bytes, ${upload.created_at}`;
+      const run = document.createElement('button');
+      run.type = 'button'; run.className = 'button button--ghost'; run.textContent = 'Run';
+      run.addEventListener('click', () => submitRetainedUpload(upload.id, stageButton?.dataset.runUrl));
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'text-button'; remove.textContent = 'Delete';
       remove.addEventListener('click', async () => {
-        await fetch(`${upload.delete_url}?_method=DELETE`, {method: 'POST', headers: {'X-CSRFToken': csrfToken()}});
-        loadUploads();
+        try {
+          const response = await fetch(upload.delete_url, {
+            method: 'POST',
+            headers: {'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            if (progressText) { progressText.hidden = false; progressText.textContent = data.detail || 'Delete failed.'; }
+            return;
+          }
+          loadUploads();
+        } catch (_) {
+          if (progressText) { progressText.hidden = false; progressText.textContent = 'Delete failed.'; }
+        }
       });
-      row.append(title, remove);
+      row.append(title, run, remove);
       return row;
     }));
   };
@@ -128,9 +143,13 @@
     xhr.onload = () => {
       stageButton.disabled = false;
       if (xhr.status < 200 || xhr.status >= 300) { progressText.textContent = 'Upload failed.'; return; }
-      const upload = JSON.parse(xhr.responseText).upload;
+      selectedFiles = [];
+      if (fileInput) fileInput.value = '';
+      if (folderInput) folderInput.value = '';
+      renderFiles();
       loadUploads();
-      submitRetainedUpload(upload.id, stageButton.dataset.runUrl);
+      progressText.hidden = false;
+      progressText.textContent = 'Upload staged. Choose Run when ready.';
     };
     xhr.onerror = () => { stageButton.disabled = false; progressText.textContent = 'Upload failed.'; };
     xhr.send(data);
@@ -161,7 +180,12 @@
       }));
     };
     const updateStream = (data) => {
-      if (!streamFrame || !data.stream_url) return;
+      if (!streamFrame) return;
+      if (data.state === 'idle' && !data.run_id) {
+        streamFrame.textContent = 'No in-memory run is available. Django may have restarted; previously generated artifacts remain on disk.';
+        return;
+      }
+      if (!data.stream_url) return;
       let image = qs('img', streamFrame);
       if (!image) { image = document.createElement('img'); image.alt = 'Latest Priority Map preview'; streamFrame.replaceChildren(image); }
       if (image.dataset.streamUrl !== data.stream_url) { image.dataset.streamUrl = data.stream_url; image.src = data.stream_url; }
@@ -183,7 +207,9 @@
         if (messageElement) messageElement.textContent = data.error || data.message || 'Ready';
         if (framesElement) framesElement.textContent = data.frames_processed ?? 0;
         if (errorElement) { errorElement.hidden = !data.error; errorElement.textContent = data.error || ''; }
-        updateCancelButtons(data); updateStream(data); renderArtifacts(data.artifacts_url);
+        updateCancelButtons(data);
+        updateStream(data);
+        if (!(data.state === 'idle' && !data.run_id)) renderArtifacts(data.artifacts_url);
         if (!terminal.has(data.state)) window.setTimeout(refresh, 1200);
       } catch (_) { window.setTimeout(refresh, 2500); }
     };

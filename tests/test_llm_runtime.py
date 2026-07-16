@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -82,3 +83,26 @@ def test_wait_ready_reports_dead_child() -> None:
     process.returncode = 3
     with pytest.raises(ServiceStartupError):
         LLMRuntime.wait_ready(process, ServiceEndpoint("127.0.0.1", 8081, "llm"), timeout=1, poll_interval=0)
+
+
+@patch("core.services.llm_runtime.LLMRuntime.probe")
+def test_wait_ready_wakes_when_cancelled_between_probes(mock_probe: Mock) -> None:
+    process = Mock()
+    process.poll.return_value = None
+    cancelled = threading.Event()
+
+    def non_ready(*_, **__):
+        cancelled.set()
+        return Mock(status_code=503)
+
+    mock_probe.side_effect = non_ready
+    with pytest.raises(ServiceStartupError, match="LLM startup cancelled"):
+        LLMRuntime.wait_ready(
+            process,
+            ServiceEndpoint("127.0.0.1", 8081, "llm"),
+            timeout=30,
+            poll_interval=30,
+            cancel_event=cancelled,
+        )
+
+    mock_probe.assert_called_once()

@@ -9,7 +9,7 @@ import pytest
 
 from core.analysis import AnalysisCoordinator
 from core.config import AppConfig, ConfigStore
-from core.errors import AnalysisError, InferenceError
+from core.errors import AnalysisError, InferenceError, ServiceError, ServiceStartupError
 from core.pipeline.priority_map_adapter import PipelineResult, PriorityMapAdapter
 from core.services.specs import ServiceEndpoint
 
@@ -34,7 +34,7 @@ class FakeController:
     def is_running(self, port):
         return False
 
-    def start(self, spec):
+    def start(self, spec, *, cancel_event=None):
         self.started.append(spec)
         return ServiceEndpoint("127.0.0.1", spec.port, spec.service_type)
 
@@ -211,3 +211,107 @@ def test_cancel_processes_current_frame_preserves_partial_output_and_closes_runn
     assert status.stream_url == f"/client/priority-map/runs/{status.run_id}/stream/"
     assert status.artifacts_url == f"/client/priority-map/runs/{status.run_id}/artifacts/"
     assert Path(status.output_directory, "analysis.log").exists()
+
+
+def test_cancel_while_llm_startup_waits_starts_no_sam_or_adapter(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    started = threading.Event()
+
+    class BlockingController(FakeController):
+        def start(self, spec, *, cancel_event=None):
+            self.started.append(spec)
+            if spec.service_type == "llm":
+                started.set()
+                assert cancel_event is not None
+                cancel_event.wait(timeout=2)
+                raise ServiceStartupError("LLM startup cancelled.")
+            return ServiceEndpoint("127.0.0.1", spec.port, spec.service_type)
+
+    controller = BlockingController()
+    adapter = FakeAdapter()
+    coordinator = AnalysisCoordinator(None, controller, adapter)
+    coordinator.start(source, app_config(tmp_path))
+    assert started.wait(timeout=2)
+    cancelling = coordinator.cancel_after_current_frame()
+    assert cancelling.message == "Cancelling after current startup step"
+
+    deadline = time.monotonic() + 2
+    while coordinator.is_active() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert coordinator.status().state == "cancelled"
+    assert [spec.service_type for spec in controller.started] == ["llm"]
+    assert adapter.calls == 0
+
+
+def test_cancel_between_llm_and_sam_starts_no_sam(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    adapter = FakeAdapter()
+    coordinator: AnalysisCoordinator
+
+    class CancellingController(FakeController):
+        def start(self, spec, *, cancel_event=None):
+            self.started.append(spec)
+            if spec.service_type == "llm":
+                coordinator.cancel_after_current_frame()
+            return ServiceEndpoint("127.0.0.1", spec.port, spec.service_type)
+
+    controller = CancellingController()
+    coordinator = AnalysisCoordinator(None, controller, adapter)
+    status = coordinator.run_sync(source, app_config(tmp_path))
+
+    assert status.state == "cancelled"
+    assert [spec.service_type for spec in controller.started] == ["llm"]
+    assert adapter.calls == 0
+
+
+def test_cancel_while_sam_startup_waits_starts_no_adapter(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    started = threading.Event()
+
+    class BlockingController(FakeController):
+        def start(self, spec, *, cancel_event=None):
+            self.started.append(spec)
+            if spec.service_type == "sam3":
+                started.set()
+                assert cancel_event is not None
+                cancel_event.wait(timeout=2)
+                raise ServiceStartupError("SAM3 startup cancelled.")
+            return ServiceEndpoint("127.0.0.1", spec.port, spec.service_type)
+
+    controller = BlockingController()
+    adapter = FakeAdapter()
+    coordinator = AnalysisCoordinator(None, controller, adapter)
+    coordinator.start(source, app_config(tmp_path))
+    assert started.wait(timeout=2)
+    coordinator.cancel_after_current_frame()
+
+    deadline = time.monotonic() + 2
+    while coordinator.is_active() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert coordinator.status().state == "cancelled"
+    assert [spec.service_type for spec in controller.started] == ["llm", "sam3"]
+    assert adapter.calls == 0
+
+
+def test_remote_readiness_wait_stops_after_cancelled_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    endpoint = ServiceEndpoint("127.0.0.1", 8081, "llm")
+    cancelled = threading.Event()
+    probes = 0
+
+    def probe(*_, **__):
+        nonlocal probes
+        probes += 1
+        cancelled.set()
+        return SimpleNamespace(status_code=503)
+
+    monkeypatch.setattr("core.analysis.requests.get", probe)
+
+    with pytest.raises(ServiceError, match="startup cancelled"):
+        AnalysisCoordinator._wait_ready(endpoint, 30, cancel_event=cancelled)
+
+    assert probes == 1

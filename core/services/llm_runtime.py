@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import IO
@@ -104,10 +105,13 @@ class LLMRuntime:
         *,
         timeout: float,
         poll_interval: float = 0.5,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         deadline = time.monotonic() + timeout
         last_error = "service is still loading"
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ServiceStartupError("LLM startup cancelled.")
             if process.poll() is not None:
                 raise ServiceStartupError(f"LLM process exited during startup with code {process.returncode}.")
             try:
@@ -117,7 +121,12 @@ class LLMRuntime:
                 last_error = f"readiness returned HTTP {response.status_code}"
             except requests.RequestException as exc:
                 last_error = str(exc)
-            time.sleep(poll_interval)
+            remaining = deadline - time.monotonic()
+            if cancel_event is not None:
+                if cancel_event.wait(min(poll_interval, max(0.0, remaining))):
+                    raise ServiceStartupError("LLM startup cancelled.")
+            else:
+                time.sleep(poll_interval)
         raise ServiceStartupError(f"LLM readiness timed out: {last_error}")
 
     @classmethod

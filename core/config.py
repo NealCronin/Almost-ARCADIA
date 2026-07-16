@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,7 @@ class NodeConfig:
     mode: NodeMode
     host: str
     instruction_port: int | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.mode not in ("local", "remote"):
@@ -31,16 +33,25 @@ class NodeConfig:
             raise ConfigurationError("Remote nodes require instruction_port.")
 
     def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"mode": self.mode, "host": self.host}
+        result = copy.deepcopy(self.extra)
+        result.update({"mode": self.mode, "host": self.host})
         if self.instruction_port is not None:
             result["instruction_port"] = self.instruction_port
+        else:
+            result.pop("instruction_port", None)
         return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NodeConfig:
         if not isinstance(data, dict):
             raise ConfigurationError("Node configuration must be an object.")
-        return cls(data.get("mode", "local"), data.get("host", "127.0.0.1"), data.get("instruction_port"))
+        known = {"mode", "host", "instruction_port"}
+        return cls(
+            data.get("mode", "local"),
+            data.get("host", "127.0.0.1"),
+            data.get("instruction_port"),
+            copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+        )
 
 
 @dataclass(slots=True)
@@ -49,6 +60,7 @@ class ConfiguredService:
 
     node: str
     spec: ServiceSpec
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def service_type(self) -> str:
@@ -63,13 +75,20 @@ class ConfiguredService:
         return self.spec.settings
 
     def to_dict(self) -> dict[str, Any]:
-        return {"node": self.node, **self.spec.to_dict()}
+        result = copy.deepcopy(self.extra)
+        result.update({"node": self.node, **self.spec.to_dict()})
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConfiguredService:
         if not isinstance(data, dict):
             raise ConfigurationError("Service configuration must be an object.")
-        return cls(str(data.get("node", "local")), ServiceSpec.from_dict(data))
+        known = {"node", "service_type", "port", "settings"}
+        return cls(
+            str(data.get("node", "local")),
+            ServiceSpec.from_dict(data),
+            copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+        )
 
 
 @dataclass(slots=True)
@@ -89,6 +108,7 @@ class PipelineConfig:
     gps_csv: str | None = None
     camera_intrinsics: str | None = None
     scene_model: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.sam_step < 1:
@@ -100,7 +120,9 @@ class PipelineConfig:
         self.prompts = [str(prompt).strip() for prompt in self.prompts if str(prompt).strip()]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = copy.deepcopy(self.extra)
+        result.update({name: getattr(self, name) for name in self.__dataclass_fields__ if name != "extra"})
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PipelineConfig:
@@ -108,14 +130,18 @@ class PipelineConfig:
             return cls()
         if not isinstance(data, dict):
             raise ConfigurationError("Pipeline configuration must be an object.")
-        allowed = set(cls.__dataclass_fields__)
-        return cls(**{key: value for key, value in data.items() if key in allowed})
+        known = set(cls.__dataclass_fields__) - {"extra"}
+        return cls(
+            **{key: value for key, value in data.items() if key in known},
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+        )
 
 
 @dataclass(slots=True)
 class PriorityMapOutputConfig:
     root: Path = Path("outputs")
     preview: Literal["mjpeg"] = "mjpeg"
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.root).strip():
@@ -124,7 +150,9 @@ class PriorityMapOutputConfig:
             raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"root": str(self.root), "preview": self.preview}
+        result = copy.deepcopy(self.extra)
+        result.update({"root": str(self.root), "preview": self.preview})
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PriorityMapOutputConfig:
@@ -138,7 +166,8 @@ class PriorityMapOutputConfig:
         preview = data.get("preview", "mjpeg")
         if preview != "mjpeg":
             raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
-        return cls(Path(root), preview)
+        known = {"root", "preview"}
+        return cls(Path(root), preview, copy.deepcopy({key: value for key, value in data.items() if key not in known}))
 
 
 @dataclass(slots=True)
@@ -146,13 +175,18 @@ class PriorityMapToolConfig:
     services: dict[str, ConfiguredService] = field(default_factory=dict)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     output: PriorityMapOutputConfig = field(default_factory=PriorityMapOutputConfig)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "services": {name: service.to_dict() for name, service in self.services.items()},
-            "pipeline": self.pipeline.to_dict(),
-            "output": self.output.to_dict(),
-        }
+        result = copy.deepcopy(self.extra)
+        result.update(
+            {
+                "services": {name: service.to_dict() for name, service in self.services.items()},
+                "pipeline": self.pipeline.to_dict(),
+                "output": self.output.to_dict(),
+            }
+        )
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PriorityMapToolConfig:
@@ -161,17 +195,20 @@ class PriorityMapToolConfig:
         services = data.get("services", {})
         if not isinstance(services, dict):
             raise ConfigurationError("Priority Map services must be an object.")
+        known = {"services", "pipeline", "output"}
         return cls(
             services={str(name): ConfiguredService.from_dict(value) for name, value in services.items()},
             pipeline=PipelineConfig.from_dict(data.get("pipeline")),
             output=PriorityMapOutputConfig.from_dict(data.get("output")),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
 
 @dataclass(slots=True)
 class AppConfig:
     nodes: dict[str, NodeConfig] = field(default_factory=dict)
-    tools: dict[str, PriorityMapToolConfig] = field(default_factory=lambda: {"priority-map": PriorityMapToolConfig()})
+    tools: dict[str, Any] = field(default_factory=lambda: {"priority-map": PriorityMapToolConfig()})
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if "local" not in self.nodes:
@@ -190,10 +227,16 @@ class AppConfig:
         return self.tools["priority-map"]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "nodes": {name: node.to_dict() for name, node in self.nodes.items()},
-            "tools": {"priority-map": self.priority_map.to_dict()},
-        }
+        tools = copy.deepcopy({name: value for name, value in self.tools.items() if name != "priority-map"})
+        tools["priority-map"] = self.priority_map.to_dict()
+        result = copy.deepcopy(self.extra)
+        result.update(
+            {
+                "nodes": {name: node.to_dict() for name, node in self.nodes.items()},
+                "tools": tools,
+            }
+        )
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppConfig:
@@ -203,6 +246,7 @@ class AppConfig:
         if not isinstance(raw_nodes, dict):
             raise ConfigurationError("Nodes configuration must be an object.")
         nodes = {str(name): NodeConfig.from_dict(value) for name, value in raw_nodes.items()}
+        known_root = {"nodes", "tools", "services", "pipeline", "output_root"}
         if "tools" in data:
             raw_tools = data["tools"]
             if not isinstance(raw_tools, dict):
@@ -210,7 +254,8 @@ class AppConfig:
             raw_priority_map = raw_tools.get("priority-map")
             if not isinstance(raw_priority_map, dict):
                 raise ConfigurationError("tools.priority-map must be an object.")
-            tools = {"priority-map": PriorityMapToolConfig.from_dict(raw_priority_map)}
+            tools = {name: copy.deepcopy(value) for name, value in raw_tools.items() if name != "priority-map"}
+            tools["priority-map"] = PriorityMapToolConfig.from_dict(raw_priority_map)
         else:
             output_root = data.get("output_root", "outputs")
             if not isinstance(output_root, str) or not output_root.strip():
@@ -225,7 +270,11 @@ class AppConfig:
                     output=PriorityMapOutputConfig(Path(output_root)),
                 )
             }
-        return cls(nodes=nodes, tools=tools)
+        return cls(
+            nodes=nodes,
+            tools=tools,
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known_root}),
+        )
 
 
 class ConfigStore:

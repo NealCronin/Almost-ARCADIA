@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client
 
-from core.config import AppConfig, ConfigStore
+from core.config import AppConfig, ConfigStore, NodeConfig
 from core.errors import AnalysisError
 from core.services.specs import ServiceEndpoint
 from web.runtime import ApplicationRuntime
@@ -32,6 +34,7 @@ class FakeController:
 class FakeAnalysis:
     def __init__(self, blocked=False):
         self.blocked = blocked
+        self.active = False
         self.started = []
         from core.analysis import AnalysisStatus
 
@@ -48,7 +51,7 @@ class FakeAnalysis:
         self.started.append((path, config))
 
     def is_active(self):
-        return False
+        return self.active
 
 
 @pytest.fixture
@@ -228,3 +231,149 @@ def test_run_stream_and_artifacts_are_scoped_to_current_run(client, monkeypatch,
     assert client.get(f"/client/priority-map/runs/{run_id}/artifacts/preview.jpg/").status_code == 200
     download = client.get(f"/client/priority-map/runs/{run_id}/artifacts/preview.jpg/?download=1")
     assert download["Content-Disposition"].startswith("attachment;")
+
+
+def test_upload_staging_requires_explicit_run_and_persists_manifest(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    upload = SimpleUploadedFile("mission.jpg", b"image", content_type="image/jpeg")
+
+    staged = client.post(
+        "/client/priority-map/uploads/",
+        {"files": upload, "relative_paths": "mission.jpg"},
+    )
+
+    assert staged.status_code == 201
+    payload = staged.json()["upload"]
+    assert payload["source_type"] == "image"
+    assert payload["file_count"] == 1
+    assert payload["delete_url"] == f"/client/priority-map/uploads/{payload['id']}/delete/"
+    assert runtime.analysis.started == []
+    assert Client().get("/client/priority-map/uploads/").status_code == 200
+    retained = Client().get("/client/priority-map/uploads/").json()["uploads"]
+    assert [item["id"] for item in retained] == [payload["id"]]
+
+    started = client.post("/client/priority-map/runs/", {"upload_id": payload["id"]})
+
+    assert started.status_code == 302
+    assert runtime.analysis.started[0][0] == runtime.uploads.input_path(payload["id"])
+
+
+def test_upload_delete_is_explicit_safe_and_does_not_start_analysis(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    upload = SimpleUploadedFile("mission.jpg", b"image", content_type="image/jpeg")
+    payload = client.post(
+        "/client/priority-map/uploads/",
+        {"files": upload, "relative_paths": "mission.jpg"},
+    ).json()["upload"]
+    input_path = runtime.uploads.input_path(payload["id"])
+
+    assert client.get(payload["delete_url"]).status_code == 405
+    assert client.post(payload["delete_url"]).status_code == 200
+    assert not input_path.exists()
+    assert runtime.analysis.started == []
+    assert client.post("/client/priority-map/uploads/not-an-id/delete/").status_code == 400
+    assert client.post("/client/priority-map/uploads/" + ("0" * 32) + "/delete/").status_code == 404
+
+
+def test_active_upload_delete_is_rejected_without_removing_files(client, monkeypatch, runtime) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    def stage(name: str) -> dict[str, object]:
+        return client.post(
+            "/client/priority-map/uploads/",
+            {"files": SimpleUploadedFile(name, b"image", content_type="image/jpeg"), "relative_paths": name},
+        ).json()["upload"]
+
+    active, unrelated = stage("active.jpg"), stage("unrelated.jpg")
+    active_path = runtime.uploads.input_path(str(active["id"]))
+    runtime.analysis.active = True
+    runtime.analysis._status.input_path = str(active_path)
+
+    blocked = client.post(str(active["delete_url"]))
+    unrelated_deleted = client.post(str(unrelated["delete_url"]))
+
+    assert blocked.status_code == 409
+    assert blocked.json() == {"detail": "Cannot delete the upload used by the active run."}
+    assert active_path.exists()
+    assert unrelated_deleted.status_code == 200
+    runtime.analysis.active = False
+    assert client.post(str(active["delete_url"])).status_code == 200
+
+
+def test_host_form_errors_retain_all_host_cards_and_save_aliases(client, monkeypatch, runtime) -> None:
+    config = runtime.config_store.load()
+    config.nodes["worker-1"] = NodeConfig(mode="remote", host="192.168.1.20", instruction_port=9001)
+    runtime.config_store.save(config)
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+
+    assert client.get("/host/").status_code == 200
+    assert client.get("/nodes/").status_code == 200
+    assert (
+        client.post("/host/nodes/local/", {"mode": "local", "host": "localhost", "instruction_port": ""}).status_code
+        == 302
+    )
+    assert (
+        client.post("/nodes/local/save/", {"mode": "local", "host": "localhost", "instruction_port": ""}).status_code
+        == 302
+    )
+
+    responses = [
+        (client.post("/host/nodes/", {"name": ""}), b"This field is required."),
+        (client.post("/host/nodes/", {"name": "worker-1"}), b"A host with that name already exists."),
+        (
+            client.post(
+                "/host/nodes/worker-1/",
+                {"mode": "remote", "host": "192.168.1.20", "instruction_port": ""},
+            ),
+            b"Remote nodes require an instruction port.",
+        ),
+        (
+            client.post(
+                "/host/nodes/local/",
+                {"mode": "remote", "host": "localhost", "instruction_port": "9000"},
+            ),
+            b"This computer must remain local.",
+        ),
+        (
+            client.post(
+                "/host/nodes/worker-1/",
+                {"mode": "local", "host": "192.168.1.20", "instruction_port": ""},
+            ),
+            b"Configured hosts must remain remote.",
+        ),
+    ]
+    for response, error in responses:
+        assert response.status_code == 400
+        assert error in response.content
+        assert b"This computer" in response.content
+        assert b"worker-1" in response.content
+        assert b"Add host" in response.content
+
+
+def test_results_explains_in_memory_runs_and_keeps_terminal_artifacts(client, monkeypatch, runtime, tmp_path) -> None:
+    monkeypatch.setattr("web.views.get_runtime", lambda: runtime)
+    idle = client.get("/results/")
+    assert idle.status_code == 200
+    assert b"Current run" in idle.content
+    assert b"live in-memory preview" in idle.content
+    assert b"Artifacts remain available after the live preview ends." in idle.content
+
+    from core.analysis import AnalysisStatus
+
+    run_id = "cancelled-run"
+    output_root = tmp_path / "outputs"
+    (output_root / run_id).mkdir(parents=True)
+    (output_root / run_id / "preview.jpg").write_bytes(b"jpeg")
+    config = runtime.config_store.load()
+    config.priority_map.output.root = output_root
+    runtime.config_store.save(config)
+    runtime.analysis._status = AnalysisStatus(
+        state="cancelled",
+        run_id=run_id,
+        artifacts_url=f"/client/priority-map/runs/{run_id}/artifacts/",
+    )
+
+    artifacts = client.get(f"/client/priority-map/runs/{run_id}/artifacts/").json()
+
+    assert artifacts["artifacts"][0]["inline_url"].endswith("/preview.jpg/")
+    assert artifacts["artifacts"][0]["download_url"].endswith("/preview.jpg/?download=1")

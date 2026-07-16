@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -45,6 +46,27 @@ def test_failed_startup_cleans_up_child(mock_popen: Mock, _ready: Mock, tmp_path
     controller = ServiceController(log_dir=tmp_path, allow_test_commands=True)
     with pytest.raises(ServiceStartupError):
         controller.start(ServiceSpec("llm", 8081, {"command": ["fake"]}))
+    process.terminate.assert_called_once()
+    assert not controller.is_running(8081)
+
+
+@patch("core.services.llm_runtime.LLMRuntime.wait_ready", side_effect=ServiceStartupError("LLM startup cancelled."))
+@patch("core.services.llm_runtime.subprocess.Popen")
+def test_startup_cancellation_cleans_up_owned_process(mock_popen: Mock, mock_ready: Mock, tmp_path) -> None:
+    process = _process()
+    mock_popen.return_value = process
+    cancelled = threading.Event()
+    controller = ServiceController(log_dir=tmp_path, allow_test_commands=True)
+
+    with pytest.raises(ServiceStartupError, match="startup cancelled"):
+        controller.start(ServiceSpec("llm", 8081, {"command": ["fake"]}), cancel_event=cancelled)
+
+    mock_ready.assert_called_once_with(
+        process,
+        ServiceEndpoint("127.0.0.1", 8081, "llm"),
+        timeout=600.0,
+        cancel_event=cancelled,
+    )
     process.terminate.assert_called_once()
     assert not controller.is_running(8081)
 

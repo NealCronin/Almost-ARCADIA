@@ -107,6 +107,8 @@ class UploadStore:
 
     def _manifest(self, upload_id: str) -> dict[str, Any]:
         directory = self._directory(upload_id)
+        if not directory.exists():
+            raise FileNotFoundError(upload_id)
         try:
             payload = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
