@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -264,6 +265,8 @@ class PriorityMapAdapter:
         sam_client: SAMClient,
         pipeline_settings: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        preview_callback: Callable[[bytes], None] | None = None,
     ) -> PipelineResult:
         output_path = Path(output_directory)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -282,6 +285,9 @@ class PriorityMapAdapter:
             result = self._run_runner(
                 runner,
                 progress_callback,
+                image_folder=image_folder,
+                cancel_event=cancel_event,
+                preview_callback=preview_callback,
                 run_at_source_fps=bool(settings.get("run_at_source_fps", False)),
                 source_fps=source_fps,
             )
@@ -373,6 +379,9 @@ class PriorityMapAdapter:
         runner: Any,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         *,
+        image_folder: Path,
+        cancel_event: threading.Event | None,
+        preview_callback: Callable[[bytes], None] | None,
         run_at_source_fps: bool,
         source_fps: float | None,
     ):
@@ -389,6 +398,22 @@ class PriorityMapAdapter:
                             "image_name": getattr(frame_result, "image_name", None),
                         }
                     )
+                if preview_callback:
+                    image_name = getattr(frame_result, "image_name", None)
+                    if image_name:
+                        candidate = image_folder / Path(str(image_name)).name
+                        if candidate.is_file():
+                            raw = candidate.read_bytes()
+                            if candidate.suffix.lower() in {".jpg", ".jpeg"}:
+                                preview_callback(raw)
+                            else:
+                                image = cv2.imread(str(candidate))
+                                if image is not None:
+                                    ok, encoded = cv2.imencode(".jpg", image)
+                                    if ok:
+                                        preview_callback(encoded.tobytes())
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 if not getattr(frame_result, "keep_running", True):
                     break
                 if frame_delay:

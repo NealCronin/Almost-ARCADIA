@@ -49,9 +49,13 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+extend-exclude = ["overlay"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"apply_overlay.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

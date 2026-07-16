@@ -30,6 +30,19 @@ class NodeForm(forms.Form):
         )
 
 
+class NodeNameForm(forms.Form):
+    name = forms.RegexField(
+        regex=r"^[a-z][a-z0-9-]{0,62}$",
+        error_messages={"invalid": "Use 1–63 lowercase letters, numbers, or hyphens; start with a letter."},
+    )
+
+    def clean_name(self) -> str:
+        name = self.cleaned_data["name"]
+        if name == "local":
+            raise forms.ValidationError("'local' is reserved for this computer.")
+        return name
+
+
 class ServiceForm(forms.Form):
     node = forms.ChoiceField(label="Run on")
     inference_port = forms.IntegerField(label="Inference port", min_value=1, max_value=65535)
@@ -45,8 +58,7 @@ class ServiceForm(forms.Form):
         super().__init__(*args, **kwargs)
         node_map = nodes or {"local": NodeConfig("local", "127.0.0.1")}
         self.fields["node"].choices = [
-            (name, "This computer" if name == "local" else f"{name} ({node.host})")
-            for name, node in node_map.items()
+            (name, "This computer" if name == "local" else f"{name} ({node.host})") for name, node in node_map.items()
         ]
 
     def initial_from(self, configured: ConfiguredService | None) -> None:
@@ -392,8 +404,6 @@ class SAMServiceForm(ServiceForm):
         )
 
 
-
-
 class PipelineForm(forms.Form):
     task = forms.CharField(initial="Find cars")
     debrief = forms.CharField(required=False, widget=forms.Textarea)
@@ -440,7 +450,18 @@ class PipelineForm(forms.Form):
 
 
 class AnalysisForm(forms.Form):
-    input_path = forms.CharField(help_text="A local image folder, image file, or video path.")
+    input_path = forms.CharField(required=False, help_text="A local image folder, image file, or video path.")
+    upload_id = forms.CharField(required=False)
+
+    def clean(self) -> dict[str, Any]:
+        cleaned = super().clean()
+        input_path = (cleaned.get("input_path") or "").strip()
+        upload_id = (cleaned.get("upload_id") or "").strip()
+        if bool(input_path) == bool(upload_id):
+            raise forms.ValidationError("Choose exactly one existing path or retained upload.")
+        cleaned["input_path"] = input_path
+        cleaned["upload_id"] = upload_id
+        return cleaned
 
 
 class EndpointTestForm(forms.Form):

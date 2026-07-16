@@ -1,10 +1,89 @@
 {% extends 'web/base.html' %}
-{% block title %}Analysis | Almost ARCADIA{% endblock %}
+{% block title %}Priority Map | Almost ARCADIA{% endblock %}
 {% block content %}
-<h2>Client-side Priority Map analysis</h2>
-<section class="card"><h3>Pipeline settings</h3><form method="post" action="{% url 'save_pipeline' %}">{% csrf_token %}{{ pipeline_form.as_p }}<button type="submit">Save pipeline settings</button></form></section>
-<section class="card"><h3>Start one analysis</h3><form method="post" action="{% url 'start_analysis' %}">{% csrf_token %}{{ analysis_form.as_p }}<button type="submit">Start analysis</button></form><p>Source media remains on this machine. Only encoded inference frames leave it.</p></section>
-<section class="card"><h3>Current state</h3><p id="analysis-state" class="state {{ analysis.state }}">{{ analysis.state }}</p><p id="analysis-message">{{ analysis.message }}</p><p>Frames: <span id="analysis-frames">{{ analysis.frames_processed }}</span></p><script>
-async function refreshAnalysis(){const response=await fetch('{% url "analysis_status" %}'); if(!response.ok)return; const data=await response.json(); document.getElementById('analysis-state').textContent=data.state; document.getElementById('analysis-message').textContent=data.error||data.message; document.getElementById('analysis-frames').textContent=data.frames_processed; if(data.state==='starting'||data.state==='running')setTimeout(refreshAnalysis,1500);} if('{{ analysis.state }}'==='starting'||'{{ analysis.state }}'==='running')refreshAnalysis();
-</script></section>
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Client · Priority Map</p>
+    <h1>Prepare a run</h1>
+    <p class="page-heading__copy">Choose source data, tune the pipeline, and start one client-side analysis. Required model services start automatically.</p>
+  </div>
+  <a class="button button--ghost" href="{% url 'priority_map_models' %}">Model settings</a>
+</header>
+
+<div class="workspace-grid">
+  <div class="stack stack--large">
+    <section class="panel">
+      <div class="panel__header"><div><p class="eyebrow">Step 1</p><h2>Source data</h2></div></div>
+      <div class="tabs" data-tabs>
+        <div class="tab-list" role="tablist">
+          <button class="tab is-active" type="button" role="tab" aria-selected="true" data-tab="path-source">Use existing path</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-tab="upload-source">Upload files or folder</button>
+        </div>
+        <div class="tab-panel is-active" id="path-source" role="tabpanel">
+          <form method="post" action="{% url 'priority_map_runs' %}" class="stack" id="priority-map-run-form">
+            {% csrf_token %}
+            {{ analysis_form.non_field_errors }}
+            <div class="form-field form-field--full">{{ analysis_form.input_path.as_field_group }}</div>
+            <p class="help-copy">The path is resolved on the computer running Django. It may be an image, a video, or a folder of images.</p>
+            <button class="button button--primary button--large" type="submit">Start Priority Map</button>
+          </form>
+        </div>
+        <div class="tab-panel" id="upload-source" role="tabpanel" hidden>
+          <div class="upload-dropzone" data-upload-dropzone>
+            <input type="file" id="priority-map-files" multiple accept="image/*,video/*" hidden>
+            <input type="file" id="priority-map-folder" webkitdirectory directory multiple hidden>
+            <span class="upload-dropzone__icon" aria-hidden="true">↑</span>
+            <h3>Drop imagery or video here</h3>
+            <p>Uploads will be retained until manually deleted.</p>
+            <div class="button-row">
+              <button class="button button--primary" type="button" data-choose-files>Choose files</button>
+              <button class="button button--ghost" type="button" data-choose-folder>Choose folder</button>
+            </div>
+          </div>
+          <div class="selected-files" data-selected-files hidden>
+            <div class="selected-files__header"><strong data-file-summary></strong><button class="text-button" type="button" data-clear-files>Clear</button></div>
+            <ul data-file-list></ul>
+          </div>
+          <div class="progress-track" data-upload-progress hidden><span class="progress-track__bar"></span></div>
+          <p class="help-copy" data-upload-progress-text hidden></p>
+          <button class="button button--primary button--large" type="button" data-stage-upload data-upload-url="{% url 'priority_map_uploads' %}" data-run-url="{% url 'priority_map_runs' %}">Stage upload and continue</button>
+          <div class="stack" data-retained-uploads data-upload-list-url="{% url 'priority_map_uploads' %}"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__header"><div><p class="eyebrow">Step 2</p><h2>Pipeline settings</h2></div></div>
+      <form method="post" action="{% url 'save_pipeline' %}" class="form-grid">
+        {% csrf_token %}
+        {% for field in pipeline_form %}
+          <div class="form-field {% if field.name == 'debrief' or field.name == 'prompts' %}form-field--full{% endif %}">{{ field.as_field_group }}</div>
+        {% endfor %}
+        <div class="form-actions form-field--full"><button class="button button--secondary" type="submit">Save pipeline settings</button></div>
+      </form>
+    </section>
+  </div>
+
+  <aside class="stack sticky-column">
+    <section class="panel run-status" data-analysis-status-url="{% url 'analysis_status' %}">
+      <div class="panel__header"><div><p class="eyebrow">Current run</p><h2>Analysis status</h2></div><span id="analysis-state" class="status-pill status-pill--{{ analysis.state }}">{{ analysis.state|title }}</span></div>
+      <div class="metric-grid">
+        <div class="metric"><span>Frames</span><strong id="analysis-frames">{{ analysis.frames_processed }}</strong></div>
+        <div class="metric"><span>Stage</span><strong id="analysis-message">{{ analysis.message|default:'Ready' }}</strong></div>
+      </div>
+      <div class="progress-track" aria-hidden="true"><span class="progress-track__bar {% if analysis.state == 'starting' or analysis.state == 'running' %}is-indeterminate{% endif %}"></span></div>
+      {% if analysis.error %}<p class="inline-error" id="analysis-error">{{ analysis.error }}</p>{% else %}<p class="inline-error" id="analysis-error" hidden></p>{% endif %}
+      <div class="button-row">
+        <a class="button button--ghost" href="{% url 'results' %}">Open run dashboard</a>
+        <button class="button button--danger" type="button" data-cancel-run disabled>Cancel after current frame</button>
+      </div>
+    </section>
+
+    <section class="panel compact-panel">
+      <p class="eyebrow">Data boundary</p>
+      <h2>Source stays here</h2>
+      <p>Priority Map and source media remain on this computer. Only encoded inference frames are sent to configured model services.</p>
+    </section>
+  </aside>
+</div>
 {% endblock %}

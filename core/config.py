@@ -40,11 +40,7 @@ class NodeConfig:
     def from_dict(cls, data: dict[str, Any]) -> NodeConfig:
         if not isinstance(data, dict):
             raise ConfigurationError("Node configuration must be an object.")
-        return cls(
-            mode=data.get("mode", "local"),
-            host=data.get("host", "127.0.0.1"),
-            instruction_port=data.get("instruction_port"),
-        )
+        return cls(data.get("mode", "local"), data.get("host", "127.0.0.1"), data.get("instruction_port"))
 
 
 @dataclass(slots=True)
@@ -55,7 +51,7 @@ class ConfiguredService:
     spec: ServiceSpec
 
     @property
-    def service_type(self):
+    def service_type(self) -> str:
         return self.spec.service_type
 
     @property
@@ -73,10 +69,7 @@ class ConfiguredService:
     def from_dict(cls, data: dict[str, Any]) -> ConfiguredService:
         if not isinstance(data, dict):
             raise ConfigurationError("Service configuration must be an object.")
-        return cls(
-            node=str(data.get("node", "local")),
-            spec=ServiceSpec.from_dict(data),
-        )
+        return cls(str(data.get("node", "local")), ServiceSpec.from_dict(data))
 
 
 @dataclass(slots=True)
@@ -115,74 +108,128 @@ class PipelineConfig:
             return cls()
         if not isinstance(data, dict):
             raise ConfigurationError("Pipeline configuration must be an object.")
-        allowed = {
-            "sam_step",
-            "run_at_source_fps",
-            "sam_resize",
-            "task",
-            "debrief",
-            "prompts",
-            "sam_confidence",
-            "max_image_edge",
-            "debug",
-            "record",
-            "panoramic",
-            "graph_agent",
-            "gps_csv",
-            "camera_intrinsics",
-            "scene_model",
+        allowed = set(cls.__dataclass_fields__)
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class PriorityMapOutputConfig:
+    root: Path = Path("outputs")
+    preview: Literal["mjpeg"] = "mjpeg"
+
+    def __post_init__(self) -> None:
+        if not str(self.root).strip():
+            raise ConfigurationError("Priority Map output root must be a non-empty path.")
+        if self.preview != "mjpeg":
+            raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"root": str(self.root), "preview": self.preview}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> PriorityMapOutputConfig:
+        if data is None:
+            return cls()
+        if not isinstance(data, dict):
+            raise ConfigurationError("Priority Map output configuration must be an object.")
+        root = data.get("root", "outputs")
+        if not isinstance(root, str) or not root.strip():
+            raise ConfigurationError("Priority Map output root must be a non-empty path.")
+        preview = data.get("preview", "mjpeg")
+        if preview != "mjpeg":
+            raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
+        return cls(Path(root), preview)
+
+
+@dataclass(slots=True)
+class PriorityMapToolConfig:
+    services: dict[str, ConfiguredService] = field(default_factory=dict)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    output: PriorityMapOutputConfig = field(default_factory=PriorityMapOutputConfig)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "services": {name: service.to_dict() for name, service in self.services.items()},
+            "pipeline": self.pipeline.to_dict(),
+            "output": self.output.to_dict(),
         }
-        values = {key: value for key, value in data.items() if key in allowed}
-        return cls(**values)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PriorityMapToolConfig:
+        if not isinstance(data, dict):
+            raise ConfigurationError("Priority Map tool configuration must be an object.")
+        services = data.get("services", {})
+        if not isinstance(services, dict):
+            raise ConfigurationError("Priority Map services must be an object.")
+        return cls(
+            services={str(name): ConfiguredService.from_dict(value) for name, value in services.items()},
+            pipeline=PipelineConfig.from_dict(data.get("pipeline")),
+            output=PriorityMapOutputConfig.from_dict(data.get("output")),
+        )
 
 
 @dataclass(slots=True)
 class AppConfig:
     nodes: dict[str, NodeConfig] = field(default_factory=dict)
-    services: dict[str, ConfiguredService] = field(default_factory=dict)
-    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
-    output_root: Path = Path("outputs")
+    tools: dict[str, PriorityMapToolConfig] = field(default_factory=lambda: {"priority-map": PriorityMapToolConfig()})
 
     def __post_init__(self) -> None:
         if "local" not in self.nodes:
             self.nodes["local"] = NodeConfig(mode="local", host="127.0.0.1")
-        for name in self.services:
-            if self.services[name].node not in self.nodes:
-                raise ConfigurationError(f"Service {name!r} references unknown node {self.services[name].node!r}.")
+        if "priority-map" not in self.tools:
+            self.tools["priority-map"] = PriorityMapToolConfig()
+        priority_map = self.tools["priority-map"]
+        if not isinstance(priority_map, PriorityMapToolConfig):
+            raise ConfigurationError("Priority Map tool configuration must be an object.")
+        for name, service in priority_map.services.items():
+            if service.node not in self.nodes:
+                raise ConfigurationError(f"Service {name!r} references unknown node {service.node!r}.")
+
+    @property
+    def priority_map(self) -> PriorityMapToolConfig:
+        return self.tools["priority-map"]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "nodes": {name: node.to_dict() for name, node in self.nodes.items()},
-            "services": {name: service.to_dict() for name, service in self.services.items()},
-            "pipeline": self.pipeline.to_dict(),
-            "output_root": str(self.output_root),
+            "tools": {"priority-map": self.priority_map.to_dict()},
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppConfig:
         if not isinstance(data, dict):
             raise ConfigurationError("Configuration root must be a JSON object.")
-        nodes = {str(name): NodeConfig.from_dict(value) for name, value in dict(data.get("nodes", {})).items()}
-        services = {
-            str(name): ConfiguredService.from_dict(value) for name, value in dict(data.get("services", {})).items()
-        }
-        output_root = data.get("output_root", "outputs")
-        if not isinstance(output_root, str) or not output_root.strip():
-            raise ConfigurationError("output_root must be a non-empty path.")
-        return cls(
-            nodes=nodes,
-            services=services,
-            pipeline=PipelineConfig.from_dict(data.get("pipeline")),
-            output_root=Path(output_root),
-        )
+        raw_nodes = data.get("nodes", {})
+        if not isinstance(raw_nodes, dict):
+            raise ConfigurationError("Nodes configuration must be an object.")
+        nodes = {str(name): NodeConfig.from_dict(value) for name, value in raw_nodes.items()}
+        if "tools" in data:
+            raw_tools = data["tools"]
+            if not isinstance(raw_tools, dict):
+                raise ConfigurationError("Tools configuration must be an object.")
+            raw_priority_map = raw_tools.get("priority-map")
+            if not isinstance(raw_priority_map, dict):
+                raise ConfigurationError("tools.priority-map must be an object.")
+            tools = {"priority-map": PriorityMapToolConfig.from_dict(raw_priority_map)}
+        else:
+            output_root = data.get("output_root", "outputs")
+            if not isinstance(output_root, str) or not output_root.strip():
+                raise ConfigurationError("output_root must be a non-empty path.")
+            raw_services = data.get("services", {})
+            if not isinstance(raw_services, dict):
+                raise ConfigurationError("Services configuration must be an object.")
+            tools = {
+                "priority-map": PriorityMapToolConfig(
+                    services={str(name): ConfiguredService.from_dict(value) for name, value in raw_services.items()},
+                    pipeline=PipelineConfig.from_dict(data.get("pipeline")),
+                    output=PriorityMapOutputConfig(Path(output_root)),
+                )
+            }
+        return cls(nodes=nodes, tools=tools)
 
 
 class ConfigStore:
-    """Load and atomically save one JSON configuration file.
-
-    A sibling ``default_config.json`` seeds a missing runtime configuration
-    without making local settings part of source control.
-    """
+    """Load and atomically save one JSON configuration file."""
 
     def __init__(self, path: str | Path = "config.json", default_path: str | Path | None = None) -> None:
         self.path = Path(path)
@@ -202,10 +249,9 @@ class ConfigStore:
             self._write_payload(payload)
             return config
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return AppConfig.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError) as exc:
             raise ConfigurationError(f"Could not read configuration {self.path}: {exc}") from exc
-        return AppConfig.from_dict(data)
 
     def save(self, config: AppConfig) -> None:
         self._write_payload(json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n")

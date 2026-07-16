@@ -1,29 +1,44 @@
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
+from urllib.parse import quote
 
 from django.contrib import messages
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import redirect, render
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from core.config import ConfiguredService
+from core.config import ConfiguredService, NodeConfig
 from core.errors import ArcadiaError
 from core.inference.llm_client import LLMClient
 from core.services.instruction_client import InstructionClient
 from core.services.specs import ServiceEndpoint
-from web.forms import AnalysisForm, EndpointTestForm, LLMServiceForm, NodeForm, PipelineForm, SAMServiceForm
+from web.artifacts import ArtifactStore
+from web.forms import (
+    AnalysisForm,
+    EndpointTestForm,
+    LLMServiceForm,
+    NodeForm,
+    NodeNameForm,
+    PipelineForm,
+    SAMServiceForm,
+)
 from web.runtime import get_runtime
+from web.tools import TOOLS
 
 
 def _service_form(name: str, config: Any, data: Any = None):
-    form_class = LLMServiceForm if name == "llm" else SAMServiceForm
+    form_classes = {"llm": LLMServiceForm, "sam3": SAMServiceForm}
+    if name not in TOOLS["priority-map"].required_services:
+        raise ValueError(f"Unknown Priority Map service {name}.")
+    form_class = form_classes[name]
     form = (
         form_class(data=data, nodes=config.nodes, auto_id=f"{name}_%s")
         if data is not None
         else form_class(nodes=config.nodes, auto_id=f"{name}_%s")
     )
-    form.initial_from(config.services.get(name))
+    form.initial_from(config.priority_map.services.get(name))
     return form
 
 
@@ -34,6 +49,16 @@ def home(request: HttpRequest) -> HttpResponse:
         request,
         "web/home.html",
         {"config": config, "services": runtime.controller.list_services(), "analysis": runtime.analysis.status()},
+    )
+
+
+@require_GET
+def client_portal(request: HttpRequest) -> HttpResponse:
+    runtime = get_runtime()
+    return render(
+        request,
+        "web/client.html",
+        {"analysis": runtime.analysis.status()},
     )
 
 
@@ -80,15 +105,11 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
                 status=400,
             )
         spec = form.to_spec()
-        config.services[service_name] = ConfiguredService(node=form.cleaned_data["node"], spec=spec)
+        config.priority_map.services[service_name] = ConfiguredService(node=form.cleaned_data["node"], spec=spec)
         runtime.config_store.save(config)
-        node = config.nodes[form.cleaned_data["node"]]
-        if node.mode == "local":
-            endpoint = runtime.controller.start(spec)
-        else:
-            client = InstructionClient(node.host, node.instruction_port or 9000)
-            endpoint = client.start_service(spec)
-        messages.success(request, f"{service_name.upper()} ready at {endpoint.base_url}")
+        messages.success(
+            request, f"Saved {service_name.upper()} settings. Priority Map starts configured services for a run."
+        )
     except (ArcadiaError, ValueError, OSError) as exc:
         messages.error(request, str(exc))
     return redirect("services")
@@ -100,7 +121,7 @@ def stop_service(request: HttpRequest, service_name: str) -> HttpResponse:
     try:
         runtime.analysis.assert_configuration_mutable()
         config = runtime.config_store.load()
-        configured = config.services.get(service_name)
+        configured = config.priority_map.services.get(service_name)
         if configured is None:
             raise ArcadiaError(f"No configuration exists for {service_name}.")
         node = config.nodes[configured.node]
@@ -119,7 +140,7 @@ def service_logs(request: HttpRequest, port: int) -> HttpResponse:
     runtime = get_runtime()
     try:
         config = runtime.config_store.load()
-        configured = next((service for service in config.services.values() if service.port == port), None)
+        configured = next((service for service in config.priority_map.services.values() if service.port == port), None)
         if configured is None:
             return HttpResponse(f"No configured service on port {port}.", status=404)
         node = config.nodes[configured.node]
@@ -142,8 +163,39 @@ def nodes(request: HttpRequest) -> HttpResponse:
         {
             "config": config,
             "node_forms": {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()},
+            "node_name_form": NodeNameForm(),
         },
     )
+
+
+@require_POST
+def create_node(request: HttpRequest) -> HttpResponse:
+    runtime = get_runtime()
+    try:
+        runtime.analysis.assert_configuration_mutable()
+        config = runtime.config_store.load()
+        form = NodeNameForm(request.POST)
+        if not form.is_valid():
+            return render(
+                request,
+                "web/nodes.html",
+                {
+                    "config": config,
+                    "node_forms": {name: NodeForm(initial=node.to_dict()) for name, node in config.nodes.items()},
+                    "node_name_form": form,
+                },
+                status=400,
+            )
+        name = form.cleaned_data["name"]
+        if name in config.nodes:
+            form.add_error("name", "A host with that name already exists.")
+            return render(request, "web/nodes.html", {"config": config, "node_name_form": form}, status=400)
+        config.nodes[name] = NodeConfig(mode="remote", host="127.0.0.1", instruction_port=9000)
+        runtime.config_store.save(config)
+        messages.success(request, f"Created host {name}.")
+    except (ArcadiaError, ValueError) as exc:
+        messages.error(request, str(exc))
+    return redirect("host")
 
 
 @require_POST
@@ -152,15 +204,75 @@ def save_node(request: HttpRequest, node_name: str) -> HttpResponse:
     try:
         runtime.analysis.assert_configuration_mutable()
         config = runtime.config_store.load()
+        if node_name not in config.nodes:
+            return HttpResponse("Host not found.", status=404)
         form = NodeForm(request.POST)
         if not form.is_valid():
-            return render(request, "web/nodes.html", {"config": config, "node_forms": {node_name: form}}, status=400)
-        config.nodes[node_name] = form.to_config()
+            return render(
+                request,
+                "web/nodes.html",
+                {
+                    "config": config,
+                    "node_forms": {node_name: form},
+                    "node_name_form": NodeNameForm(),
+                },
+                status=400,
+            )
+        if node_name == "local":
+            if form.cleaned_data["mode"] != "local":
+                form.add_error("mode", "This computer must remain local.")
+                return render(
+                    request, "web/nodes.html", {"config": config, "node_forms": {node_name: form}}, status=400
+                )
+            config.nodes["local"] = NodeConfig(mode="local", host=form.cleaned_data["host"])
+        else:
+            node = form.to_config()
+            if node.mode != "remote":
+                form.add_error("mode", "Configured hosts must remain remote.")
+                return render(
+                    request, "web/nodes.html", {"config": config, "node_forms": {node_name: form}}, status=400
+                )
+            config.nodes[node_name] = node
         runtime.config_store.save(config)
-        messages.success(request, f"Saved node {node_name}.")
+        messages.success(request, f"Saved host {node_name}.")
     except (ArcadiaError, ValueError) as exc:
         messages.error(request, str(exc))
-    return redirect("nodes")
+    return redirect("host")
+
+
+@require_POST
+def delete_node(request: HttpRequest, node_name: str) -> HttpResponse:
+    runtime = get_runtime()
+    try:
+        runtime.analysis.assert_configuration_mutable()
+        config = runtime.config_store.load()
+        if node_name not in config.nodes:
+            return HttpResponse("Host not found.", status=404)
+        if node_name == "local":
+            messages.error(request, "This computer cannot be deleted.")
+        elif any(service.node == node_name for service in config.priority_map.services.values()):
+            messages.error(request, f"Host {node_name} is used by a configured Priority Map service.")
+        else:
+            del config.nodes[node_name]
+            runtime.config_store.save(config)
+            messages.success(request, f"Deleted host {node_name}.")
+    except (ArcadiaError, ValueError) as exc:
+        messages.error(request, str(exc))
+    return redirect("host")
+
+
+@require_POST
+def test_node(request: HttpRequest, node_name: str) -> JsonResponse:
+    runtime = get_runtime()
+    config = runtime.config_store.load()
+    node = config.nodes.get(node_name)
+    if node is None:
+        return JsonResponse({"detail": "Host not found."}, status=404)
+    if node.mode != "remote" or node.instruction_port is None:
+        return JsonResponse({"state": "unreachable", "message": "Instruction server is unreachable."}, status=400)
+    reachable = InstructionClient(node.host, node.instruction_port, timeout=2.0, retries=0).health()
+    message = "Instruction server is reachable." if reachable else "Instruction server is unreachable."
+    return JsonResponse({"state": "reachable" if reachable else "unreachable", "message": message})
 
 
 @require_GET
@@ -172,7 +284,7 @@ def analysis_page(request: HttpRequest) -> HttpResponse:
         "web/analysis.html",
         {
             "config": config,
-            "pipeline_form": PipelineForm.from_config(config.pipeline),
+            "pipeline_form": PipelineForm.from_config(config.priority_map.pipeline),
             "analysis_form": AnalysisForm(),
             "analysis": runtime.analysis.status(),
         },
@@ -198,7 +310,7 @@ def save_pipeline(request: HttpRequest) -> HttpResponse:
                 },
                 status=400,
             )
-        config.pipeline = form.to_config()
+        config.priority_map.pipeline = form.to_config()
         runtime.config_store.save(config)
         messages.success(request, "Saved pipeline settings.")
     except (ArcadiaError, ValueError) as exc:
@@ -211,20 +323,149 @@ def start_analysis(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
     form = AnalysisForm(request.POST)
     if not form.is_valid():
-        messages.error(request, "Choose an input path before starting the analysis.")
+        messages.error(request, "Choose exactly one input path or retained upload before starting the analysis.")
         return redirect("analysis")
     try:
+        if form.cleaned_data["upload_id"]:
+            input_path = runtime.uploads.input_path(form.cleaned_data["upload_id"])
+        else:
+            input_path = Path(form.cleaned_data["input_path"]).expanduser().resolve(strict=True)
+            if not input_path.is_file() and not input_path.is_dir():
+                raise ValueError("Analysis input must be a regular file or directory.")
         config = runtime.config_store.load()
-        runtime.analysis.start(form.cleaned_data["input_path"], config)
+        runtime.analysis.start(input_path, config)
         messages.success(request, "Analysis started.")
     except (ArcadiaError, ValueError, OSError) as exc:
         messages.error(request, str(exc))
     return redirect("results")
 
 
+@require_http_methods(["GET", "POST"])
+def uploads(request: HttpRequest) -> JsonResponse:
+    runtime = get_runtime()
+    if request.method == "GET":
+        return JsonResponse({"uploads": [_upload_payload(manifest) for manifest in runtime.uploads.list()]})
+    try:
+        manifest = runtime.uploads.create(request.FILES.getlist("files"), request.POST.getlist("relative_paths"))
+    except (ArcadiaError, ValueError, OSError) as exc:
+        return JsonResponse({"detail": str(exc)}, status=400)
+    return JsonResponse({"upload": _upload_payload(manifest)}, status=201)
+
+
+@require_http_methods(["DELETE", "POST"])
+def delete_upload(request: HttpRequest, upload_id: str) -> JsonResponse:
+    if request.method == "POST" and request.GET.get("_method") != "DELETE":
+        return JsonResponse({"detail": "Use DELETE."}, status=405)
+    try:
+        get_runtime().uploads.delete(upload_id)
+    except FileNotFoundError:
+        return JsonResponse({"detail": "Upload not found."}, status=404)
+    except (ArcadiaError, ValueError, OSError) as exc:
+        return JsonResponse({"detail": str(exc)}, status=400)
+    return JsonResponse({"deleted": upload_id})
+
+
+def _upload_payload(manifest: dict[str, Any]) -> dict[str, Any]:
+    upload_id = str(manifest["id"])
+    return {
+        "id": upload_id,
+        "source_type": manifest["source_type"],
+        "file_count": manifest["file_count"],
+        "size_bytes": manifest["size_bytes"],
+        "created_at": manifest["created_at"],
+        "delete_url": f"/client/priority-map/uploads/{upload_id}/",
+    }
+
+
 @require_GET
 def analysis_status(request: HttpRequest) -> JsonResponse:
     return JsonResponse(get_runtime().analysis.status().to_dict())
+
+
+@require_POST
+def cancel_run(request: HttpRequest, run_id: str) -> JsonResponse:
+    analysis = get_runtime().analysis
+    status = analysis.status()
+    if run_id != status.run_id or not analysis.is_active():
+        return JsonResponse({"detail": "Active run not found."}, status=404)
+    try:
+        return JsonResponse(analysis.cancel_after_current_frame().to_dict())
+    except ArcadiaError as exc:
+        return JsonResponse({"detail": str(exc)}, status=409)
+
+
+@require_GET
+def run_stream(request: HttpRequest, run_id: str) -> HttpResponse:
+    analysis = get_runtime().analysis
+    status = analysis.status()
+    if run_id != status.run_id or status.state == "idle":
+        return HttpResponse("Run stream not found.", status=404)
+
+    def frames() -> Iterator[bytes]:
+        version = 0
+        while True:
+            jpeg, newest_version, state = analysis.preview(version)
+            if jpeg is not None and newest_version > version:
+                version = newest_version
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n" + f"Content-Length: {len(jpeg)}\r\n\r\n".encode() + jpeg + b"\r\n"
+                )
+                continue
+            if state in ("completed", "cancelled", "failed"):
+                return
+
+    response = StreamingHttpResponse(
+        frames(),
+        content_type=f"{TOOLS['priority-map'].presentation.stream_content_type}; boundary=frame",
+    )
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@require_GET
+def run_artifacts(request: HttpRequest, run_id: str) -> JsonResponse:
+    runtime = get_runtime()
+    try:
+        store = ArtifactStore(runtime.config_store.load().priority_map.output.root, run_id)
+        artifacts = [
+            {
+                "path": record.path,
+                "size_bytes": record.size_bytes,
+                "content_type": record.content_type,
+                "inline_url": f"/client/priority-map/runs/{run_id}/artifacts/{quote(record.path)}/",
+                "download_url": f"/client/priority-map/runs/{run_id}/artifacts/{quote(record.path)}/?download=1",
+            }
+            for record in store.list()
+        ]
+    except (ArcadiaError, OSError) as exc:
+        return JsonResponse({"detail": str(exc)}, status=404)
+    payload: dict[str, Any] = {"run_id": run_id, "artifacts": artifacts}
+    for artifact in artifacts:
+        if artifact["path"] == "effective_settings.json":
+            payload["effective_settings"] = artifact
+        elif artifact["path"] == "analysis.log":
+            payload["log"] = artifact
+    return JsonResponse(payload)
+
+
+@require_GET
+def run_artifact(request: HttpRequest, run_id: str, artifact_path: str) -> HttpResponse:
+    runtime = get_runtime()
+    try:
+        store = ArtifactStore(runtime.config_store.load().priority_map.output.root, run_id)
+        artifact = store.resolve(artifact_path)
+    except (ArcadiaError, OSError) as exc:
+        return HttpResponse(str(exc), status=404)
+    extension = artifact.suffix.lower()
+    inline = extension in TOOLS["priority-map"].presentation.inline_artifact_extensions
+    download = request.GET.get("download") == "1"
+    return FileResponse(
+        artifact.open("rb"),
+        as_attachment=download or not inline,
+        filename=artifact.name,
+        content_type=next((record.content_type for record in store.list() if record.path == artifact_path), None),
+    )
 
 
 @require_GET

@@ -1,6 +1,21 @@
 {% extends 'web/base.html' %}
 {% block title %}Results | Almost ARCADIA{% endblock %}
 {% block content %}
-<h2>Analysis results</h2>
-<section class="card"><p class="state {{ analysis.state }}">{{ analysis.state }}</p><p>{{ analysis.message }}</p>{% if analysis.error %}<h3>Failure</h3><pre>{{ analysis.error }}</pre>{% endif %}{% if analysis.output_directory %}<p>Output directory: <code>{{ analysis.output_directory }}</code></p>{% endif %}{% if analysis.output_paths %}<h3>Generated files</h3><ul>{% for path in analysis.output_paths %}<li><code>{{ path }}</code></li>{% endfor %}</ul>{% endif %}<a class="button" href="{% url 'analysis' %}">Back to analysis</a></section>
+<header class="page-heading">
+  <div><p class="eyebrow">Priority Map run</p><h1>Live results</h1><p class="page-heading__copy">Follow processing, inspect available previews, and open generated artifacts.</p></div>
+  <a class="button button--ghost" href="{% url 'priority_map' %}">New run</a>
+</header>
+<div class="results-grid" data-analysis-status-url="{% url 'analysis_status' %}">
+  <section class="panel viewer-panel">
+    <div class="panel__header"><div><p class="eyebrow">Live preview</p><h2>Priority Map stream</h2></div><span id="analysis-state" class="status-pill status-pill--{{ analysis.state }}">{{ analysis.state|title }}</span></div>
+    <div class="stream-frame" data-stream-frame></div>
+    <div class="viewer-toolbar"><span id="analysis-message">{{ analysis.error|default:analysis.message|default:'No active run' }}</span><span><strong id="analysis-frames">{{ analysis.frames_processed }}</strong> frames processed</span></div>
+    <div class="button-row">
+      <button class="button button--danger" type="button" data-cancel-run disabled>Cancel after current frame</button>
+      {% if analysis.output_directory %}<button class="button button--ghost" type="button" data-copy-text="{{ analysis.output_directory }}">Copy output path</button>{% endif %}
+    </div>
+  </section>
+  <aside class="stack"><section class="panel compact-panel"><p class="eyebrow">Run summary</p><dl class="definition-list"><div><dt>State</dt><dd>{{ analysis.state|title }}</dd></div><div><dt>Started</dt><dd>{{ analysis.started_at|default:'—' }}</dd></div><div><dt>Finished</dt><dd>{{ analysis.finished_at|default:'—' }}</dd></div><div><dt>Output</dt><dd><code>{{ analysis.output_directory|default:'Not allocated' }}</code></dd></div></dl></section>{% if analysis.error %}<section class="panel error-panel"><p class="eyebrow">Failure</p><h2>Run ended with an error</h2><pre>{{ analysis.error }}</pre></section>{% endif %}</aside>
+</div>
+<section class="panel artifacts-panel" data-artifacts-panel><div class="panel__header"><div><p class="eyebrow">Outputs</p><h2>Generated artifacts</h2></div></div><div class="artifact-list" data-artifact-list></div></section>
 {% endblock %}

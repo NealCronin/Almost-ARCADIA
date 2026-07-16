@@ -1,97 +1,128 @@
 {% extends 'web/base.html' %}
-{% block title %}Services | Almost ARCADIA{% endblock %}
+{% block title %}Priority Map model settings | Almost ARCADIA{% endblock %}
 {% block content %}
-<h2>Inference services</h2>
-<p>Control requests use the instruction port; inference traffic goes directly to each service port.</p>
-<div class="grid service-grid">
-  <section class="card">
-    <h3>LLM Service</h3>
-    <form method="post" action="{% url 'start_service' 'llm' %}">
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Priority Map</p>
+    <h1>Model settings</h1>
+    <p class="page-heading__copy">Configure the LLM and SAM3 services used by Priority Map. Services start automatically when a run begins; manual controls remain available for testing.</p>
+  </div>
+  <a class="button button--ghost" href="{% url 'priority_map' %}">Back to Priority Map</a>
+</header>
+
+<div class="settings-layout service-grid">
+  <section class="panel settings-card">
+    <div class="panel__header">
+      <div><p class="eyebrow">Scene understanding</p><h2>LLM service</h2></div>
+      {% if config.priority_map.services.llm %}<span class="status-pill">Port {{ config.priority_map.services.llm.port }}</span>{% endif %}
+    </div>
+    <form method="post" action="{% url 'start_service' 'llm' %}" class="stack">
       {% csrf_token %}
       {{ llm_form.non_field_errors }}
-      <fieldset>
+      <fieldset class="settings-group">
         <legend>Location</legend>
-        {{ llm_form.node.as_field_group }}
-        {{ llm_form.inference_port.as_field_group }}
-        {{ llm_form.bind_host.as_field_group }}
-      </fieldset>
-      <fieldset>
-        <legend>Model</legend>
-        {{ llm_form.model_source.as_field_group }}
-        <div data-model-source="local">{{ llm_form.model_path.as_field_group }}</div>
-        <div data-model-source="huggingface">
-          {{ llm_form.hf_repo.as_field_group }}
-          {{ llm_form.hf_file.as_field_group }}
-          {{ llm_form.hf_cache_dir.as_field_group }}
+        <div class="form-grid">
+          <div class="form-field">{{ llm_form.node.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.inference_port.as_field_group }}</div>
+          <div class="form-field form-field--full">{{ llm_form.bind_host.as_field_group }}</div>
         </div>
       </fieldset>
-      <fieldset>
-        <legend>Runtime</legend>
-        {{ llm_form.n_ctx.as_field_group }}
-        {{ llm_form.n_gpu_layers.as_field_group }}
-        {{ llm_form.n_threads.as_field_group }}
-        {{ llm_form.n_batch.as_field_group }}
-        {{ llm_form.n_ubatch.as_field_group }}
-        {{ llm_form.n_parallel.as_field_group }}
-        {{ llm_form.flash_attn.as_field_group }}
-        {{ llm_form.cache_type_k.as_field_group }}
-        {{ llm_form.cache_type_v.as_field_group }}
-        {{ llm_form.chat_format.as_field_group }}
-        {{ llm_form.model_alias.as_field_group }}
+      <fieldset class="settings-group">
+        <legend>Model</legend>
+        <div class="form-grid">
+          <div class="form-field form-field--full">{{ llm_form.model_source.as_field_group }}</div>
+          <div class="form-field form-field--full" data-model-source="local">{{ llm_form.model_path.as_field_group }}</div>
+          <div class="form-field form-field--full" data-model-source="huggingface">{{ llm_form.hf_repo.as_field_group }}</div>
+          <div class="form-field" data-model-source="huggingface">{{ llm_form.hf_file.as_field_group }}</div>
+          <div class="form-field" data-model-source="huggingface">{{ llm_form.hf_cache_dir.as_field_group }}</div>
+        </div>
       </fieldset>
-      <details>
+      <fieldset class="settings-group">
+        <legend>Runtime</legend>
+        <div class="form-grid">
+          <div class="form-field">{{ llm_form.n_ctx.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.n_gpu_layers.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.n_threads.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.n_parallel.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.n_batch.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.n_ubatch.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.cache_type_k.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.cache_type_v.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.chat_format.as_field_group }}</div>
+          <div class="form-field">{{ llm_form.model_alias.as_field_group }}</div>
+          <div class="form-field form-field--full checkbox-field">{{ llm_form.flash_attn.as_field_group }}</div>
+        </div>
+      </fieldset>
+      <details class="disclosure">
         <summary>Advanced settings</summary>
-        {{ llm_form.startup_timeout.as_field_group }}
-        {{ llm_form.additional_arguments.as_field_group }}
+        <div class="form-grid disclosure__body">
+          <div class="form-field">{{ llm_form.startup_timeout.as_field_group }}</div>
+          <div class="form-field form-field--full">{{ llm_form.additional_arguments.as_field_group }}</div>
+        </div>
       </details>
-      <button type="submit">Start or replace LLM</button>
+      <div class="form-actions">
+        <button class="button button--primary" type="submit">Save LLM settings</button>
+      </div>
     </form>
-    {% if config.services.llm %}
-      <form method="post" action="{% url 'stop_service' 'llm' %}">
-        {% csrf_token %}<button class="danger" type="submit">Stop LLM :{{ config.services.llm.port }}</button>
-      </form>
+    {% if config.priority_map.services.llm %}
+    <form method="post" action="{% url 'stop_service' 'llm' %}" class="inline-form">
+      {% csrf_token %}<button class="button button--danger button--small" type="submit">Stop LLM</button>
+    </form>
     {% endif %}
   </section>
-  <section class="card">
-    <h3>SAM3 Service</h3>
-    <form method="post" action="{% url 'start_service' 'sam3' %}">
+
+  <section class="panel settings-card">
+    <div class="panel__header">
+      <div><p class="eyebrow">Segmentation</p><h2>SAM3 service</h2></div>
+      {% if config.priority_map.services.sam3 %}<span class="status-pill">Port {{ config.priority_map.services.sam3.port }}</span>{% endif %}
+    </div>
+    <form method="post" action="{% url 'start_service' 'sam3' %}" class="stack">
       {% csrf_token %}
       {{ sam_form.non_field_errors }}
-      <fieldset>
+      <fieldset class="settings-group">
         <legend>Location</legend>
-        {{ sam_form.node.as_field_group }}
-        {{ sam_form.inference_port.as_field_group }}
-        {{ sam_form.bind_host.as_field_group }}
+        <div class="form-grid">
+          <div class="form-field">{{ sam_form.node.as_field_group }}</div>
+          <div class="form-field">{{ sam_form.inference_port.as_field_group }}</div>
+          <div class="form-field form-field--full">{{ sam_form.bind_host.as_field_group }}</div>
+        </div>
       </fieldset>
-      <fieldset>
+      <fieldset class="settings-group">
         <legend>Model</legend>
-        {{ sam_form.checkpoint.as_field_group }}
-        {{ sam_form.confidence.as_field_group }}
+        <div class="form-grid">
+          <div class="form-field form-field--full">{{ sam_form.checkpoint.as_field_group }}</div>
+          <div class="form-field">{{ sam_form.confidence.as_field_group }}</div>
+        </div>
       </fieldset>
-      <details>
+      <details class="disclosure">
         <summary>Advanced settings</summary>
-        {{ sam_form.startup_timeout.as_field_group }}
-        {{ sam_form.additional_arguments.as_field_group }}
+        <div class="form-grid disclosure__body">
+          <div class="form-field">{{ sam_form.startup_timeout.as_field_group }}</div>
+          <div class="form-field form-field--full">{{ sam_form.additional_arguments.as_field_group }}</div>
+        </div>
       </details>
-      <button type="submit">Start or replace SAM3</button>
+      <div class="form-actions"><button class="button button--primary" type="submit">Save SAM3 settings</button></div>
     </form>
-    {% if config.services.sam3 %}
-      <form method="post" action="{% url 'stop_service' 'sam3' %}">
-        {% csrf_token %}<button class="danger" type="submit">Stop SAM3 :{{ config.services.sam3.port }}</button>
-      </form>
+    {% if config.priority_map.services.sam3 %}
+    <form method="post" action="{% url 'stop_service' 'sam3' %}" class="inline-form">
+      {% csrf_token %}<button class="button button--danger button--small" type="submit">Stop SAM3</button>
+    </form>
     {% endif %}
   </section>
 </div>
-<section class="card"><h3>Local service registry</h3><ul>{% for service in services %}<li>{{ service.service_type }} :{{ service.port }} — {{ service.running }} — <a href="{% url 'service_logs' service.port %}">logs</a></li>{% empty %}<li>No locally owned services.</li>{% endfor %}</ul>{% if log_text is not None %}<h3>Log tail for :{{ log_port }}</h3><pre>{{ log_text }}</pre>{% endif %}</section>
-<script>
-  (() => {
-    const source = document.getElementById("llm_model_source");
-    const fields = document.querySelectorAll("[data-model-source]");
-    const updateModelSource = () => fields.forEach((field) => {
-      field.hidden = field.dataset.modelSource !== source.value;
-    });
-    source.addEventListener("change", updateModelSource);
-    updateModelSource();
-  })();
-</script>
+
+<section class="panel service-registry">
+  <div class="panel__header"><div><p class="eyebrow">Diagnostics</p><h2>Locally owned services</h2></div></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Service</th><th>Port</th><th>Status</th><th>Logs</th></tr></thead>
+      <tbody>
+      {% for service in services %}
+        <tr><td>{{ service.service_type|upper }}</td><td>{{ service.port }}</td><td><span class="status-pill {% if service.running %}status-pill--ready{% endif %}">{% if service.running %}Running{% else %}Stopped{% endif %}</span></td><td><a href="{% url 'service_logs' service.port %}">View log</a></td></tr>
+      {% empty %}<tr><td colspan="4" class="muted">No locally owned services.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if log_text is not None %}<h3>Log tail for port {{ log_port }}</h3><pre>{{ log_text }}</pre>{% endif %}
+</section>
 {% endblock %}

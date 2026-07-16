@@ -1,0 +1,53 @@
+{% extends 'web/base.html' %}
+{% block title %}Client | Almost ARCADIA{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Client portal</p>
+    <h1>Choose a tool</h1>
+    <p class="page-heading__copy">Each tool keeps its own model and processing settings. Priority Map is the first integrated workflow.</p>
+  </div>
+  {% if analysis.state == 'starting' or analysis.state == 'running' %}
+    <a class="status-pill status-pill--running" href="{% url 'results' %}">
+      <span class="status-dot"></span>{{ analysis.message|default:'Analysis running' }}
+    </a>
+  {% endif %}
+</header>
+
+<section class="tool-grid" aria-label="Available tools">
+  <article class="tool-card tool-card--ready">
+    <div class="tool-card__header">
+      <span class="tool-card__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 18 9 9l4 5 3-4 4 8H4Z"/><path d="M5 5h14v14H5z"/></svg>
+      </span>
+      <span class="status-pill status-pill--ready">Available</span>
+    </div>
+    <div class="tool-card__body">
+      <p class="eyebrow">Visual analysis</p>
+      <h2>Priority Map</h2>
+      <p>Process image folders, individual images, or video with remote-capable LLM and SAM3 inference.</p>
+      <ul class="feature-list">
+        <li>Client-side source processing</li>
+        <li>Automatic service startup</li>
+        <li>Heatmaps, observations, and graph outputs</li>
+      </ul>
+    </div>
+    <div class="tool-card__actions">
+      <a class="button button--primary" href="{% url 'priority_map' %}">Open Priority Map</a>
+      <a class="button button--ghost" href="{% url 'priority_map_models' %}">Model settings</a>
+    </div>
+  </article>
+
+  <article class="tool-card tool-card--future" aria-label="Future tools">
+    <div class="tool-card__header">
+      <span class="tool-card__icon" aria-hidden="true">+</span>
+      <span class="status-pill">Extensible</span>
+    </div>
+    <div class="tool-card__body">
+      <p class="eyebrow">Future workflows</p>
+      <h2>More tools later</h2>
+      <p>The portal is intentionally structured for additional independently configured tools without exposing unfinished options.</p>
+    </div>
+  </article>
+</section>
+{% endblock %}

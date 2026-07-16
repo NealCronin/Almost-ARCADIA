@@ -1,7 +1,52 @@
 {% extends 'web/base.html' %}
-{% block title %}Nodes | Almost ARCADIA{% endblock %}
+{% block title %}Host | Almost ARCADIA{% endblock %}
 {% block content %}
-<h2>Compute nodes</h2>
-<p>Nodes are trusted LAN/VPN hosts. Remote nodes require an instruction server.</p>
-{% for name, form in node_forms.items %}<section class="card"><h3>{{ name }}</h3><form method="post" action="{% url 'save_node' name %}">{% csrf_token %}{{ form.as_p }}<button type="submit">Save node</button></form></section>{% endfor %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Host portal</p>
+    <h1>Compute hosts</h1>
+    <p class="page-heading__copy">Define this computer and trusted LAN or VPN machines used by tool-specific model services.</p>
+  </div>
+</header>
+
+<div class="stack stack--large">
+  <section class="panel host-panel">
+    <div class="panel__header"><div><p class="eyebrow">Add remote host</p><h2>Trusted instruction server</h2></div></div>
+    <form method="post" action="{% url 'create_node' %}" class="form-grid">
+      {% csrf_token %}
+      <div class="form-field">{{ node_name_form.name.as_field_group }}</div>
+      <div class="form-actions"><button class="button button--primary" type="submit">Add host</button></div>
+    </form>
+  </section>
+
+  {% for name, form in node_forms.items %}
+  <section class="panel host-panel">
+    <div class="panel__header">
+      <div>
+        <p class="eyebrow">{% if name == 'local' %}Built-in host{% else %}Configured host{% endif %}</p>
+        <h2>{% if name == 'local' %}This computer{% else %}{{ name }}{% endif %}</h2>
+      </div>
+      <span class="status-pill {% if form.initial.mode == 'local' %}status-pill--ready{% endif %}">{{ form.initial.mode|default:'remote'|title }}</span>
+    </div>
+    <form method="post" action="{% url 'edit_node' name %}" class="form-grid" data-node-form>
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      <div class="form-field">{{ form.mode.label_tag }}{{ form.mode }}{{ form.mode.errors }}</div>
+      <div class="form-field form-field--wide">{{ form.host.label_tag }}{{ form.host }}{{ form.host.errors }}</div>
+      <div class="form-field" data-instruction-port>{{ form.instruction_port.label_tag }}{{ form.instruction_port }}{{ form.instruction_port.errors }}</div>
+      <div class="form-actions form-field--full">
+        <button class="button button--primary" type="submit">Save host</button>
+        {% if name != 'local' %}
+          <button class="button button--ghost" type="button" data-test-host data-test-url="{% url 'test_node' name %}">Test connection</button>
+        {% endif %}
+      </div>
+    </form>
+    {% if name != 'local' %}
+    <form method="post" action="{% url 'delete_node' name %}" class="button-row">
+      {% csrf_token %}<button class="text-button" type="submit">Delete host</button>
+    </form>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
 {% endblock %}

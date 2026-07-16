@@ -3,13 +3,14 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from core.analysis import AnalysisCoordinator
 from core.config import AppConfig, ConfigStore
 from core.errors import AnalysisError, InferenceError
-from core.pipeline.priority_map_adapter import PipelineResult
+from core.pipeline.priority_map_adapter import PipelineResult, PriorityMapAdapter
 from core.services.specs import ServiceEndpoint
 
 
@@ -164,3 +165,49 @@ def test_rapid_sequential_analyses_use_distinct_output_directories(tmp_path: Pat
     assert first.output_directory != second.output_directory
     assert Path(first.output_directory).is_dir()
     assert Path(second.output_directory).is_dir()
+
+
+def test_cancel_processes_current_frame_preserves_partial_output_and_closes_runner(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    (source / "frame.jpg").write_bytes(b"jpeg")
+    started = threading.Event()
+    release = threading.Event()
+
+    class FrameRunner:
+        frames_processed = 0
+
+        def has_next(self):
+            return self.frames_processed < 2
+
+        def run_frame(self):
+            self.frames_processed += 1
+            started.set()
+            release.wait(timeout=2)
+            return SimpleNamespace(frame_index=0, image_name="frame.jpg", keep_running=True)
+
+        def result(self):
+            return SimpleNamespace(frames_processed=self.frames_processed)
+
+        def close(self):
+            self.closed = True
+
+    runner = FrameRunner()
+    adapter = PriorityMapAdapter(runner_factory=lambda **_: runner)
+    coordinator = AnalysisCoordinator(None, FakeController(), adapter)
+    coordinator.start(source, app_config(tmp_path))
+    assert started.wait(timeout=2)
+    cancelling = coordinator.cancel_after_current_frame()
+    assert cancelling.state == "cancelling"
+    release.set()
+    deadline = time.monotonic() + 2
+    while coordinator.is_active() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    status = coordinator.status()
+    assert status.state == "cancelled"
+    assert status.frames_processed == 1
+    assert runner.closed
+    assert status.stream_url == f"/client/priority-map/runs/{status.run_id}/stream/"
+    assert status.artifacts_url == f"/client/priority-map/runs/{status.run_id}/artifacts/"
+    assert Path(status.output_directory, "analysis.log").exists()

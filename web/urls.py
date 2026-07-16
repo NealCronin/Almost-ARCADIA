@@ -4,6 +4,27 @@ from web import views
 
 urlpatterns = [
     path("", views.home, name="home"),
+    # Portal-oriented aliases. Existing routes remain available below so the
+    # UI first pass does not break backend tests or bookmarked URLs.
+    path("host/", views.nodes, name="host"),
+    path("host/nodes/", views.create_node, name="create_node"),
+    path("host/nodes/<str:node_name>/", views.save_node, name="edit_node"),
+    path("host/nodes/<str:node_name>/delete/", views.delete_node, name="delete_node"),
+    path("host/nodes/<str:node_name>/test/", views.test_node, name="test_node"),
+    path("client/", views.client_portal, name="client"),
+    path("client/priority-map/", views.analysis_page, name="priority_map"),
+    path("client/priority-map/models/", views.services, name="priority_map_models"),
+    path("client/priority-map/uploads/", views.uploads, name="priority_map_uploads"),
+    path("client/priority-map/uploads/<str:upload_id>/", views.delete_upload, name="delete_upload"),
+    path("client/priority-map/runs/", views.start_analysis, name="priority_map_runs"),
+    path("client/priority-map/runs/<str:run_id>/cancel/", views.cancel_run, name="cancel_run"),
+    path("client/priority-map/runs/<str:run_id>/stream/", views.run_stream, name="run_stream"),
+    path("client/priority-map/runs/<str:run_id>/artifacts/", views.run_artifacts, name="run_artifacts"),
+    path(
+        "client/priority-map/runs/<str:run_id>/artifacts/<path:artifact_path>/",
+        views.run_artifact,
+        name="run_artifact",
+    ),
     path("services/", views.services, name="services"),
     path("services/<str:service_name>/start/", views.start_service, name="start_service"),
     path("services/<str:service_name>/stop/", views.stop_service, name="stop_service"),
