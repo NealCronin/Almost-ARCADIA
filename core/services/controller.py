@@ -44,7 +44,8 @@ class ServiceController:
     def start(self, spec: ServiceSpec) -> ServiceEndpoint:
         with self._lock:
             self._reap_dead_locked()
-            if spec.port in self._services:
+            replacing = spec.port in self._services
+            if replacing:
                 self.stop(spec.port)
             runtime = self._runtime_for(spec)
             log_path = self.log_dir / f"{spec.service_type}-{spec.port}.log"
@@ -63,6 +64,11 @@ class ServiceController:
             except Exception as exc:
                 if spec.port in self._services:
                     self._stop_running_locked(spec.port)
+                if replacing:
+                    raise ServiceStartupError(
+                        f"Replacement failed for {spec.service_type} on port {spec.port}; "
+                        f"the previous owned service was stopped and was not restored: {exc}"
+                    ) from exc
                 if isinstance(exc, (ServiceError, ValueError, FileNotFoundError)):
                     raise
                 raise ServiceStartupError(f"Could not start {spec.service_type} on port {spec.port}: {exc}") from exc

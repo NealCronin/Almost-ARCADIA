@@ -28,6 +28,10 @@ class InstructionError(ServiceError):
 class InferenceError(ArcadiaError):
     """An inference request failed or returned an invalid response."""
 
+    def __init__(self, message: str, service_type: str | None = None) -> None:
+        super().__init__(message)
+        self.service_type = service_type
+
 
 class AnalysisError(ArcadiaError):
     """An analysis could not complete."""

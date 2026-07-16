@@ -61,7 +61,7 @@ class LLMClient:
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, OSError, ValueError) as exc:
-            raise InferenceError(f"LLM request failed: {exc}") from exc
+            raise InferenceError(f"LLM request failed: {exc}", service_type="llm") from exc
         try:
             message = payload["choices"][0]["message"]["content"]
             if isinstance(message, list):
@@ -69,7 +69,10 @@ class LLMClient:
             else:
                 text = str(message)
         except (KeyError, IndexError, TypeError) as exc:
-            raise InferenceError("LLM response did not contain choices[0].message.content.") from exc
+            raise InferenceError(
+                "LLM response did not contain choices[0].message.content.",
+                service_type="llm",
+            ) from exc
         return LLMResult(text=text, raw_response=payload if isinstance(payload, dict) else None)
 
     @staticmethod

@@ -103,3 +103,64 @@ def test_analysis_restarts_once_after_inference_failure(tmp_path: Path) -> None:
     assert status.state == "completed"
     assert adapter.calls == 2
     assert len(controller.started) == 4
+
+
+@pytest.mark.parametrize(
+    ("service_type", "expected_ports"),
+    [
+        ("llm", [8081, 8090, 8081]),
+        ("sam3", [8081, 8090, 8090]),
+        (None, [8081, 8090, 8081, 8090]),
+    ],
+)
+def test_analysis_restarts_only_attributed_service(
+    tmp_path: Path,
+    service_type: str | None,
+    expected_ports: list[int],
+) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+
+    class RetryAdapter(FakeAdapter):
+        def run(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise InferenceError("connection lost", service_type=service_type)
+            return PipelineResult(kwargs["output_directory"], {}, [], 0)
+
+    controller = FakeController()
+    adapter = RetryAdapter()
+    status = AnalysisCoordinator(None, controller, adapter).run_sync(source, app_config(tmp_path))
+
+    assert status.state == "completed"
+    assert adapter.calls == 2
+    assert [spec.port for spec in controller.started] == expected_ports
+
+
+def test_analysis_stops_after_one_retry(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+
+    class AlwaysFailAdapter(FakeAdapter):
+        def run(self, **kwargs):
+            self.calls += 1
+            raise InferenceError("connection lost", service_type="llm")
+
+    adapter = AlwaysFailAdapter()
+    status = AnalysisCoordinator(None, FakeController(), adapter).run_sync(source, app_config(tmp_path))
+
+    assert status.state == "failed"
+    assert adapter.calls == 2
+
+
+def test_rapid_sequential_analyses_use_distinct_output_directories(tmp_path: Path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    coordinator = AnalysisCoordinator(None, FakeController(), FakeAdapter())
+
+    first = coordinator.run_sync(source, app_config(tmp_path))
+    second = coordinator.run_sync(source, app_config(tmp_path))
+
+    assert first.output_directory != second.output_directory
+    assert Path(first.output_directory).is_dir()
+    assert Path(second.output_directory).is_dir()

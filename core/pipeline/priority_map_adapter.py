@@ -92,59 +92,165 @@ class _SceneResult:
 
 
 class _RemoteSegment:
+    """Priority Map-compatible segmenter using remote SAM and local optical flow."""
+
+    FLOW_SCALE = 0.05
+
     def __init__(
-        self, sam_client: SAMClient, sam_thresh: float = 0.25, sam_resize: tuple[int, int] | None = None, **_: Any
+        self,
+        sam_client: SAMClient,
+        sam_thresh: float = 0.25,
+        sam_resize: tuple[int, int] | None = None,
+        **_: Any,
     ) -> None:
         self.sam_client = sam_client
         self.sam_thresh = sam_thresh
         self.sam_resize = sam_resize
         self.segmentations: list[Any] = []
+        self.dis = cv2.DISOpticalFlow.create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+        self.prev_gray: np.ndarray | None = None
         self.transform_dx = 0.0
         self.transform_dy = 0.0
 
     def close(self) -> None:
-        return None
+        """Match Priority Map's segmenter lifecycle without a local predictor."""
+
+    def _get_flow_map(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if self.prev_gray is None:
+            raise RuntimeError("Cannot calculate optical flow without a previous frame.")
+        current_gray_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        height, width = current_gray_full.shape[:2]
+        flow_size = (
+            max(1, int(width * self.FLOW_SCALE)),
+            max(1, int(height * self.FLOW_SCALE)),
+        )
+        current_gray = cv2.resize(current_gray_full, flow_size, interpolation=cv2.INTER_AREA)
+        previous_gray = cv2.resize(self.prev_gray, flow_size, interpolation=cv2.INTER_AREA)
+        initial_flow = np.zeros((*current_gray.shape, 2), dtype=np.float32)
+        flow = self.dis.calc(current_gray, previous_gray, initial_flow)
+        flow = cv2.resize(flow, (width, height), interpolation=cv2.INTER_LINEAR)
+        flow_x = np.asarray(flow[..., 0], dtype=np.float32) / self.FLOW_SCALE
+        flow_y = np.asarray(flow[..., 1], dtype=np.float32) / self.FLOW_SCALE
+        self.transform_dx = float(np.median(flow_x))
+        self.transform_dy = float(np.median(flow_y))
+        x_coordinates, y_coordinates = np.meshgrid(np.arange(width), np.arange(height))
+        return (
+            (x_coordinates + flow_x).astype(np.float32),
+            (y_coordinates + flow_y).astype(np.float32),
+        )
+
+    @staticmethod
+    def _remap_centroid(
+        centroid: tuple[int, int] | None,
+        map_x: np.ndarray,
+        map_y: np.ndarray,
+    ) -> tuple[int, int] | None:
+        if centroid is None:
+            return None
+        height, width = map_x.shape[:2]
+        x = max(0, min(width - 1, int(round(centroid[0]))))
+        y = max(0, min(height - 1, int(round(centroid[1]))))
+        new_x = int(round(x - (map_x[y, x] - x)))
+        new_y = int(round(y - (map_y[y, x] - y)))
+        return (
+            max(0, min(width - 1, new_x)),
+            max(0, min(height - 1, new_y)),
+        )
+
+    def _propagate(self, image: np.ndarray) -> None:
+        if self.prev_gray is None:
+            return
+        map_x, map_y = self._get_flow_map(image)
+        height, width = image.shape[:2]
+        for segmentation in self.segmentations:
+            mask = np.asarray(segmentation.mask, dtype=np.uint8)
+            if mask.shape[:2] != (height, width):
+                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            segmentation.mask = cv2.remap(
+                mask,
+                map_x,
+                map_y,
+                interpolation=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            segmentation.centroid = self._remap_centroid(segmentation.centroid, map_x, map_y)
+
+    @staticmethod
+    def _score_for(label: str, scene_dict: dict[str, Any]) -> float:
+        value = scene_dict.get(label, {})
+        if isinstance(value, dict):
+            try:
+                return float(value.get("score", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    def _replace_with_remote_results(self, image: np.ndarray, scene_dict: dict[str, Any]) -> float:
+        from priority_map.modules.Segment import Segmentation
+
+        prompts = [str(label).strip() for label in scene_dict if str(label).strip()]
+        if not prompts:
+            return 0.0
+        started = time.perf_counter()
+        result = self.sam_client.segment(
+            image,
+            prompts,
+            confidence=self.sam_thresh,
+            resize=self.sam_resize,
+        )
+        elapsed = time.perf_counter() - started
+        height, width = image.shape[:2]
+        replacement: list[Any] = []
+        for index, raw_mask in enumerate(result.masks):
+            mask = np.asarray(raw_mask, dtype=np.uint8)
+            if mask.ndim > 2:
+                mask = np.squeeze(mask)
+            if mask.shape[:2] != (height, width):
+                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            label = result.labels[index] if index < len(result.labels) else prompts[min(index, len(prompts) - 1)]
+            if label not in scene_dict:
+                label = prompts[min(index, len(prompts) - 1)]
+            centroid = None
+            if index < len(result.bounding_boxes):
+                box = result.bounding_boxes[index]
+                if len(box) >= 4:
+                    x_scale = width / self.sam_resize[0] if self.sam_resize else 1.0
+                    y_scale = height / self.sam_resize[1] if self.sam_resize else 1.0
+                    centroid = (
+                        max(0, min(width - 1, int(round((float(box[0]) + float(box[2])) * x_scale / 2)))),
+                        max(0, min(height - 1, int(round((float(box[1]) + float(box[3])) * y_scale / 2)))),
+                    )
+            replacement.append(
+                Segmentation(
+                    mask=mask,
+                    label=label,
+                    id="",
+                    score=self._score_for(label, scene_dict),
+                    centroid=centroid,
+                    geo_pos=None,
+                )
+            )
+        self.segmentations = replacement
+        return elapsed
 
     def get_segmentations(self, image: np.ndarray, scene_dict: dict[str, Any] | None):
-        from priority_map.modules.Segment import Segmentation, SegmentationResult
+        from priority_map.modules.Segment import SegmentationResult
 
-        if scene_dict is not None:
-            prompts = [str(label) for label in scene_dict if str(label).strip()]
-            if prompts:
-                result = self.sam_client.segment(
-                    image,
-                    prompts,
-                    confidence=self.sam_thresh,
-                    resize=self.sam_resize,
-                )
-                self.segmentations = []
-                height, width = image.shape[:2]
-                for index, raw_mask in enumerate(result.masks):
-                    mask = np.asarray(raw_mask, dtype=np.uint8)
-                    if mask.ndim > 2:
-                        mask = np.squeeze(mask)
-                    if mask.shape[:2] != (height, width):
-                        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
-                    label = (
-                        result.labels[index] if index < len(result.labels) else prompts[min(index, len(prompts) - 1)]
-                    )
-                    score = result.confidences[index] if index < len(result.confidences) else self.sam_thresh
-                    centroid = None
-                    if index < len(result.bounding_boxes):
-                        box = result.bounding_boxes[index]
-                        if len(box) >= 4:
-                            centroid = (
-                                max(0, min(width - 1, int(round((float(box[0]) + float(box[2])) / 2)))),
-                                max(0, min(height - 1, int(round((float(box[1]) + float(box[3])) / 2)))),
-                            )
-                    self.segmentations.append(
-                        Segmentation(mask=mask, label=label, id="", score=float(score), centroid=centroid, geo_pos=None)
-                    )
-        return SegmentationResult(self.segmentations, 0.0, (self.transform_dx, self.transform_dy))
+        self._propagate(image)
+        sam3_seconds = self._replace_with_remote_results(image, scene_dict) if scene_dict is not None else 0.0
+        self.prev_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return SegmentationResult(
+            segmentations=self.segmentations,
+            sam3_seconds=sam3_seconds,
+            flow_transform=(self.transform_dx, self.transform_dy),
+        )
 
 
 class PriorityMapAdapter:
     """The only Almost ARCADIA integration boundary for external Priority Map."""
+
+    PRIORITY_MAP_API_COMMIT = "ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"
 
     def __init__(self, runner_factory: Callable[..., Any] | None = None) -> None:
         self.runner_factory = runner_factory
@@ -211,23 +317,37 @@ class PriorityMapAdapter:
                 "Priority Map is not installed. Install it from https://github.com/josephletobar/priority_map."
             ) from exc
 
-        original_scene, original_segment = priority_runner.SceneUnderstanding, priority_runner.Segment
+        required_symbols = ("PriorityMapRunner", "SceneUnderstanding", "Segment")
+        missing_symbols = [name for name in required_symbols if not hasattr(priority_runner, name)]
+        if missing_symbols:
+            raise AnalysisError(
+                "Priority Map API is incompatible with this adapter "
+                f"(tested commit {self.PRIORITY_MAP_API_COMMIT}; missing {', '.join(missing_symbols)})."
+            )
+        runner_class = priority_runner.PriorityMapRunner
+        if not callable(runner_class):
+            raise AnalysisError(
+                "Priority Map API is incompatible with this adapter "
+                f"(tested commit {self.PRIORITY_MAP_API_COMMIT}; PriorityMapRunner is not callable)."
+            )
+        original_scene = priority_runner.SceneUnderstanding
+        original_segment = priority_runner.Segment
         sam_resize = settings.get("sam_resize")
         if isinstance(sam_resize, int):
             sam_resize = (sam_resize, sam_resize)
-        priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
-            llm_client,
-            configured_prompts=settings.get("prompts", []),
-            model=settings.get("scene_model") or "local-model",
-            debug=bool(settings.get("debug", False)),
-        )
-        priority_runner.Segment = lambda **kwargs: _RemoteSegment(
-            sam_client,
-            sam_thresh=float(settings.get("sam_confidence", 0.25)),
-            sam_resize=sam_resize,
-        )
         try:
-            return priority_runner.PriorityMapRunner(
+            priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
+                llm_client,
+                configured_prompts=settings.get("prompts", []),
+                model=settings.get("scene_model") or "local-model",
+                debug=bool(settings.get("debug", False)),
+            )
+            priority_runner.Segment = lambda **kwargs: _RemoteSegment(
+                sam_client,
+                sam_thresh=float(settings.get("sam_confidence", 0.25)),
+                sam_resize=sam_resize,
+            )
+            return runner_class(
                 image_folder=image_folder,
                 output_dir=output_directory,
                 task=settings.get("task", "Find cars"),
@@ -245,7 +365,8 @@ class PriorityMapAdapter:
                 scene_model=settings.get("scene_model"),
             )
         finally:
-            priority_runner.SceneUnderstanding, priority_runner.Segment = original_scene, original_segment
+            priority_runner.SceneUnderstanding = original_scene
+            priority_runner.Segment = original_segment
 
     @staticmethod
     def _run_runner(

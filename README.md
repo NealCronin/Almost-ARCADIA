@@ -16,6 +16,8 @@ The Priority Map pipeline runs on the client. Image folders remain in place. Vid
 
 A service is identified by `(host, inference port)`. Reconfiguring an occupied port replaces only the process previously launched and still owned by this application. No process is killed by scanning operating-system port ownership.
 
+Replacement is stop-then-start. If a replacement fails its new child is terminated, its log handle is closed, and the port is removed from the owned-service registry; the prior service is **not** restored. The UI and instruction API report that the port is left without a running service.
+
 ## Installation
 
 Python 3.11 or newer is required. Create a virtual environment first.
@@ -38,33 +40,33 @@ python -m pip install --upgrade pip
 pip install -e ".[dev,sam,pipeline]"
 ```
 
-The `pipeline` extra installs the current Priority Map repository directly from GitHub. The `sam` extra installs the Ultralytics package used by the current Priority Map SAM3 implementation. If the external SAM3 source has a newer installation procedure, install that source in the same environment and keep the checkpoint path in `config.json` accurate.
+The `pipeline` extra installs Priority Map at commit `ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d`, whose `PriorityMapRunner` constructor imports and instantiates `priority_map.runner.SceneUnderstanding` and `Segment`. The `sam` extra installs the Ultralytics package used by the current Priority Map SAM3 implementation. If the external SAM3 source has a newer installation procedure, install that source in the same environment and keep the checkpoint path in `config.json` accurate.
 
 ### llama-cpp-python variants
 
-`llama-cpp-python` is a base dependency. Select the build appropriate to the machine before or instead of the editable install if a prebuilt wheel is unavailable.
+Almost ARCADIA pins `llama-cpp-python[server]==0.3.34`. Its server CLI generates flags from Pydantic field names, so the validated forms are `--n_ctx`, `--n_gpu_layers`, `--chat_format`, and `--model_alias`. Readiness probes `/v1/models`, an endpoint exposed by that server release.
 
 CPU:
 
 ```powershell
 $env:CMAKE_ARGS="-DGGML_NATIVE=OFF"
-pip install llama-cpp-python
+pip install "llama-cpp-python[server]==0.3.34"
 ```
 
 CUDA (a compatible CUDA toolkit and Visual C++ build tools are required on Windows):
 
 ```powershell
 $env:CMAKE_ARGS="-DGGML_CUDA=on"
-pip install llama-cpp-python
+pip install "llama-cpp-python[server]==0.3.34"
 ```
 
 Apple Metal:
 
 ```bash
-CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_METAL=on" pip install "llama-cpp-python[server]==0.3.34"
 ```
 
-Do not use split GGUF files. Configure either one exact `model_path`, or both `hf_repo` and `hf_file`. Gated Hugging Face repositories are not supported by this prototype.
+Do not use split GGUF files. Configure either one exact `model_path`, or both `hf_repo` and `hf_file`. `hf_repo`/`hf_file` are resolved with `huggingface-hub` into a local cached GGUF before the server starts; they are not passed as unsupported llama-cpp server flags. Downloading uses `token=False`, so gated Hugging Face repositories are not supported.
 
 ### SAM3 checkpoint
 
@@ -107,7 +109,7 @@ Set `services.sam3.settings.checkpoint` to that path. A missing or unloadable ch
 
 The UI saves configuration atomically through a same-directory temporary file and replacement. `ARCADIA_CONFIG` can point Django at another JSON file. No live process state is stored in JSON or SQLite.
 
-Supported useful runtime settings include `bind_host`, `python_executable` for local trusted setup, `startup_timeout`, `n_ctx`, `n_gpu_layers`, `chat_format`, `model_alias`, `extra_args`, and the exact model source fields. The remote instruction API rejects executable and arbitrary command fields. Unit tests alone use the command escape hatch.
+Supported useful runtime settings include `bind_host`, `python_executable` for local trusted setup, `startup_timeout`, `n_ctx`, `n_gpu_layers`, `chat_format`, `model_alias`, `extra_args`, and exact model-source fields. The remote instruction API rejects executable, server-module, shell, and arbitrary command fields. Unit tests alone use the command escape hatch.
 
 ## Start a host instruction server
 
@@ -166,7 +168,7 @@ The response contains `masks`, `labels`, `confidences`, and `bounding_boxes`. SA
 5. Follow progress on the analysis page or `/analysis/status/`.
 6. Open **Results** after completion.
 
-The coordinator permits one active analysis. It saves `effective_settings.json` and `analysis.log` before work begins. Incremental Priority Map output is preserved after failures. If a direct service failure is detected, the coordinator reprovisions both configured services once and retries the pipeline once; a second failure ends the analysis.
+The coordinator permits one active analysis. It saves `effective_settings.json` and `analysis.log` before work begins. Output directories include UTC microseconds and are reserved atomically so rapid sequential runs do not share them. Incremental Priority Map output is preserved after failures. When an `LLMClient` or `SAMClient` identifies its failing service, only that service is reprovisioned and the pipeline is retried once. Unknown service failures conservatively restart both. A second failure ends the analysis.
 
 Outputs are under:
 
@@ -190,7 +192,43 @@ mypy core web project manage.py
 python manage.py check
 ```
 
-The repository tests mock subprocesses, HTTP responses, and SAM predictors at their boundaries. They do not download model weights or claim that a heavyweight checkpoint is installed.
+Unit coverage is boundary-focused: subprocess lifecycle, direct HTTP clients, endpoint serialization, Priority Map class substitution, and optical-flow propagation are tested without model weights. The latest validation run reported `60 passed, 1 warning`; the warning is Starlette's external `TestClient` deprecation notice for `httpx2`. `ruff format --check .`, `ruff check .`, `mypy core web project manage.py`, and `python manage.py check` all passed.
+
+### Observed local validation environment
+
+Validation ran with Python 3.13 and Django `6.0.6`, FastAPI `0.139.0`, Uvicorn `0.51.0`, Requests `2.33.1`, NumPy `2.5.1`, OpenCV `5.0.0.93`, pytest `9.1.1`, Ruff `0.15.21`, and mypy `2.3.0`. The declared runtime constraint remains Django `>=5.1,<6`; Django 6 was preinstalled in the validation environment, and `manage.py check` plus the Django tests passed there.
+
+### Observed Django and instruction-server smoke tests
+
+These commands were run locally:
+
+```powershell
+python manage.py migrate
+python manage.py runserver 127.0.0.1:8000 --noreload
+```
+
+Migrations completed successfully. While the server was running, `/`, `/nodes/`, `/services/`, `/analysis/`, `/analysis/status/`, and `/results/` each returned HTTP `200`. Loading those pages did not start model processes.
+
+```powershell
+python -m core.services.instruction_server --host 127.0.0.1 --public-host 127.0.0.1 --port 9000 --log-dir logs/validation
+```
+
+Observed requests: `GET /health` returned `200 {"status":"ok","service":"instruction"}`; `GET /services` returned `200 []`; and a start request containing `settings.command` returned `422`. The server shut down cleanly while owning no services. Owned-child shutdown and failed-replacement cleanup are unit-tested; this smoke run did not launch a real model child.
+
+### Heavyweight runtime status
+
+`llama_cpp`, `huggingface_hub`, `ultralytics`, `priority_map`, a small GGUF, and a compatible SAM checkpoint were absent from the validation environment. Therefore no real LLM launch, direct LLM completion, Hugging Face download, SAM checkpoint load, SAM prediction, or full Priority Map analysis was claimed or observed.
+
+After installing the pinned runtime and placing a small non-gated GGUF at `models/tiny.gguf`, use this local-path smoke test:
+
+```powershell
+python -m llama_cpp.server --model models/tiny.gguf --host 127.0.0.1 --port 8081
+Invoke-RestMethod http://127.0.0.1:8081/v1/models
+```
+
+Then send the direct `/v1/chat/completions` request in [Start and test services](#start-and-test-services). For the Hugging Face source form, configure exact `hf_repo` and `hf_file` in `config.json`, start the service through the UI or controller, and check the same `/v1/models` endpoint. This form downloads the exact non-gated file before launch; it was unit-tested with a mocked downloader but not exercised against Hugging Face.
+
+SAM endpoint tests use an injected test predictor only. A real SAM smoke test remains blocked until a compatible checkpoint and the required Ultralytics/SAM3 runtime are installed. Priority Map end-to-end analysis and a moving sequence with `sam_step > 1` remain unverified for the same missing dependencies. The adapter's local propagation behavior is unit-tested: it computes DIS flow per frame, remaps retained masks and centroids, tracks median displacement, and replaces the propagated set exactly once on the next SAM frame.
 
 ## Remote smoke test
 
@@ -222,6 +260,6 @@ In the UI, add the remote node, assign either service to that node, start it, th
 
 ## Prototype limitations and integration decision
 
-The current Priority Map repository exposes `PriorityMapRunner` but does not accept LLM/SAM client objects. Almost ARCADIA therefore patches only the runner's imported `SceneUnderstanding` and `Segment` class symbols during runner construction. The adapter supplies direct `LLMClient` and `SAMClient` implementations and leaves frame loading, clustering, heatmaps, graph construction, and output writing to Priority Map. This keeps the integration narrow but depends on the external runner's current class names and constructor shape.
+Priority Map commit `ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d` exposes `PriorityMapRunner` but does not accept LLM/SAM client objects. Almost ARCADIA verifies that `PriorityMapRunner`, `SceneUnderstanding`, and `Segment` exist, temporarily substitutes only the latter two while constructing the runner, and restores both symbols even if construction fails. The adapter supplies direct `LLMClient` and `SAMClient` implementations while leaving frame loading, local DIS optical flow, clustering, heatmaps, graph construction, and output writing to Priority Map. This narrow integration is unit-tested against a compatible fake module, not a real installed Priority Map environment.
 
 The prototype supports one analysis at a time and one serialized SAM predictor per host. It does not implement authentication, TLS, multi-user isolation, concurrent analyses, model download management, hardware discovery, arbitrary remote commands, or persistent service recovery. The committed example contains no secrets and no user-specific absolute paths.

@@ -14,10 +14,48 @@ from core.services.specs import ServiceEndpoint, ServiceSpec
 
 
 class LLMRuntime:
-    """Translate LLM service settings into an owned llama-cpp server process."""
+    """Translate one LLM spec into the pinned llama-cpp-python server process.
+
+    llama-cpp-python 0.3.34 generates CLI flags from Pydantic field names, so
+    its public server flags intentionally use underscore spellings such as
+    ``--n_ctx`` and ``--chat_format``. The server exposes ``/v1/models``.
+    """
 
     @staticmethod
-    def build_command(spec: ServiceSpec, *, allow_test_command: bool = False) -> list[str]:
+    def _download_hf_model(repo_id: str, filename: str, cache_dir: str | None) -> str:
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise ValueError("Hugging Face model sources require huggingface-hub.") from exc
+        return str(
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                cache_dir=cache_dir,
+                token=False,
+            )
+        )
+
+    @classmethod
+    def _resolve_model_path(cls, settings: dict[str, object]) -> str:
+        model_path = settings.get("model_path")
+        hf_repo = settings.get("hf_repo")
+        hf_file = settings.get("hf_file")
+        has_local_source = model_path is not None and str(model_path).strip() != ""
+        has_hf_source = hf_repo is not None or hf_file is not None
+        if has_local_source and has_hf_source:
+            raise ValueError("LLM service must use either model_path or hf_repo plus hf_file, not both.")
+        if has_local_source:
+            return str(model_path)
+        if not hf_repo or not hf_file:
+            raise ValueError("LLM service requires model_path or both hf_repo and hf_file.")
+        cache_dir = settings.get("hf_cache_dir")
+        if cache_dir is not None and not isinstance(cache_dir, str):
+            raise ValueError("hf_cache_dir must be a string when provided.")
+        return cls._download_hf_model(str(hf_repo), str(hf_file), cache_dir)
+
+    @classmethod
+    def build_command(cls, spec: ServiceSpec, *, allow_test_command: bool = False) -> list[str]:
         settings = spec.settings
         raw_command = settings.get("command")
         if raw_command is not None:
@@ -31,17 +69,7 @@ class LLMRuntime:
         command = [executable, "-m", str(settings.get("server_module", "llama_cpp.server"))]
         command.extend(["--host", str(settings.get("bind_host", "0.0.0.0"))])
         command.extend(["--port", str(spec.port)])
-
-        hf_repo = settings.get("hf_repo")
-        hf_file = settings.get("hf_file")
-        model_path = settings.get("model_path")
-        if model_path:
-            command.extend(["--model", str(model_path)])
-        elif hf_repo and hf_file:
-            command.extend(["--hf_repo", str(hf_repo), "--hf_file", str(hf_file)])
-        else:
-            raise ValueError("LLM service requires model_path or hf_repo plus hf_file.")
-
+        command.extend(["--model", cls._resolve_model_path(settings)])
         for key, flag in {
             "n_ctx": "--n_ctx",
             "n_gpu_layers": "--n_gpu_layers",

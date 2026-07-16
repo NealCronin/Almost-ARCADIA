@@ -32,5 +32,6 @@ def test_chat_rejects_malformed_response(mock_post: Mock) -> None:
     response = Mock()
     response.json.return_value = {"choices": []}
     mock_post.return_value = response
-    with pytest.raises(InferenceError):
+    with pytest.raises(InferenceError) as exc_info:
         LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi")
+    assert exc_info.value.service_type == "llm"

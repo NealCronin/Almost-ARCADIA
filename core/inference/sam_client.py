@@ -42,7 +42,7 @@ class SAMClient:
             image = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
         success, encoded = cv2.imencode(".jpg", image)
         if not success:
-            raise InferenceError("Failed to encode frame for SAM inference.")
+            raise InferenceError("Failed to encode frame for SAM inference.", service_type="sam3")
         image_base64 = base64.b64encode(encoded.tobytes()).decode("ascii")
         try:
             response = requests.post(
@@ -53,16 +53,16 @@ class SAMClient:
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise InferenceError(f"SAM request failed: {exc}") from exc
+            raise InferenceError(f"SAM request failed: {exc}", service_type="sam3") from exc
         if not isinstance(payload, dict):
-            raise InferenceError("SAM response must be a JSON object.")
+            raise InferenceError("SAM response must be a JSON object.", service_type="sam3")
         try:
             confidences = [float(value) for value in (payload.get("confidences") or payload.get("scores") or [])]
             labels = [str(value) for value in (payload.get("labels") or [])]
             masks = list(payload.get("masks") or [])
             boxes = list(payload.get("bounding_boxes") or payload.get("boxes") or payload.get("bbox") or [])
         except (TypeError, ValueError) as exc:
-            raise InferenceError("SAM response contains invalid result arrays.") from exc
+            raise InferenceError("SAM response contains invalid result arrays.", service_type="sam3") from exc
         return SegmentationResult(
             masks=masks,
             labels=labels,

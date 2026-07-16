@@ -14,12 +14,13 @@ dependencies = [
     "requests>=2.32,<3",
     "numpy>=2.0,<3",
     "opencv-python>=4.10,<5",
-    "llama-cpp-python>=0.3",
+    "llama-cpp-python[server]==0.3.34",
+    "huggingface-hub>=0.23,<1",
 ]
 
 [project.optional-dependencies]
 sam = ["ultralytics>=8.3"]
-pipeline = ["priority-map @ git+https://github.com/josephletobar/priority_map.git"]
+pipeline = ["priority-map @ git+https://github.com/josephletobar/priority_map.git@ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"]
 dev = [
     "pytest>=8.3,<9",
     "pytest-django>=4.9,<5",
@@ -29,7 +30,7 @@ dev = [
 ]
 all = [
     "ultralytics>=8.3",
-    "priority-map @ git+https://github.com/josephletobar/priority_map.git",
+    "priority-map @ git+https://github.com/josephletobar/priority_map.git@ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d",
     "pytest>=8.3,<9",
     "pytest-django>=4.9,<5",
     "pytest-cov>=6,<7",

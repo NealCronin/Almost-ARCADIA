@@ -71,8 +71,7 @@ class AnalysisCoordinator:
                 raise AnalysisError("An analysis is already running.")
             effective_config = config or (self.config_store.load() if self.config_store else AppConfig())
             input_value = str(Path(input_path).expanduser())
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            output_directory = Path(effective_config.output_root) / timestamp
+            output_directory = self._allocate_output_directory(effective_config)
             self._status = AnalysisStatus(
                 state="starting",
                 message="Preparing services",
@@ -96,8 +95,7 @@ class AnalysisCoordinator:
             if self.is_active():
                 raise AnalysisError("An analysis is already running.")
             effective_config = config or (self.config_store.load() if self.config_store else AppConfig())
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            output_directory = Path(effective_config.output_root) / timestamp
+            output_directory = self._allocate_output_directory(effective_config)
             self._status = AnalysisStatus(
                 state="starting",
                 input_path=str(input_path),
@@ -107,6 +105,20 @@ class AnalysisCoordinator:
             )
         self._run(str(input_path), effective_config, output_directory)
         return self.status()
+
+    @staticmethod
+    def _allocate_output_directory(config: AppConfig) -> Path:
+        output_root = Path(config.output_root)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        for suffix in range(1000):
+            name = timestamp if suffix == 0 else f"{timestamp}-{suffix:03d}"
+            candidate = output_root / name
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                continue
+            return candidate
+        raise AnalysisError("Could not allocate a unique analysis output directory.")
 
     def _run(self, input_path: str, config: AppConfig, output_directory: Path) -> None:
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -140,11 +152,19 @@ class AnalysisCoordinator:
                         if attempts >= 1:
                             raise AnalysisError(f"Service failure after one restart/retry: {exc}") from exc
                         attempts += 1
-                        self._log(log, f"service failure; restarting once: {exc}")
-                        llm_endpoint = self._ensure_service("llm", config, force=True)
-                        sam_endpoint = self._ensure_service("sam3", config, force=True)
-                        llm_client = LLMClient(llm_endpoint)
-                        sam_client = SAMClient(sam_endpoint)
+                        service_names = (
+                            (exc.service_type,)
+                            if isinstance(exc, InferenceError) and exc.service_type
+                            else (
+                                "llm",
+                                "sam3",
+                            )
+                        )
+                        self._log(log, f"service failure; restarting {', '.join(service_names)} once: {exc}")
+                        for service_name in service_names:
+                            self._endpoints[service_name] = self._ensure_service(service_name, config, force=True)
+                        llm_client = LLMClient(self._endpoints["llm"])
+                        sam_client = SAMClient(self._endpoints["sam3"])
                 self._finish_completed(result, log)
             except Exception as exc:
                 self._log(log, f"analysis failed: {exc}")

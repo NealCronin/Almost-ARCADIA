@@ -4,7 +4,7 @@ import pytest
 
 from core.errors import ServiceStartupError
 from core.services.controller import ServiceController
-from core.services.specs import ServiceSpec
+from core.services.specs import ServiceEndpoint, ServiceSpec
 
 
 def _process() -> Mock:
@@ -47,6 +47,34 @@ def test_failed_startup_cleans_up_child(mock_popen: Mock, _ready: Mock, tmp_path
         controller.start(ServiceSpec("llm", 8081, {"command": ["fake"]}))
     process.terminate.assert_called_once()
     assert not controller.is_running(8081)
+
+
+@patch("core.services.controller.LLMRuntime.wait_ready", side_effect=[None, ServiceStartupError("timeout")])
+@patch("core.services.controller.LLMRuntime.launch")
+def test_failed_replacement_cleans_new_process_and_leaves_port_unregistered(
+    mock_launch: Mock,
+    _mock_ready: Mock,
+    tmp_path,
+) -> None:
+    first_process, second_process = _process(), _process()
+    first_log, second_log = Mock(), Mock()
+    spec = ServiceSpec("llm", 8081, {"model_path": "model.gguf"})
+    endpoint = ServiceEndpoint("127.0.0.1", 8081, "llm")
+    mock_launch.side_effect = [
+        (first_process, first_log, endpoint),
+        (second_process, second_log, endpoint),
+    ]
+    controller = ServiceController(log_dir=tmp_path)
+
+    controller.start(spec)
+    with pytest.raises(ServiceStartupError, match="previous owned service was stopped"):
+        controller.start(spec)
+
+    first_process.terminate.assert_called_once()
+    second_process.terminate.assert_called_once()
+    first_log.close.assert_called_once()
+    second_log.close.assert_called_once()
+    assert controller.list_services() == []
 
 
 def test_stop_unknown_port_does_not_kill_process(tmp_path) -> None:
