@@ -196,7 +196,7 @@ Unit coverage is boundary-focused: subprocess lifecycle, direct HTTP clients, en
 
 ### Observed local validation environment
 
-Validation ran with Python 3.13 and Django `6.0.6`, FastAPI `0.139.0`, Uvicorn `0.51.0`, Requests `2.33.1`, NumPy `2.5.1`, OpenCV `5.0.0.93`, pytest `9.1.1`, Ruff `0.15.21`, and mypy `2.3.0`. The declared runtime constraint remains Django `>=5.1,<6`; Django 6 was preinstalled in the validation environment, and `manage.py check` plus the Django tests passed there.
+Validation ran in the isolated `almost_arcadia_gpt` conda environment with Python `3.12.13`, Django `5.2.16`, FastAPI `0.139.0`, Uvicorn `0.51.0`, Requests `2.34.2`, NumPy `2.5.1`, OpenCV `4.13.0.92`, llama-cpp-python `0.3.34`, huggingface-hub `0.36.2`, Ultralytics `8.4.96`, Priority Map `0.1.0` at the pinned commit, pytest `8.4.2`, Ruff `0.15.21`, and mypy `1.20.2`. The validation commands set `PYTHONNOUSERSITE=1` to exclude user-site packages.
 
 ### Observed Django and instruction-server smoke tests
 
@@ -217,18 +217,16 @@ Observed requests: `GET /health` returned `200 {"status":"ok","service":"instruc
 
 ### Heavyweight runtime status
 
-`llama_cpp`, `huggingface_hub`, `ultralytics`, `priority_map`, a small GGUF, and a compatible SAM checkpoint were absent from the validation environment. Therefore no real LLM launch, direct LLM completion, Hugging Face download, SAM checkpoint load, SAM prediction, or full Priority Map analysis was claimed or observed.
+The conda environment includes `llama_cpp`, `huggingface_hub`, `ultralytics`, and Priority Map. `SAM3SemanticPredictor` and the Priority Map runner symbols imported successfully.
 
-After installing the pinned runtime and placing a small non-gated GGUF at `models/tiny.gguf`, use this local-path smoke test:
+Two real LLM lifecycle smoke tests passed with the public, non-gated `afrideva/Tinystories-gpt-0.1-3m-GGUF` file `tinystories-gpt-0.1-3m.Q2_K.gguf`:
 
-```powershell
-python -m llama_cpp.server --model models/tiny.gguf --host 127.0.0.1 --port 8081
-Invoke-RestMethod http://127.0.0.1:8081/v1/models
-```
+1. **Local path:** `models/tinystories/tinystories-gpt-0.1-3m.Q2_K.gguf` started through `ServiceController` on port `8081`; `/v1/models` returned `200` and one direct `/v1/chat/completions` request returned `200`; `controller.stop()` then reported `running_after_stop False`.
+2. **Exact Hugging Face source:** `hf_repo=afrideva/Tinystories-gpt-0.1-3m-GGUF` with `hf_file=tinystories-gpt-0.1-3m.Q2_K.gguf` started through `ServiceController` on port `8082`; the runtime downloaded the exact file with `token=False`, `/v1/models` returned `200`, one direct chat-completion request returned `200`, and stop again reported `running_after_stop False`.
 
-Then send the direct `/v1/chat/completions` request in [Start and test services](#start-and-test-services). For the Hugging Face source form, configure exact `hf_repo` and `hf_file` in `config.json`, start the service through the UI or controller, and check the same `/v1/models` endpoint. This form downloads the exact non-gated file before launch; it was unit-tested with a mocked downloader but not exercised against Hugging Face.
+The 3M TinyStories model is a lifecycle test artifact rather than a quality benchmark; its generated text was syntactically poor, but both server lifecycle and direct OpenAI-compatible request paths were exercised.
 
-SAM endpoint tests use an injected test predictor only. A real SAM smoke test remains blocked until a compatible checkpoint and the required Ultralytics/SAM3 runtime are installed. Priority Map end-to-end analysis and a moving sequence with `sam_step > 1` remain unverified for the same missing dependencies. The adapter's local propagation behavior is unit-tested: it computes DIS flow per frame, remaps retained masks and centroids, tracks median displacement, and replaces the propagated set exactly once on the next SAM frame.
+SAM endpoint tests still use an injected test predictor. A real SAM smoke test remains blocked by the absence of a compatible checkpoint; no real checkpoint load or prediction is claimed. Priority Map is installed and its adapter symbols imported, but no complete Priority Map analysis or moving sequence with `sam_step > 1` was run because real SAM output remains unavailable. The adapter's local propagation behavior is unit-tested: it computes DIS flow per frame, remaps retained masks and centroids, tracks median displacement, and replaces the propagated set exactly once on the next SAM frame.
 
 ## Remote smoke test
 

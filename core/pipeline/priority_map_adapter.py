@@ -165,7 +165,7 @@ class _RemoteSegment:
         for segmentation in self.segmentations:
             mask = np.asarray(segmentation.mask, dtype=np.uint8)
             if mask.shape[:2] != (height, width):
-                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+                mask = np.asarray(cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8)
             segmentation.mask = cv2.remap(
                 mask,
                 map_x,
@@ -207,7 +207,7 @@ class _RemoteSegment:
             if mask.ndim > 2:
                 mask = np.squeeze(mask)
             if mask.shape[:2] != (height, width):
-                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+                mask = np.asarray(cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8)
             label = result.labels[index] if index < len(result.labels) else prompts[min(index, len(prompts) - 1)]
             if label not in scene_dict:
                 label = prompts[min(index, len(prompts) - 1)]
