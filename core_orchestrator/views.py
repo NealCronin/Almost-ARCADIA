@@ -106,8 +106,28 @@ _mast3r_lock = threading.Lock()
 
 UPLOAD_ROOT = os.path.join(settings.BASE_DIR, "uploads", "reconstruction")
 MAST3R_RUNS_ROOT = os.path.join(settings.BASE_DIR, "runtime", "mast3r_runs")
+PRIORITY_MAP_ROOT = os.environ.get("PRIORITY_MAP_ROOT", os.path.join(PROJECT_ROOT, "priority_map"))
+PRIORITY_MAP_SRC = os.path.join(PRIORITY_MAP_ROOT, "src")
+_priority_map_local_python = os.path.join(PRIORITY_MAP_ROOT, ".venv", "bin", "python")
+PRIORITY_MAP_PYTHON = os.environ.get(
+    "PRIORITY_MAP_PYTHON",
+    _priority_map_local_python
+    if os.path.isfile(_priority_map_local_python)
+    else MAST3R_SLAM_PYTHON
+    if os.path.isfile(MAST3R_SLAM_PYTHON)
+    else sys.executable,
+)
+PRIORITY_MAP_RUNS_ROOT = os.path.join(settings.BASE_DIR, "runtime", "priority_map_runs")
+PRIORITY_MAP_DEFAULT_TASK = "Find buildings"
+PRIORITY_MAP_DEFAULT_SAM_STEP = 15
+PRIORITY_MAP_DEFAULT_SAM_THRESH = 0.20
+PRIORITY_MAP_DEFAULT_SCENE_MODEL = "ollama:gemma4:12b-it-qat"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
+_priority_map_process: Optional[subprocess.Popen[str]] = None
+_priority_map_run: Optional[dict[str, Any]] = None
+_priority_map_lock = threading.Lock()
 
 
 # ------------------------------------------------------------------
@@ -851,21 +871,23 @@ def reconstruction_start(request: HttpRequest) -> JsonResponse:
                 LINGBOT_MAP_MAIN,
                 "--model_path",
                 LINGBOT_MAP_MODEL,
-                #"--stride",
-                #"10",
                 "--mode",
                 "windowed",
                 "--window_size",
-                "32",
+                "64",
                 "--overlap_size",
                 "8",
                 "--keyframe_interval",
-                "1",
+                "4",
                 "--use_sdpa",
+                "--precision",
+                "float16",
                 "--downsample_factor",
-                "1",
+                "6",
                 "--conf_threshold",
                 "1.5",
+                "--max_points",
+                "750000",
                 "--port",
                 str(port),
             ]
@@ -1119,12 +1141,24 @@ def client_portal(request: HttpRequest) -> HttpResponse:
     return render(request, "core_orchestrator/tool_selection.html")
 
 
+def _heatmap_config_from_request(request: HttpRequest) -> dict[str, Any]:
+    return {
+        "dataset_path": request.GET.get("dataset_path", ""),
+        "task": request.GET.get("task", PRIORITY_MAP_DEFAULT_TASK),
+        "debrief": request.GET.get("debrief", ""),
+        "gps_csv": request.GET.get("gps_csv", ""),
+        "scene_model": request.GET.get("scene_model", PRIORITY_MAP_DEFAULT_SCENE_MODEL),
+        "sam_step": int(request.GET.get("sam_step", PRIORITY_MAP_DEFAULT_SAM_STEP)),
+        "sam_thresh": float(request.GET.get("sam_thresh", PRIORITY_MAP_DEFAULT_SAM_THRESH)),
+    }
+
+
 def client_run_workspace(request: HttpRequest) -> HttpResponse:
     """Render a shared progress workspace for selected client tools."""
     tool_catalog = {
         "drone-heatmap": {
             "label": "Drone Heatmap",
-            "description": "Generating heatmap views from selected drone captures.",
+            "description": "Generating heatmap views from selected image captures.",
             "steps": ["Load source media", "Run heatmap inference", "Build selected views", "Publish results"],
             "settings_key": "heatmap_views",
         },
@@ -1142,8 +1176,9 @@ def client_run_workspace(request: HttpRequest) -> HttpResponse:
         },
     }
 
+    raw_tools = request.GET.get("tools", "")
     requested_tools = [
-        tool for tool in request.GET.get("tools", "").split(",") if tool in tool_catalog
+        tool for tool in raw_tools.split(",") if tool in tool_catalog
     ]
     if not requested_tools:
         requested_tools = ["drone-heatmap"]
@@ -1160,30 +1195,344 @@ def client_run_workspace(request: HttpRequest) -> HttpResponse:
     return render(
         request,
         "core_orchestrator/client_run_workspace.html",
-        {"selected_tools": selected_tools},
+        {
+            "selected_tools": selected_tools,
+            "has_heatmap": any(tool["key"] == "drone-heatmap" for tool in selected_tools),
+            "heatmap_config": _heatmap_config_from_request(request),
+        },
+    )
+
+
+def _priority_map_artifact_path(run_id: str, filename: str) -> str:
+    safe_run_id = _slugify(run_id)
+    if filename not in {"video.avi", "heatmap.avi"}:
+        raise Http404("Unknown heatmap artifact")
+    artifact_path = os.path.abspath(os.path.join(PRIORITY_MAP_RUNS_ROOT, safe_run_id, filename))
+    run_root = os.path.abspath(os.path.join(PRIORITY_MAP_RUNS_ROOT, safe_run_id))
+    if not artifact_path.startswith(run_root + os.sep):
+        raise Http404("Invalid heatmap artifact")
+    return artifact_path
+
+
+def _priority_map_log_tail(log_path: str | None, max_chars: int = 6000) -> str:
+    if not log_path or not os.path.isfile(log_path):
+        return ""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            log_file.seek(max(0, size - max_chars))
+            return log_file.read()
+    except OSError:
+        return ""
+
+
+def _priority_map_status_payload() -> dict[str, Any]:
+    with _priority_map_lock:
+        run = dict(_priority_map_run) if _priority_map_run else None
+        process = _priority_map_process
+
+    if not run:
+        return {
+            "running": False,
+            "status": "idle",
+            "message": "No priority heatmap run has started.",
+        }
+
+    return_code = process.poll() if process is not None else run.get("return_code")
+    running = process is not None and return_code is None
+    run_id = run["run_id"]
+    heatmap_path = _priority_map_artifact_path(run_id, "heatmap.avi")
+    video_path = _priority_map_artifact_path(run_id, "video.avi")
+    has_heatmap = os.path.isfile(heatmap_path)
+    has_video = os.path.isfile(video_path)
+    status = "running" if running else "completed" if return_code == 0 and has_heatmap else "failed"
+
+    payload = {
+        "running": running,
+        "status": status,
+        "return_code": return_code,
+        "run_id": run_id,
+        "dataset_path": run.get("dataset_path", ""),
+        "task": run.get("task", ""),
+        "command": _shell_command_text(run.get("command", [])),
+        "log_tail": _priority_map_log_tail(run.get("log_path")),
+        "has_heatmap": has_heatmap,
+        "has_video": has_video,
+    }
+    if has_heatmap:
+        payload["preview_url"] = f"/client/heatmap/preview/{run_id}/"
+        payload["heatmap_download_url"] = f"/client/heatmap/artifact/{run_id}/heatmap.avi"
+    if has_video:
+        payload["video_download_url"] = f"/client/heatmap/artifact/{run_id}/video.avi"
+    return payload
+
+
+def _coerce_priority_map_threshold(value: Any) -> float:
+    threshold = float(value)
+    if threshold > 1:
+        threshold = threshold / 100
+    return threshold
+
+
+def _extract_priority_map_video_frames(video_path: str, frames_dir: str) -> int:
+    os.makedirs(frames_dir, exist_ok=True)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+
+    frame_count = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_count += 1
+            frame_path = os.path.join(frames_dir, f"frame_{frame_count:06d}.jpg")
+            if not cv2.imwrite(frame_path, frame):
+                raise ValueError(f"Could not write extracted frame: {frame_path}")
+    finally:
+        cap.release()
+
+    if frame_count == 0:
+        raise ValueError(f"No frames could be extracted from video file: {video_path}")
+    return frame_count
+
+
+def _priority_map_input_folder(dataset_path: str, run_dir: str) -> tuple[str, str, Optional[int]]:
+    if os.path.isdir(dataset_path):
+        return dataset_path, "images", None
+
+    if os.path.isfile(dataset_path) and _is_video_dataset(dataset_path):
+        frames_dir = os.path.join(run_dir, "video_frames")
+        frame_count = _extract_priority_map_video_frames(dataset_path, frames_dir)
+        return frames_dir, "video", frame_count
+
+    raise ValueError("Choose a folder of images, image files, or one supported video file.")
+
+
+@csrf_exempt
+def priority_heatmap_start(request: HttpRequest) -> JsonResponse:
+    """Start a background priority_map run for uploaded images or video."""
+    global _priority_map_process, _priority_map_run
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    dataset_path = os.path.abspath(str(payload.get("dataset_path", "")).strip())
+    task = str(payload.get("task", PRIORITY_MAP_DEFAULT_TASK)).strip() or PRIORITY_MAP_DEFAULT_TASK
+    debrief = str(payload.get("debrief", "")).strip()
+    sam_step = int(payload.get("sam_step", PRIORITY_MAP_DEFAULT_SAM_STEP) or PRIORITY_MAP_DEFAULT_SAM_STEP)
+    sam_thresh = _coerce_priority_map_threshold(
+        payload.get("sam_thresh", PRIORITY_MAP_DEFAULT_SAM_THRESH) or PRIORITY_MAP_DEFAULT_SAM_THRESH
+    )
+    scene_model = str(payload.get("scene_model", PRIORITY_MAP_DEFAULT_SCENE_MODEL)).strip()
+    gps_csv = str(payload.get("gps_csv", "")).strip()
+
+    if not dataset_path:
+        return JsonResponse({"error": "Dataset path is required"}, status=400)
+    if not os.path.exists(dataset_path):
+        return JsonResponse({"error": f"Dataset path not found: {dataset_path}"}, status=400)
+    if not os.path.isdir(PRIORITY_MAP_ROOT):
+        return JsonResponse({"error": f"priority_map root not found: {PRIORITY_MAP_ROOT}"}, status=500)
+    if not os.path.isfile(PRIORITY_MAP_PYTHON):
+        return JsonResponse({"error": f"priority_map Python not found: {PRIORITY_MAP_PYTHON}"}, status=500)
+
+    with _priority_map_lock:
+        if _priority_map_process is not None and _priority_map_process.poll() is None:
+            already_running = True
+        else:
+            already_running = False
+
+    if already_running:
+        return JsonResponse({"message": "Priority heatmap is already running", **_priority_map_status_payload()})
+
+    with _priority_map_lock:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        run_id = _slugify(f"priority-{timestamp}-{uuid.uuid4().hex[:8]}")
+        run_dir = os.path.join(PRIORITY_MAP_RUNS_ROOT, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        log_path = os.path.join(run_dir, "priority_map.log")
+        try:
+            img_folder, dataset_type, extracted_frame_count = _priority_map_input_folder(dataset_path, run_dir)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+        command = [
+            PRIORITY_MAP_PYTHON,
+            "-c",
+            "from priority_map.cli import main; main()",
+            "--img-folder",
+            img_folder,
+            "--output-dir",
+            run_dir,
+            "--task",
+            task,
+            "--sam-step",
+            str(sam_step),
+            "--sam-thresh",
+            str(sam_thresh),
+        ]
+        if debrief:
+            command.extend(["--debrief", debrief])
+        if scene_model:
+            command.extend(["--scene-model", scene_model])
+        if gps_csv:
+            command.extend(["--gps", gps_csv])
+
+        process_env = os.environ.copy()
+        existing_pythonpath = process_env.get("PYTHONPATH", "")
+        process_env["PYTHONPATH"] = (
+            PRIORITY_MAP_SRC
+            if not existing_pythonpath
+            else f"{PRIORITY_MAP_SRC}{os.pathsep}{existing_pythonpath}"
+        )
+
+        log_file = open(log_path, "w", encoding="utf-8")
+        log_file.write("Command:\n")
+        log_file.write(_shell_command_text(command) + "\n\n")
+        log_file.flush()
+        try:
+            _priority_map_process = subprocess.Popen(
+                command,
+                cwd=PRIORITY_MAP_ROOT,
+                env=process_env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=(sys.platform != "win32"),
+            )
+            _priority_map_run = {
+                "run_id": run_id,
+                "dataset_path": dataset_path,
+                "img_folder": img_folder,
+                "dataset_type": dataset_type,
+                "extracted_frame_count": extracted_frame_count,
+                "task": task,
+                "command": command,
+                "log_path": log_path,
+                "run_dir": run_dir,
+                "started_at": timestamp,
+            }
+        except Exception as exc:
+            log_file.close()
+            logger.exception("Failed to start priority_map process")
+            return JsonResponse({"error": str(exc)}, status=500)
+
+    return JsonResponse({"message": "Priority heatmap started", **_priority_map_status_payload()})
+
+
+def priority_heatmap_status(request: HttpRequest) -> JsonResponse:
+    """Return the current priority_map run status."""
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    return JsonResponse(_priority_map_status_payload())
+
+
+def _stop_priority_map_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform != "win32":
+            os.killpg(process.pid, signal.SIGINT)
+        else:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            if sys.platform != "win32":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                if sys.platform != "win32":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=3)
+            except Exception:
+                logger.exception("Failed to stop priority heatmap process group")
+
+
+@csrf_exempt
+def priority_heatmap_stop(request: HttpRequest) -> JsonResponse:
+    """Stop a priority_map heatmap process launched by Almost-ARCADIA."""
+    global _priority_map_process
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    message = "Priority heatmap stopped"
+    with _priority_map_lock:
+        if _priority_map_process is None or _priority_map_process.poll() is not None:
+            _priority_map_process = None
+            message = "Priority heatmap is not running"
+        else:
+            _stop_priority_map_process(_priority_map_process)
+            _priority_map_process = None
+
+    return JsonResponse({"message": message, **_priority_map_status_payload()})
+
+
+def priority_heatmap_artifact(request: HttpRequest, run_id: str, filename: str) -> FileResponse:
+    """Serve generated priority_map AVI artifacts."""
+    artifact_path = _priority_map_artifact_path(run_id, filename)
+    if not os.path.isfile(artifact_path):
+        raise Http404("Heatmap artifact not found")
+    return FileResponse(
+        open(artifact_path, "rb"),
+        as_attachment=True,
+        filename=filename,
+        content_type="video/x-msvideo",
+    )
+
+
+def priority_heatmap_preview(request: HttpRequest, run_id: str) -> StreamingHttpResponse:
+    """Stream heatmap.avi frames as MJPEG so the browser can watch the result."""
+    heatmap_path = _priority_map_artifact_path(run_id, "heatmap.avi")
+    if not os.path.isfile(heatmap_path):
+        raise Http404("Heatmap video not found")
+
+    def frame_generator() -> Generator[bytes, None, None]:
+        cap = cv2.VideoCapture(heatmap_path)
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if not ok:
+                    continue
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + buf.tobytes()
+                    + b"\r\n"
+                )
+                time.sleep(1 / 24)
+        finally:
+            cap.release()
+
+    return StreamingHttpResponse(
+        frame_generator(),
+        content_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 def heatmap_dashboard(request: HttpRequest) -> HttpResponse:
-    """
-    Drone Heatmap Dashboard: Client-side configuration.
-
-    ALL paths and routing decisions happen on Client side:
-    - dataset_path: Local video/file path
-    - llm_model_path: Local LLM weights
-    - sam3_weights_path: Local SAM3 weights
-    - routing_mode: "local" or "remote"
-    - remote_host_ip/port: Only used if routing_mode == "remote"
-    """
-    config = {
-        "dataset_path": request.GET.get("dataset_path", ""),
-        "llm_model_path": request.GET.get("llm_model_path", ""),
-        "sam3_weights_path": request.GET.get("sam3_weights_path", ""),
-        "routing_mode": request.GET.get("routing_mode", "local"),
-        "remote_host_ip": request.GET.get("remote_host_ip", "127.0.0.1"),
-        "remote_host_port": int(request.GET.get("remote_host_port", 8080)),
-    }
-    return render(request, "core_orchestrator/heatmap_dashboard.html", {"config": config})
+    """Render the priority-map heatmap runner and output viewer."""
+    return render(
+        request,
+        "core_orchestrator/heatmap_dashboard.html",
+        {"config": _heatmap_config_from_request(request)},
+    )
 
 
 def heatmap_stream(request: HttpRequest) -> StreamingHttpResponse:

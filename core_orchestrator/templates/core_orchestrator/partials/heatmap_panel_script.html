@@ -1,0 +1,122 @@
+<script>
+const heatmapConfig = {
+    dataset_path: "{{ config.dataset_path|default:''|escapejs }}",
+    task: "{{ config.task|default:'Find buildings'|escapejs }}",
+    debrief: "{{ config.debrief|default:''|escapejs }}",
+    gps_csv: "{{ config.gps_csv|default:''|escapejs }}",
+    scene_model: "{{ config.scene_model|default:'ollama:gemma4:12b-it-qat'|escapejs }}",
+    sam_step: Number("{{ config.sam_step|default:'15'|escapejs }}") || 15,
+    sam_thresh: Number("{{ config.sam_thresh|default:'0.20'|escapejs }}") || 0.20,
+};
+const statusText = document.getElementById("statusText");
+const logTail = document.getElementById("logTail");
+const runId = document.getElementById("runId");
+const preview = document.getElementById("heatmapPreview");
+const emptyPreview = document.getElementById("emptyPreview");
+const downloadVideo = document.getElementById("downloadVideo");
+const downloadHeatmap = document.getElementById("downloadHeatmap");
+let pollTimer = null;
+
+function setStatus(message) {
+    if (statusText) {
+        statusText.textContent = message;
+    }
+}
+
+function readSettings() {
+    return {...heatmapConfig, dataset_path: heatmapConfig.dataset_path.trim()};
+}
+
+function applyStatus(data) {
+    if (data.error) {
+        setStatus(data.error);
+        return;
+    }
+
+    if (runId) {
+        runId.textContent = data.run_id ? `Run ${data.run_id}` : "";
+    }
+    if (logTail) {
+        logTail.textContent = data.log_tail || "";
+    }
+
+    if (data.running) {
+        setStatus("Running priority_map...");
+    } else {
+        setStatus(data.status === "completed" ? "Completed" : data.status || "Idle");
+    }
+
+    if (data.preview_url && preview && emptyPreview) {
+        preview.src = `${data.preview_url}?t=${Date.now()}`;
+        preview.classList.remove("hidden");
+        emptyPreview.classList.add("hidden");
+    }
+
+    if (data.video_download_url && downloadVideo) {
+        downloadVideo.href = data.video_download_url;
+        downloadVideo.classList.remove("hidden");
+    }
+
+    if (data.heatmap_download_url && downloadHeatmap) {
+        downloadHeatmap.href = data.heatmap_download_url;
+        downloadHeatmap.classList.remove("hidden");
+    }
+
+    if (!data.running && pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+    }
+}
+
+async function pollStatus() {
+    try {
+        const response = await fetch("{% url 'core_orchestrator:priority_heatmap_status' %}");
+        const data = await response.json();
+        applyStatus(data);
+    } catch (error) {
+        setStatus("Could not read heatmap status.");
+    }
+}
+
+async function startHeatmap() {
+    const payload = readSettings();
+    if (!payload.dataset_path) {
+        setStatus("Choose an image folder first.");
+        return;
+    }
+
+    setStatus("Starting priority_map...");
+    if (preview && emptyPreview) {
+        preview.classList.add("hidden");
+        emptyPreview.classList.remove("hidden");
+    }
+    if (downloadVideo) {
+        downloadVideo.classList.add("hidden");
+    }
+    if (downloadHeatmap) {
+        downloadHeatmap.classList.add("hidden");
+    }
+
+    try {
+        const response = await fetch("{% url 'core_orchestrator:priority_heatmap_start' %}", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        applyStatus(data);
+        if (!pollTimer) {
+            pollTimer = window.setInterval(pollStatus, 2500);
+        }
+    } catch (error) {
+        setStatus("Failed to start priority_map.");
+    }
+}
+
+if (statusText) {
+    pollStatus();
+    {% if config.dataset_path %}
+    startHeatmap();
+    {% endif %}
+}
+</script>
