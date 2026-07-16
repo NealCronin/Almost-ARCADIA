@@ -44,7 +44,7 @@ The `pipeline` extra installs Priority Map at commit `ea6d1064175b20c1e90dd3f1ff
 
 ### llama-cpp-python variants
 
-Almost ARCADIA pins `llama-cpp-python[server]==0.3.34`. Its server CLI generates flags from Pydantic field names, so the validated forms are `--n_ctx`, `--n_gpu_layers`, `--chat_format`, and `--model_alias`. Readiness probes `/v1/models`, an endpoint exposed by that server release.
+Almost ARCADIA pins `llama-cpp-python[server]==0.3.34`. Its server CLI generates flags from Pydantic field names. The builder uses `--n_ctx`, `--n_gpu_layers`, `--chat_format`, `--model_alias`, `--n_threads`, `--n_batch`, `--n_ubatch`, `--flash_attn`, `--type_k`, and `--type_v`; cache choices map to the server's verified GGML numeric values: F16 → `1`, Q8_0 → `8`, Q4_0 → `2`. This pinned server has no `--n_parallel` flag, so the builder retains that value in the settings dictionary for compatibility rather than passing an invalid option. Readiness probes `/v1/models`, an endpoint exposed by that server release.
 
 CPU:
 
@@ -80,7 +80,19 @@ Set `services.sam3.settings.checkpoint` to that path. A missing or unloadable ch
 
 ## Configuration
 
-`config.json` is a committed, non-secret example. Edit the model and checkpoint paths for the machine. A service entry has a node name, service type, inference port, and runtime settings:
+Use **Nodes** to name the computers that can run services, then use the **Services** page to configure and start LLM and SAM3 services. The local node is shown as **This computer** and does not need an instruction server; remote nodes use their configured instruction host and port.
+
+### Services page
+
+The LLM builder selects either one local GGUF path or an exact public Hugging Face repository/filename pair. It exposes context, GPU layers, CPU threads, batch and microbatch sizes, flash attention, K/V cache types, chat format, model alias, bind host, port, and startup timeout. Do not use split GGUF files or gated repositories.
+
+The SAM3 builder accepts the checkpoint path on the selected compute node, default confidence, bind host, port, and startup timeout. A remote checkpoint path is not checked on the Django machine; startup on the target node is authoritative.
+
+Both builders provide an **Additional arguments** field for a small number of server options not represented by controls. It is parsed as command-line arguments, not as JSON or a shell command. Builder-owned settings—including model/checkpoint source, host, port, llama context and batch settings, cache types, and command/executable selection—cannot be overridden there.
+
+### Manual `config.json`
+
+`config.json` remains the portable persistence format for manual editing and automation. Each service entry has a node name, service type, inference port, and flexible runtime settings dictionary:
 
 ```json
 {
@@ -93,13 +105,20 @@ Set `services.sam3.settings.checkpoint` to that path. A missing or unloadable ch
       "node": "local",
       "service_type": "llm",
       "port": 8081,
-      "settings": {"model_path": "models/model.gguf", "bind_host": "0.0.0.0"}
+      "settings": {
+        "model_path": "models/model.gguf",
+        "bind_host": "0.0.0.0",
+        "startup_timeout": 600,
+        "n_ctx": 32768,
+        "n_gpu_layers": -1,
+        "extra_args": ["--n_batch", "2048", "--n_ubatch", "512", "--flash_attn", "true"]
+      }
     },
     "sam3": {
       "node": "local",
       "service_type": "sam3",
       "port": 8090,
-      "settings": {"checkpoint": "checkpoints/sam3.pt", "bind_host": "0.0.0.0"}
+      "settings": {"checkpoint": "checkpoints/sam3.pt", "bind_host": "0.0.0.0", "confidence": 0.25}
     }
   },
   "pipeline": {"sam_step": 5, "run_at_source_fps": false, "sam_resize": null},
@@ -107,9 +126,9 @@ Set `services.sam3.settings.checkpoint` to that path. A missing or unloadable ch
 }
 ```
 
-The UI saves configuration atomically through a same-directory temporary file and replacement. `ARCADIA_CONFIG` can point Django at another JSON file. No live process state is stored in JSON or SQLite.
+Existing settings dictionaries remain compatible. The UI saves configuration atomically through a same-directory temporary file and replacement. `ARCADIA_CONFIG` can point Django at another JSON file. No live process state is stored in JSON or SQLite.
 
-Supported useful runtime settings include `bind_host`, `python_executable` for local trusted setup, `startup_timeout`, `n_ctx`, `n_gpu_layers`, `chat_format`, `model_alias`, `extra_args`, and exact model-source fields. The remote instruction API rejects executable, server-module, shell, and arbitrary command fields. Unit tests alone use the command escape hatch.
+Useful manual LLM settings include `bind_host`, `startup_timeout`, `n_ctx`, `n_gpu_layers`, `chat_format`, `model_alias`, and `extra_args`; exact Hugging Face sources use `hf_repo`, `hf_file`, and optional `hf_cache_dir`. The remote instruction API rejects executable, server-module, shell, and arbitrary command fields. Unit tests alone use the command escape hatch.
 
 ## Start a host instruction server
 

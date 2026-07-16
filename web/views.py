@@ -18,7 +18,11 @@ from web.runtime import get_runtime
 
 def _service_form(name: str, config: Any, data: Any = None):
     form_class = LLMServiceForm if name == "llm" else SAMServiceForm
-    form = form_class(data, nodes=config.nodes) if data is not None else form_class(nodes=config.nodes)
+    form = (
+        form_class(data=data, nodes=config.nodes, auto_id=f"{name}_%s")
+        if data is not None
+        else form_class(nodes=config.nodes, auto_id=f"{name}_%s")
+    )
     form.initial_from(config.services.get(name))
     return form
 
@@ -75,7 +79,7 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
                 },
                 status=400,
             )
-        spec = form.to_spec("sam3" if service_name == "sam3" else "llm")
+        spec = form.to_spec()
         config.services[service_name] = ConfiguredService(node=form.cleaned_data["node"], spec=spec)
         runtime.config_store.save(config)
         node = config.nodes[form.cleaned_data["node"]]
