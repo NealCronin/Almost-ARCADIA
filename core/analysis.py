@@ -182,18 +182,37 @@ class AnalysisCoordinator:
                 self._write_effective_settings(config, input_path, output_directory, run_id)
                 if self._cancelled_checkpoint(output_directory):
                     return
-                self._set_status(stage="starting_llm", message="Starting LLM services")
-                llm_endpoint = self._ensure_service("llm", config, output_directory)
-                if self._cancelled_checkpoint(output_directory):
-                    return
 
-                # Determine visual LLM endpoint
-                visual_endpoint = llm_endpoint
-                if config.priority_map.visual_llm_mode == "separate":
+                pm_config = config.priority_map
+                graph_agent_enabled = bool(pm_config.pipeline.graph_agent)
+
+                # Determine which services to start
+                need_logical = graph_agent_enabled
+                visual_mode = pm_config.visual_llm_mode
+
+                llm_endpoint: ServiceEndpoint | None = None
+                visual_endpoint: ServiceEndpoint | None = None
+
+                if visual_mode == "same_as_logical":
+                    # Start Logical LLM once for both text and vision
+                    self._set_status(stage="starting_llm", message="Starting Logical LLM (shared mode)")
+                    llm_endpoint = self._ensure_service("llm", config, output_directory)
+                    visual_endpoint = llm_endpoint
+                    if self._cancelled_checkpoint(output_directory):
+                        return
+                else:
+                    # Separate mode: start Visual for scene understanding
                     self._set_status(stage="starting_visual_llm", message="Starting Visual LLM service")
                     visual_endpoint = self._ensure_service("visual_llm", config, output_directory)
                     if self._cancelled_checkpoint(output_directory):
                         return
+
+                    # Start Logical separately only if Graph Agent needs it
+                    if need_logical:
+                        self._set_status(stage="starting_llm", message="Starting Logical LLM service")
+                        llm_endpoint = self._ensure_service("llm", config, output_directory)
+                        if self._cancelled_checkpoint(output_directory):
+                            return
 
                 self._set_status(stage="starting_sam3", message="Starting SAM3 service")
                 if self._cancelled_checkpoint(output_directory):
@@ -201,24 +220,48 @@ class AnalysisCoordinator:
                 sam_endpoint = self._ensure_service("sam3", config, output_directory)
                 if self._cancelled_checkpoint(output_directory):
                     return
-                if self._cancelled_checkpoint(output_directory):
-                    return
+
                 self._set_status(state="running", stage="preparing_input", message="Preparing input")
                 settings = config.priority_map.pipeline.to_dict()
-                settings["llm_generation"] = generation_settings(config.priority_map.services["llm"].settings)
-                settings["visual_llm_generation"] = generation_settings(
-                    config.priority_map.services.get("visual_llm", config.priority_map.services["llm"]).settings
-                )
+
+                # Use the correct service's generation settings for each role
+                logical_service = config.priority_map.services.get("llm")
+                if visual_mode == "separate":
+                    visual_service = config.priority_map.services.get("visual_llm")
+                    settings["llm_generation"] = generation_settings(
+                        logical_service.settings if logical_service else {}
+                    )
+                    settings["visual_llm_generation"] = generation_settings(
+                        visual_service.settings if visual_service else {}
+                    )
+                else:
+                    # Shared mode: both use Logical settings
+                    gen = generation_settings(logical_service.settings if logical_service else {})
+                    settings["llm_generation"] = gen
+                    settings["visual_llm_generation"] = gen
+
                 settings["output_directory"] = str(output_directory)
                 settings["input_path"] = input_path
                 self._set_status(stage="priority_map", message="Running Priority Map")
                 if self._cancelled_checkpoint(output_directory):
                     return
-                llm_client = LLMClient(llm_endpoint)
+
+                # Ensure llm_endpoint is set for graph agent when needed
+                if need_logical and llm_endpoint is None:
+                    self._set_status(stage="starting_llm", message="Starting Logical LLM for Graph Agent")
+                    llm_endpoint = self._ensure_service("llm", config, output_directory)
+
+                llm_client = LLMClient(llm_endpoint or visual_endpoint)
                 visual_llm_client = LLMClient(visual_endpoint)
                 result = self._run_adapter(
-                    input_path, output_directory, llm_endpoint, visual_endpoint, sam_endpoint, settings,
-                    llm_client, visual_llm_client,
+                    input_path,
+                    output_directory,
+                    llm_endpoint or visual_endpoint,
+                    visual_endpoint,
+                    sam_endpoint,
+                    settings,
+                    llm_client,
+                    visual_llm_client,
                 )
                 self._set_status(stage="finalizing", message="Finalizing output")
                 if self._cancel_event.is_set():
@@ -239,6 +282,37 @@ class AnalysisCoordinator:
                 else:
                     self._log(log, f"analysis failed: {exc}")
                     self._finish_failed(str(exc))
+
+    def _ensure_service(self, name: str, config: AppConfig, output_directory: Path) -> ServiceEndpoint:
+        configured = config.priority_map.services.get(name)
+        if configured is None:
+            raise AnalysisError(f"Required service configuration is missing: {name}")
+        node = config.nodes.get(configured.node)
+        if node is None:
+            raise AnalysisError(f"Service {name} references unknown node {configured.node!r}")
+        if node.mode == "local":
+            endpoint = self.controller.start(configured.spec, cancel_event=self._cancel_event)
+        else:
+            if node.instruction_port is None:
+                raise AnalysisError(f"Remote node {configured.node!r} has no instruction port")
+            if self._cancelled_checkpoint(output_directory):
+                raise ServiceError("Analysis cancelled before remote service startup.")
+            spec = configured.spec
+            if name in ("llm", "visual_llm"):
+                settings = {key: value for key, value in configured.settings.items() if key in REMOTE_LLM_KEYS}
+                settings = validate_llm_settings(settings, remote=True)
+                settings["bind_host"] = resolve_inference_bind_host(configured.node, config.nodes, None)
+                spec = ServiceSpec(service_type=name, port=configured.port, settings=settings)
+            endpoint = InstructionClient(node.host, node.instruction_port).start_service(spec)
+            if self._cancelled_checkpoint(output_directory):
+                raise ServiceError("Analysis cancelled after remote service startup.")
+            self._wait_ready(
+                endpoint,
+                float(configured.settings.get("startup_timeout", 600)),
+                cancel_event=self._cancel_event,
+            )
+        self._endpoints[name] = endpoint
+        return endpoint
 
     def _run_adapter(
         self,
@@ -269,52 +343,30 @@ class AnalysisCoordinator:
                 if self._cancel_event.is_set() or attempts >= 1:
                     raise
                 attempts += 1
-                service_names = (
-                    (exc.service_type,) if isinstance(exc, InferenceError) and exc.service_type else ("llm", "sam3")
-                )
+                service_type = getattr(exc, "service_type", None) if isinstance(exc, InferenceError) else None
+                # Determine which service to restart based on the error
+                if service_type and service_type not in ("llm", "visual_llm", "sam3"):
+                    service_type = None
+                if service_type is None:
+                    # Fallback: restart the service that corresponds to the endpoint
+                    service_names = ["llm", "sam3"]
+                    if visual_endpoint.service_type == "visual_llm":
+                        service_names.append("visual_llm")
+                else:
+                    service_names = [service_type]
                 for service_name in service_names:
                     if self._cancelled_checkpoint(output_directory):
                         raise ServiceError("Analysis cancelled before service restart.") from exc
                     self._endpoints[service_name] = self._ensure_service(
                         service_name, self._config or AppConfig(), output_directory
                     )
-                llm_endpoint = self._endpoints["llm"]
-                sam_endpoint = self._endpoints["sam3"]
-                visual_endpoint = self._endpoints.get("visual_llm", llm_endpoint)
-                llm_client = LLMClient(llm_endpoint)
+                # Update clients and endpoints
+                llm_endpoint = self._endpoints.get("llm", llm_endpoint)
+                sam_endpoint = self._endpoints.get("sam3", sam_endpoint)
+                visual_endpoint = self._endpoints.get("visual_llm", visual_endpoint)
+                if llm_endpoint.service_type in ("llm", "visual_llm"):
+                    llm_client = LLMClient(llm_endpoint)
                 visual_llm_client = LLMClient(visual_endpoint)
-
-    def _ensure_service(self, name: str, config: AppConfig, output_directory: Path) -> ServiceEndpoint:
-        configured = config.priority_map.services.get(name)
-        if configured is None:
-            raise AnalysisError(f"Required service configuration is missing: {name}")
-        node = config.nodes.get(configured.node)
-        if node is None:
-            raise AnalysisError(f"Service {name} references unknown node {configured.node!r}")
-        if node.mode == "local":
-            # ServiceController.start() waits on the direct service data plane.
-            endpoint = self.controller.start(configured.spec, cancel_event=self._cancel_event)
-        else:
-            if node.instruction_port is None:
-                raise AnalysisError(f"Remote node {configured.node!r} has no instruction port")
-            if self._cancelled_checkpoint(output_directory):
-                raise ServiceError("Analysis cancelled before remote service startup.")
-            spec = configured.spec
-            if name in ("llm", "visual_llm"):
-                settings = {key: value for key, value in configured.settings.items() if key in REMOTE_LLM_KEYS}
-                settings = validate_llm_settings(settings, remote=True)
-                settings["bind_host"] = resolve_inference_bind_host(configured.node, config.nodes, None)
-                spec = ServiceSpec(service_type=name, port=configured.port, settings=settings)
-            endpoint = InstructionClient(node.host, node.instruction_port).start_service(spec)
-            if self._cancelled_checkpoint(output_directory):
-                raise ServiceError("Analysis cancelled after remote service startup.")
-            self._wait_ready(
-                endpoint,
-                float(configured.settings.get("startup_timeout", 600)),
-                cancel_event=self._cancel_event,
-            )
-        self._endpoints[name] = endpoint
-        return endpoint
 
     @staticmethod
     def _wait_ready(endpoint: ServiceEndpoint, timeout: float, *, cancel_event: threading.Event | None = None) -> None:

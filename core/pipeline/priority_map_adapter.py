@@ -280,22 +280,76 @@ class _GraphAgent:
         self._finished = False
         self._context: dict[str, Any] = {}
 
-    async def start_async_if_ready(self) -> bool:
+    def should_run(self) -> bool:
+        return bool(self._context)
+
+    def is_running(self) -> bool:
+        return not self._finished
+
+    def start_async_if_ready(self) -> bool:
+        """Synchronous stub matching Priority Map's expected API.
+
+        Priority Map calls this synchronously during construction.
+        We defer actual LLM calls to update_priorities.
+        """
         return True
 
     def poll_finished(self) -> bool:
         return self._finished
 
     def update_priorities(self, scores: dict[str, float]) -> None:
-        self._history.append({"scores": scores, "context": dict(self._context)})
+        """Call Logical LLM to update graph context and adjust scores."""
+        import json
+
+        self._history.append({"scores": dict(scores), "context": dict(self._context)})
         if len(self._history) > self.graph_context_window:
             self._history.pop(0)
 
+        generation_settings = dict(self.llm_generation)
+
+        try:
+            prompt = (
+                "Analyze the scene graph context and priority scores. "
+                "Return ONLY a JSON object with shape: "
+                '{"context_update":{},"score_adjustments":{},"reasoning":"..."}. '
+                "Score adjustments are offset values (-100 to +100) per label. "
+                "Context: " + json.dumps(self._context) + " "
+                "History: " + json.dumps(self._history[-self.graph_context_window :])
+            )
+            response = self.llm_client.chat(
+                prompt,
+                model=self.model,
+                **{k: v for k, v in generation_settings.items() if v is not None},
+            )
+            text = response.text.strip()
+            # Strip markdown fences if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1]
+                if text.endswith("```"):
+                    text = text[:-3]
+            payload = json.loads(text.strip())
+        except (json.JSONDecodeError, Exception) as exc:
+            self._finished = True
+            raise AnalysisError(f"Graph Agent LLM response was not valid JSON: {exc}") from exc
+
+        if isinstance(payload.get("context_update"), dict):
+            self._context.update(payload["context_update"])
+        if isinstance(payload.get("score_adjustments"), dict):
+            for label, offset in payload["score_adjustments"].items():
+                label_str = str(label)
+                if label_str in scores:
+                    try:
+                        scores[label_str] += float(offset)
+                    except (TypeError, ValueError):
+                        pass
+        self._finished = True
+
     def get_context(self) -> dict[str, Any]:
-        return self._context
+        return dict(self._context)
 
     def close(self) -> None:
         self._history.clear()
+        self._finished = True
 
 
 class PriorityMapAdapter:
@@ -409,15 +463,18 @@ class PriorityMapAdapter:
             )
         original_scene = priority_runner.SceneUnderstanding
         original_segment = priority_runner.Segment
+        original_graph = getattr(priority_runner, "GraphAgent", None)
         sam_resize = settings.get("sam_resize")
         if isinstance(sam_resize, int):
             sam_resize = (sam_resize, sam_resize)
         try:
+            # Scene understanding uses the Visual LLM and its generation settings
+            visual_gen = settings.get("visual_llm_generation") or settings.get("llm_generation") or {}
             priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
                 visual_llm_client or llm_client,
                 configured_prompts=settings.get("prompts", []),
-                model=settings.get("scene_model") or "local-model",
-                llm_generation=settings.get("llm_generation"),
+                model=settings.get("scene_model") or "visual-model",
+                llm_generation=visual_gen,
                 debug=bool(settings.get("debug", False)),
             )
             priority_runner.Segment = lambda **kwargs: _RemoteSegment(
@@ -425,6 +482,18 @@ class PriorityMapAdapter:
                 sam_thresh=float(settings.get("sam_confidence", 0.25)),
                 sam_resize=sam_resize,
             )
+            # Substitute GraphAgent if the module exposes it
+            if original_graph is not None:
+                # Build a GraphAgent instance from saved Logical LLM settings
+                logical_gen = settings.get("llm_generation") or {}
+                graph_agent_instance = _GraphAgent(
+                    llm_client,
+                    model=settings.get("scene_model") or "local-model",
+                    llm_generation=logical_gen,
+                )
+                priority_runner.GraphAgent = lambda **kwargs: graph_agent_instance
+
+            graph_agent_arg = graph_agent if graph_agent is not None else bool(settings.get("graph_agent", False))
             return runner_class(
                 image_folder=image_folder,
                 output_dir=output_directory,
@@ -437,7 +506,7 @@ class PriorityMapAdapter:
                 debug=bool(settings.get("debug", False)),
                 record=bool(settings.get("record", True)),
                 panoramic=bool(settings.get("panoramic", False)),
-                graph_agent=graph_agent or bool(settings.get("graph_agent", False)),
+                graph_agent=graph_agent_arg,
                 gps_csv=settings.get("gps_csv"),
                 camera_intrinsics=settings.get("camera_intrinsics"),
                 scene_model=settings.get("scene_model"),
@@ -445,6 +514,8 @@ class PriorityMapAdapter:
         finally:
             priority_runner.SceneUnderstanding = original_scene
             priority_runner.Segment = original_segment
+            if original_graph is not None:
+                priority_runner.GraphAgent = original_graph
 
     @staticmethod
     def _run_runner(

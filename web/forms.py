@@ -9,8 +9,8 @@ from django import forms
 
 from core.config import ConfiguredService, HostListenerConfig, NodeConfig, PipelineConfig
 from core.errors import ConfigurationError
-from core.services.specs import ServiceSpec
 from core.services.llm_settings import CACHE_TYPE_CHOICES
+from core.services.specs import ServiceSpec
 
 
 class HostListenerForm(forms.Form):
@@ -120,9 +120,15 @@ class LLMServiceForm(ServiceForm):
         required=False,
     )
     draft_max_tokens = forms.IntegerField(label="Draft max tokens", min_value=1, initial=3, required=False)
-    draft_min_prob = forms.FloatField(label="Draft min probability", min_value=0, max_value=1, initial=0.75, required=False)
-    draft_cache_type_k = forms.ChoiceField(label="Draft K-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False)
-    draft_cache_type_v = forms.ChoiceField(label="Draft V-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False)
+    draft_min_prob = forms.FloatField(
+        label="Draft min probability", min_value=0, max_value=1, initial=0.75, required=False
+    )
+    draft_cache_type_k = forms.ChoiceField(
+        label="Draft K-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False
+    )
+    draft_cache_type_v = forms.ChoiceField(
+        label="Draft V-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False
+    )
     # Advanced - Compute
     n_gpu_layers = forms.CharField(label="GPU layers", required=False, initial="all")
     n_threads = forms.IntegerField(label="CPU threads", min_value=1, required=False)
@@ -356,6 +362,7 @@ class LLMServiceForm(ServiceForm):
             initial["model_file_pattern"] = settings["hf_file"]
         self.initial.update(initial)
 
+
 class VisualLLMServiceForm(LLMServiceForm):
     """Visual LLM form with vision forced on, separate port, and visual-model alias."""
 
@@ -389,6 +396,7 @@ class VisualLLMServiceForm(LLMServiceForm):
         spec = super().to_spec()
         spec.settings["vision_enabled"] = True
         return spec
+
 
 class SAMServiceForm(ServiceForm):
     _OWNED_FLAGS = {"--host", "--port", "--checkpoint", "--confidence"}

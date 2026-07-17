@@ -452,7 +452,7 @@ def test_models_page_renders_compute_nodes_and_model_forms(client, monkeypatch, 
     assert b"Compute nodes" in response.content
     assert b"This computer" in response.content
     assert b"Add remote computer" in response.content
-    assert b"LLM service" in response.content
+    assert b"Logical LLM" in response.content
     assert b"SAM3 service" in response.content
 
 
@@ -495,7 +495,7 @@ def test_add_remote_node_validation_keeps_complete_models_context(client, monkey
     assert response.status_code == 400
     assert message in response.content
     assert b"Compute nodes" in response.content
-    assert b"LLM service" in response.content
+    assert b"Logical LLM" in response.content
     assert b"SAM3 service" in response.content
 
 

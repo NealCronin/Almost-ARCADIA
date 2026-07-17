@@ -4,135 +4,236 @@
   const terminal = new Set(['completed', 'failed', 'cancelled', 'idle']);
   const csrfToken = () => document.cookie.split('; ').find((item) => item.startsWith('csrftoken='))?.split('=')[1] || qs('[name=csrfmiddlewaretoken]')?.value || '';
 
+  // Tabs
   qsa('[data-tabs]').forEach((tabs) => {
     const buttons = qsa('[data-tab]', tabs);
-    const panels = qsa('.tab-panel', tabs);
-    buttons.forEach((button) => button.addEventListener('click', () => {
-      buttons.forEach((item) => {
-        const active = item === button;
-        item.classList.toggle('is-active', active);
-        item.setAttribute('aria-selected', String(active));
-      });
-      panels.forEach((panel) => {
-        const active = panel.id === button.dataset.tab;
-        panel.classList.toggle('is-active', active);
-        panel.hidden = !active;
-      });
+    const panels = qsa('[data-panel]', tabs);
+    buttons.forEach((btn) => btn.addEventListener('click', () => {
+      buttons.forEach((b) => b.removeAttribute('aria-selected'));
+      panels.forEach((p) => p.hidden = true);
+      btn.setAttribute('aria-selected', 'true');
+      const panel = qs(btn.dataset.tab, tabs);
+      if (panel) panel.hidden = false;
     }));
   });
 
+  // Host listener
   const hostListener = qs('[data-host-listener-status-url]');
   if (hostListener) {
-    const stateElement = qs('[data-host-listener-state]', hostListener);
-    const addressElement = qs('[data-host-listener-address]', hostListener);
-    const uptimeElement = qs('[data-host-listener-uptime]', hostListener);
-    const errorElement = qs('[data-host-listener-error]', hostListener);
-    const form = qs('[data-host-listener-form]', hostListener);
-    const save = qs('[data-host-listener-save]', hostListener);
-    const renderListener = (data) => {
-      const state = data.state || 'failed';
-      if (stateElement) {
-        stateElement.textContent = state.replace(/\b\w/g, (character) => character.toUpperCase());
-        stateElement.className = `status-pill status-pill--${state}`;
-      }
-      if (addressElement) addressElement.textContent = `Listening on ${data.host}:${data.port}`;
-      if (uptimeElement) uptimeElement.textContent = data.uptime_seconds == null ? '' : `Uptime: ${data.uptime_seconds} seconds`;
-      if (errorElement) { errorElement.hidden = !data.last_error; errorElement.textContent = data.last_error || ''; }
-      if (save) save.disabled = ['starting', 'restarting', 'rollback'].includes(state);
-    };
-    const refreshListener = async () => {
+    let hostPollTimer = null;
+    const hostPoll = async () => {
       try {
-        const response = await fetch(hostListener.dataset.hostListenerStatusUrl, {headers: {'Accept': 'application/json'}});
-        if (response.ok) renderListener(await response.json());
-      } finally {
-        window.setTimeout(refreshListener, 1200);
-      }
+        const response = await fetch(hostListener.dataset.hostListenerStatusUrl, { headers: { 'Accept': 'application/json' } });
+        const data = await response.json();
+        const indicator = qs('[data-host-listener-indicator]');
+        if (indicator) {
+          indicator.textContent = data.running ? 'Running' : 'Stopped';
+          indicator.className = 'status-pill' + (data.running ? ' status-pill--ready' : '');
+        }
+        const instructionHost = qs('[data-instruction-host]');
+        if (instructionHost) instructionHost.textContent = `${data.host}:${data.port}`;
+      } catch (_) { /* polling is best-effort */ }
     };
-    form?.addEventListener('submit', () => { if (save) save.disabled = true; });
-    refreshListener();
+    hostPoll();
+    hostPollTimer = setInterval(hostPoll, 30000);
   }
 
-  const llmForm = qs('[data-llm-form]');
-  if (llmForm) {
-    const node = qs('#llm_node', llmForm);
-    const bind = qs('#llm_local_bind_host', llmForm);
+  // ======== ALL LLM forms (iterate, don't just pick first) ========
+  qsa('[data-llm-form]').forEach((llmForm) => {
+    const role = llmForm.dataset.role || 'llm';
+    const rolePrefix = role === 'visual_llm' ? 'vis' : 'llm';
+
+    // Node / bind-host toggling
+    const nodeSelect = qs(`[name="node"]`, llmForm);
+    const bindInput = qs(`[name="local_bind_host"]`, llmForm);
     const bindSection = qs('[data-local-bind-section]', llmForm);
     const remoteNotice = qs('[data-remote-bind-notice]', llmForm);
-    const advanced = qs('[data-llm-advanced]', llmForm);
-    const nodeHosts = JSON.parse(qs('#llm-node-hosts', llmForm)?.textContent || '{}');
+
+    // Find node hosts data
+    const nodeHostsScript = qs(`#${role}-node-hosts`) || qs(`#${rolePrefix}-node-hosts`) ||
+                            qs(`[id$="-node-hosts"]`, llmForm);
+    let nodeHosts = {};
+    try { nodeHosts = JSON.parse(nodeHostsScript?.textContent || '{}'); } catch (_) {}
+
     const updateBindHost = () => {
-      const remote = node && node.value !== 'local';
-      if (bind) bind.disabled = !!remote;
+      const remote = nodeSelect && nodeSelect.value !== 'local';
+      if (bindInput) bindInput.disabled = !!remote;
       if (bindSection) bindSection.hidden = !!remote;
       if (remoteNotice) {
         remoteNotice.hidden = !remote;
-        remoteNotice.textContent = remote ? `Inference will listen on ${nodeHosts[node.value] || 'the selected remote computer'} because this is the selected remote computer's address.` : '';
+        remoteNotice.textContent = remote
+          ? `Inference will listen on ${nodeHosts[nodeSelect?.value] || 'the selected remote computer'}.`
+          : '';
       }
     };
-    node?.addEventListener('change', updateBindHost);
+    nodeSelect?.addEventListener('change', updateBindHost);
     updateBindHost();
+
+    // Repository inspection
     qs('[data-inspect-repository]', llmForm)?.addEventListener('click', async () => {
+      const advanced = qs('[data-llm-advanced]', llmForm);
       const status = qs('[data-inspect-status]', llmForm);
       if (advanced) advanced.open = true;
       if (status) status.textContent = 'Inspecting repository…';
       try {
+        const hfRepo = qs(`[name="hf_repo"]`, llmForm)?.value || '';
+        const mmprojRepo = qs(`[name="mmproj_repo"]`, llmForm)?.value || '';
+        const draftRepo = qs(`[name="draft_repo"]`, llmForm)?.value || '';
+
         const response = await fetch(llmForm.dataset.inspectUrl || '', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
-          body: JSON.stringify({
-            hf_repo: qs('#llm_hf_repo', llmForm)?.value || '',
-            mmproj_repo: qs('#llm_mmproj_repo', llmForm)?.value || '',
-          }),
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken(), 'Accept': 'application/json' },
+          body: JSON.stringify({ hf_repo: hfRepo, mmproj_repo: mmprojRepo, draft_repo: draftRepo }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Inspection failed.');
-        const fill = (inputId, listId, values) => {
-          const input = qs(inputId, llmForm);
-          const list = qs(listId, llmForm);
-          if (input && list) {
+
+        const fill = (inputName, listId, values) => {
+          const input = qs(`[name="${inputName}"]`, llmForm);
+          const list = qs(`#${listId}`, llmForm);
+          if (input && list && values) {
             input.setAttribute('list', list.id);
-            list.replaceChildren(...values.map((value) => Object.assign(document.createElement('option'), {value})));
+            list.replaceChildren(...values.map((v) => Object.assign(document.createElement('option'), { value: v })));
           }
         };
-        fill('#llm_model_file_pattern', '#model-patterns', data.models || []);
-        fill('#llm_mmproj_file_pattern', '#mmproj-patterns', data.mmproj || []);
+        fill('model_file_pattern', `${rolePrefix}-model-patterns`, data.models);
+        fill('mmproj_file_pattern', `${rolePrefix}-mmproj-patterns`, data.mmproj);
+        fill('draft_file_pattern', `${rolePrefix}-draft-patterns`, data.drafts);
         if (status) status.textContent = data.message || 'Repository inspected.';
       } catch (error) {
         if (status) status.textContent = error.message || 'Inspection failed.';
       }
     });
-  }
 
+    // Vision field visibility
+    const visionCheckbox = qs(`[name="vision_enabled"]`, llmForm);
+    const mmprojRepo = qs(`[name="mmproj_repo"]`, llmForm);
+    const mmprojPattern = qs(`[name="mmproj_file_pattern"]`, llmForm);
+    const updateVisionFields = () => {
+      const enabled = visionCheckbox?.checked || visionCheckbox?.value === 'true' || visionCheckbox?.disabled;
+      if (mmprojRepo) mmprojRepo.closest('.form-field')?.style && (mmprojRepo.closest('.form-field').style.display = enabled ? '' : 'none');
+      if (mmprojPattern) mmprojPattern.closest('.form-field')?.style && (mmprojPattern.closest('.form-field').style.display = enabled ? '' : 'none');
+    };
+    visionCheckbox?.addEventListener('change', updateVisionFields);
+    updateVisionFields();
+
+    // Draft field visibility
+    const draftCheckbox = qs(`[name="draft_enabled"]`, llmForm);
+    const draftFields = ['draft_repo', 'draft_file_pattern', 'draft_method', 'draft_max_tokens', 'draft_min_prob', 'draft_cache_type_k', 'draft_cache_type_v'];
+    const updateDraftFields = () => {
+      const enabled = draftCheckbox?.checked;
+      draftFields.forEach((name) => {
+        const field = qs(`[name="${name}"]`, llmForm);
+        if (field?.closest('.form-field')?.style) {
+          field.closest('.form-field').style.display = enabled ? '' : 'none';
+        }
+      });
+    };
+    draftCheckbox?.addEventListener('change', updateDraftFields);
+    updateDraftFields();
+
+    // Dirty tracking
+    let isDirty = false;
+    const allInputs = qsa('input, select, textarea', llmForm);
+    allInputs.forEach((el) => {
+      el.addEventListener('change', () => { isDirty = true; });
+      el.addEventListener('input', () => { isDirty = true; });
+    });
+
+    // Test chat button
+    const testBtn = qs('[data-test-chat]', llmForm);
+    if (testBtn) {
+      testBtn.addEventListener('click', async () => {
+        if (isDirty) {
+          alert('Save changes before testing.');
+          return;
+        }
+        const originalText = testBtn.textContent;
+        testBtn.textContent = 'Testing…';
+        testBtn.disabled = true;
+
+        try {
+          const url = role === 'llm'
+            ? '/client/priority-map/models/test-llm-chat/'
+            : '/client/priority-map/models/test-visual-llm-chat/';
+          const formData = new FormData();
+          const promptEl = qs('[data-test-prompt]', llmForm);
+          formData.append('prompt', promptEl?.value || '');
+          const imageEl = qs('[data-test-image]', llmForm);
+          if (imageEl?.files?.length) {
+            formData.append('image', imageEl.files[0]);
+          }
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken(), 'Accept': 'application/json' },
+            body: formData,
+          });
+          const data = await response.json();
+          const resultEl = qs('[data-test-result]', llmForm);
+          if (resultEl) {
+            if (response.ok) {
+              resultEl.textContent = data.response || JSON.stringify(data);
+              resultEl.className = 'help-copy';
+            } else {
+              resultEl.textContent = data.error || 'Unknown error';
+              resultEl.className = 'inline-error';
+            }
+          }
+        } catch (error) {
+          const resultEl = qs('[data-test-result]', llmForm);
+          if (resultEl) { resultEl.textContent = error.message || 'Request failed'; resultEl.className = 'inline-error'; }
+        } finally {
+          testBtn.textContent = originalText;
+          testBtn.disabled = false;
+        }
+      });
+    }
+  });
+
+  // Compute nodes
   const computeNodes = qs('[data-compute-nodes]');
   if (computeNodes) {
-    const nodeState = (name) => qsa('[data-node-state]', computeNodes).find((element) => element.dataset.nodeState === name);
-    qsa('[data-node-test]', computeNodes).forEach((button) => button.addEventListener('click', async () => {
-      const state = nodeState(button.dataset.nodeStateTarget || '');
-      button.disabled = true;
-      try {
-        const response = await fetch(button.dataset.nodeTestUrl || '', {
-          method: 'POST',
-          headers: {'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
-        });
-        const data = await response.json();
-        if (state) {
-          state.textContent = data.message || 'Instruction server is unreachable.';
-          state.className = `status-pill status-pill--${data.state || 'unreachable'}`;
+    qsa('[data-test-node]', computeNodes).forEach((form) => {
+      qs('button', form)?.addEventListener('click', async () => {
+        const btn = qs('button', form);
+        const original = btn.textContent;
+        btn.textContent = 'Testing…';
+        btn.disabled = true;
+        try {
+          const response = await fetch(form.getAttribute('action'), {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken(), 'Accept': 'application/json' },
+          });
+          const data = await response.json();
+          const nodeName = form.dataset.testNode;
+          const pill = qs(`[data-node-status="${nodeName}"]`, computeNodes);
+          if (pill) { pill.textContent = data.state; pill.className = `status-pill${data.state === 'reachable' ? ' status-pill--ready' : ''}`; }
+        } catch (_) {
+          const nodeName = form.dataset.testNode;
+          const pill = qs(`[data-node-status="${nodeName}"]`, computeNodes);
+          if (pill) { pill.textContent = 'error'; pill.className = 'status-pill'; }
+        } finally {
+          btn.textContent = original;
+          btn.disabled = false;
         }
-      } catch (_) {
-        if (state) {
-          state.textContent = 'Instruction server is unreachable.';
-          state.className = 'status-pill status-pill--unreachable';
+      });
+    });
+    qsa('[data-delete-node]', computeNodes).forEach((form) => {
+      qs('button', form)?.addEventListener('click', (ev) => {
+        if (!confirm('Remove this remote computer and its saved model configurations?')) {
+          ev.preventDefault();
         }
-      } finally {
-        button.disabled = false;
-      }
-    }));
-    qsa('[data-node-delete]', computeNodes).forEach((form) => form.addEventListener('submit', (event) => {
-      if (!window.confirm('Delete this remote computer?')) event.preventDefault();
-    }));
+      });
+    });
   }
 
+  // Visual mode selector
+  const visualModeSelect = qs('[data-visual-mode-select]');
+  visualModeSelect?.addEventListener('change', () => {
+    visualModeSelect.closest('form')?.submit();
+  });
+
+  // File uploads
   const fileInput = document.getElementById('priority-map-files');
   const folderInput = document.getElementById('priority-map-folder');
   const filePanel = qs('[data-selected-files]');
@@ -146,156 +247,94 @@
   let selectedFiles = [];
 
   const renderFiles = () => {
-    if (!filePanel || !fileList || !fileSummary) return;
-    filePanel.hidden = selectedFiles.length === 0;
-    fileSummary.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected`;
-    fileList.replaceChildren(...selectedFiles.slice(0, 12).map((file) => {
-      const item = document.createElement('li');
-      item.textContent = file.webkitRelativePath || file.name;
-      return item;
+    if (filePanel) filePanel.hidden = !selectedFiles.length;
+    if (fileList) fileList.replaceChildren(...selectedFiles.map((f) => {
+      const li = document.createElement('li');
+      const size = f.size > 1048576 ? `${(f.size / 1048576).toFixed(1)} MB` : `${(f.size / 1024).toFixed(0)} kB`;
+      li.textContent = `${f.webkitRelativePath || f.name} (${size})`;
+      return li;
     }));
+    if (fileSummary) fileSummary.textContent = selectedFiles.length ? `${selectedFiles.length} file(s) selected` : '';
   };
+
   const renderUploads = (uploads) => {
     if (!retained) return;
-    retained.replaceChildren(...uploads.map((upload) => {
-      const row = document.createElement('div');
-      row.className = 'artifact-row';
-      const title = document.createElement('span');
-      title.textContent = `${upload.source_type}: ${upload.file_count} file${upload.file_count === 1 ? '' : 's'}, ${upload.size_bytes} bytes, ${upload.created_at}`;
-      const run = document.createElement('button');
-      run.type = 'button'; run.className = 'button button--ghost'; run.textContent = 'Run';
-      run.addEventListener('click', () => submitRetainedUpload(upload.id, stageButton?.dataset.runUrl));
-      const remove = document.createElement('button');
-      remove.type = 'button'; remove.className = 'text-button'; remove.textContent = 'Delete';
-      remove.addEventListener('click', async () => {
-        try {
-          const response = await fetch(upload.delete_url, {
-            method: 'POST',
-            headers: {'X-CSRFToken': csrfToken(), 'Accept': 'application/json'},
-          });
-          const data = await response.json();
-          if (!response.ok) {
-            if (progressText) { progressText.hidden = false; progressText.textContent = data.detail || 'Delete failed.'; }
-            return;
-          }
-          loadUploads();
-        } catch (_) {
-          if (progressText) { progressText.hidden = false; progressText.textContent = 'Delete failed.'; }
-        }
-      });
-      row.append(title, run, remove);
-      return row;
+    retained.replaceChildren(...uploads.map((u) => {
+      const div = document.createElement('div');
+      div.className = 'retained-upload';
+      div.innerHTML = `<strong>${u.name}</strong> <span class="muted">${(u.size / 1048576).toFixed(1)} MB</span>`;
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = u.submit_url;
+      form.className = 'inline-form';
+      form.innerHTML = `<input type="hidden" name="csrfmiddlewaretoken" value="${csrfToken()}"><button class="button button--primary button--small" type="submit">Run</button>`;
+      div.appendChild(form);
+      return div;
     }));
   };
+
   const loadUploads = async () => {
-    if (!retained) return;
     try {
-      const response = await fetch(retained.dataset.uploadListUrl, {headers: {'Accept': 'application/json'}});
-      if (response.ok) renderUploads((await response.json()).uploads || []);
-    } catch (_) { /* Retained uploads remain available after the next refresh. */ }
+      const resp = await fetch('/client/priority-map/uploads/', { headers: { 'Accept': 'application/json' } });
+      if (resp.ok) renderUploads((await resp.json()).uploads || []);
+    } catch (_) {}
   };
-  const submitRetainedUpload = (uploadId, runUrl) => {
-    const form = document.createElement('form');
-    form.method = 'post'; form.action = runUrl;
-    for (const [name, value] of [['csrfmiddlewaretoken', csrfToken()], ['upload_id', uploadId]]) {
-      const input = document.createElement('input'); input.type = 'hidden'; input.name = name; input.value = value; form.appendChild(input);
-    }
-    document.body.appendChild(form); form.submit();
-  };
+
   qs('[data-choose-files]')?.addEventListener('click', () => fileInput?.click());
   qs('[data-choose-folder]')?.addEventListener('click', () => folderInput?.click());
   fileInput?.addEventListener('change', () => { selectedFiles = Array.from(fileInput.files || []); renderFiles(); });
   folderInput?.addEventListener('change', () => { selectedFiles = Array.from(folderInput.files || []); renderFiles(); });
   qs('[data-clear-files]')?.addEventListener('click', () => { selectedFiles = []; if (fileInput) fileInput.value = ''; if (folderInput) folderInput.value = ''; renderFiles(); });
-  stageButton?.addEventListener('click', () => {
+  stageButton?.addEventListener('click', async () => {
     if (!selectedFiles.length) return;
-    stageButton.disabled = true;
-    progress.hidden = false; progressText.hidden = false; progressText.textContent = 'Uploading 0%';
-    const data = new FormData();
-    selectedFiles.forEach((file) => { data.append('files', file); data.append('relative_paths', file.webkitRelativePath || file.name); });
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', stageButton.dataset.uploadUrl);
-    xhr.setRequestHeader('X-CSRFToken', csrfToken());
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      const percentage = Math.round((event.loaded / event.total) * 100);
-      if (progressBar) progressBar.style.width = `${percentage}%`;
-      progressText.textContent = `Uploading ${percentage}%`;
-    };
-    xhr.onload = () => {
-      stageButton.disabled = false;
-      if (xhr.status < 200 || xhr.status >= 300) { progressText.textContent = 'Upload failed.'; return; }
-      selectedFiles = [];
-      if (fileInput) fileInput.value = '';
-      if (folderInput) folderInput.value = '';
-      renderFiles();
-      loadUploads();
-      progressText.hidden = false;
-      progressText.textContent = 'Upload staged. Choose Run when ready.';
-    };
-    xhr.onerror = () => { stageButton.disabled = false; progressText.textContent = 'Upload failed.'; };
-    xhr.send(data);
+    if (progress) progress.hidden = false;
+    const formData = new FormData();
+    selectedFiles.forEach((f) => formData.append('files', f));
+    try {
+      const resp = await fetch('/client/priority-map/uploads/', { method: 'POST', headers: { 'X-CSRFToken': csrfToken() }, body: formData });
+      const data = await resp.json();
+      if (resp.ok) { selectedFiles = []; renderFiles(); loadUploads(); }
+      if (progress) progress.hidden = true;
+    } catch (_) { if (progress) progress.hidden = true; }
   });
   loadUploads();
 
+  // Analysis status
   const statusRoot = qs('[data-analysis-status-url]');
   if (statusRoot) {
-    const stateElement = document.getElementById('analysis-state');
-    const messageElement = document.getElementById('analysis-message');
-    const framesElement = document.getElementById('analysis-frames');
-    const errorElement = document.getElementById('analysis-error');
-    const streamFrame = qs('[data-stream-frame]');
-    const artifactList = qs('[data-artifact-list]');
-    let artifactsUrl = null;
-    const renderArtifacts = async (url) => {
-      if (!artifactList || !url || url === artifactsUrl) return;
-      artifactsUrl = url;
-      const response = await fetch(url, {headers: {'Accept': 'application/json'}});
-      if (!response.ok) return;
-      const {artifacts = []} = await response.json();
-      artifactList.replaceChildren(...artifacts.map((artifact) => {
-        const row = document.createElement('article'); row.className = 'artifact-row';
-        const label = document.createElement('code'); label.textContent = artifact.path;
-        const view = document.createElement('a'); view.href = artifact.inline_url; view.textContent = 'View'; view.className = 'button button--ghost';
-        const download = document.createElement('a'); download.href = artifact.download_url; download.textContent = 'Download'; download.className = 'button button--ghost';
-        row.append(label, view, download); return row;
-      }));
-    };
-    const updateStream = (data) => {
-      if (!streamFrame) return;
-      if (data.state === 'idle' && !data.run_id) {
-        streamFrame.textContent = 'No in-memory run is available. Django may have restarted; previously generated artifacts remain on disk.';
-        return;
-      }
-      if (!data.stream_url) return;
-      let image = qs('img', streamFrame);
-      if (!image) { image = document.createElement('img'); image.alt = 'Latest Priority Map preview'; streamFrame.replaceChildren(image); }
-      if (image.dataset.streamUrl !== data.stream_url) { image.dataset.streamUrl = data.stream_url; image.src = data.stream_url; }
-      image.onerror = () => { if (!terminal.has(data.state)) window.setTimeout(() => { image.src = `${data.stream_url}?reconnect=${Date.now()}`; }, 1200); };
-    };
-    const updateCancelButtons = (data) => qsa('[data-cancel-run]').forEach((button) => {
-      button.disabled = terminal.has(data.state) || !data.run_id || data.state === 'cancelling';
-      button.onclick = async () => {
-        button.disabled = true;
-        await fetch(`/client/priority-map/runs/${data.run_id}/cancel/`, {method: 'POST', headers: {'X-CSRFToken': csrfToken()}});
-      };
-    });
-    const refresh = async () => {
+    let pollTimer = null;
+    const poll = async () => {
       try {
-        const response = await fetch(statusRoot.dataset.analysisStatusUrl, {headers: {'Accept': 'application/json'}});
-        if (!response.ok) return;
-        const data = await response.json();
-        if (stateElement) { stateElement.textContent = String(data.state || 'unknown').replace(/\b\w/g, (char) => char.toUpperCase()); stateElement.className = `status-pill status-pill--${data.state || 'unknown'}`; }
-        if (messageElement) messageElement.textContent = data.error || data.message || 'Ready';
-        if (framesElement) framesElement.textContent = data.frames_processed ?? 0;
-        if (errorElement) { errorElement.hidden = !data.error; errorElement.textContent = data.error || ''; }
-        updateCancelButtons(data);
-        updateStream(data);
-        if (!(data.state === 'idle' && !data.run_id)) renderArtifacts(data.artifacts_url);
-        if (!terminal.has(data.state)) window.setTimeout(refresh, 1200);
-      } catch (_) { window.setTimeout(refresh, 2500); }
+        const resp = await fetch(statusRoot.dataset.analysisStatusUrl, { headers: { 'Accept': 'application/json' } });
+        const state = await resp.json();
+        const el = qs('[data-analysis-state]');
+        if (el) { el.textContent = state.state; el.className = 'status-pill' + (state.state === 'running' ? ' status-pill--ready' : ''); }
+        const msgEl = qs('[data-analysis-message]');
+        if (msgEl) msgEl.textContent = state.message || '';
+        const framesEl = qs('[data-analysis-frames]');
+        if (framesEl) framesEl.textContent = state.frames_processed || '0';
+        if (terminal.has(state.state)) {
+          clearInterval(pollTimer);
+          // Reload artifacts
+          try {
+            const artResp = await fetch('/client/priority-map/runs/' + state.run_id + '/artifacts/', { headers: { 'Accept': 'application/json' } });
+            if (artResp.ok) {
+              const arts = await artResp.json();
+              const artList = qs('[data-artifact-list]');
+              if (artList) artList.replaceChildren(...(arts.artifacts || []).map((a) => {
+                const li = document.createElement('li');
+                const aEl = document.createElement('a');
+                aEl.href = a.download_url; aEl.textContent = a.path; aEl.download = '';
+                li.appendChild(aEl);
+                return li;
+              }));
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
     };
-    refresh();
+    poll();
+    pollTimer = setInterval(poll, 2000);
   }
 
   qsa('[data-copy-text]').forEach((button) => button.addEventListener('click', async () => {

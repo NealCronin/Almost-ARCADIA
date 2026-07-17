@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import fnmatch
-import re
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -13,17 +13,23 @@ from typing import IO
 import requests
 
 from core.errors import ServiceStartupError
-from core.services.llm_settings import NATIVE_FLAGS, PROJECTOR_RE, SPLIT_GGUF_RE, validate_additional_server_arguments
+from core.services.llm_settings import (
+    DRAFT_FLAGS,
+    NATIVE_FLAGS,
+    PROJECTOR_RE,
+    SPLIT_GGUF_RE,
+    validate_additional_server_arguments,
+)
 from core.services.specs import ServiceEndpoint, ServiceSpec
 from project.settings import BASE_DIR
 
 
 class LLMRuntime:
-    """Translate one LLM spec into the pinned llama-cpp-python server process.
+    """Translate one LLM spec into a native llama-server process.
 
-    llama-cpp-python 0.3.34 generates CLI flags from Pydantic field names, so
-    its public server flags intentionally use underscore spellings such as
-    ``--n_ctx`` and ``--chat_format``. The server exposes ``/v1/models``.
+    llama-server generates CLI flags from field names; public server flags
+    use the native underscore spellings such as ``--ctx-size`` and
+    ``--chat-template``. The server exposes ``/v1/models``.
     """
 
     _download_locks: dict[str, threading.Lock] = {}
@@ -97,8 +103,7 @@ class LLMRuntime:
         candidates = [
             filename
             for filename in files
-            if filename.lower().endswith(".gguf")
-            and bool(PROJECTOR_RE.search(Path(filename).name)) == projector
+            if filename.lower().endswith(".gguf") and bool(PROJECTOR_RE.search(Path(filename).name)) == projector
         ]
         if pattern:
             candidates = [filename for filename in candidates if fnmatch.fnmatchcase(Path(filename).name, pattern)]
@@ -110,9 +115,7 @@ class LLMRuntime:
         if split_candidates and len(split_candidates) == len(candidates):
             if pattern:
                 return candidates[0]  # caller resolves via _resolve_split_or_single
-            raise ValueError(
-                "Only split GGUF files found. Provide a model file pattern to select one."
-            )
+            raise ValueError("Only split GGUF files found. Provide a model file pattern to select one.")
         # Filter out split shards from auto-selection
         candidates = [f for f in candidates if not SPLIT_GGUF_RE.search(Path(f).name)]
         if len(candidates) == 1:
@@ -178,7 +181,7 @@ class LLMRuntime:
         total_shards = int(m.group(2))
         if shard_num != 1:
             raise ValueError(f"Model selection must start from shard 1, got shard {shard_num}")
-        prefix = filename[:m.start()]
+        prefix = filename[: m.start()]
         all_files = cls.list_repository_files(repo)
         downloaded = []
         for i in range(1, total_shards + 1):
@@ -196,14 +199,19 @@ class LLMRuntime:
         base_dir = BASE_DIR
         candidates = []
         if sys.platform == "win32":
-            candidates.extend([
-                str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "Release" / "llama-server.exe"),
-                str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "llama-server.exe"),
-            ])
+            candidates.extend(
+                [
+                    str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "Release" / "llama-server.exe"),
+                    str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "llama-server.exe"),
+                ]
+            )
         else:
             candidates.append(str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "llama-server"))
         import shutil
-        which_candidate = shutil.which("llama-server") or (shutil.which("llama-server.exe") if sys.platform == "win32" else None)
+
+        which_candidate = shutil.which("llama-server") or (
+            shutil.which("llama-server.exe") if sys.platform == "win32" else None
+        )
         if which_candidate:
             candidates.append(which_candidate)
         for candidate in candidates:
@@ -237,28 +245,38 @@ class LLMRuntime:
             value = settings.get(key)
             if value in (None, ""):
                 continue
-            # --no-mmap: emit only when disabled
-            if flag == "--no-mmap" and value:
+            # --mmap / --no-mmap: switch-only, no value
+            if flag == "--mmap":
+                if value:
+                    command.append("--mmap")
+                else:
+                    command.append("--no-mmap")
                 continue
-            # --flash-attn: tri-state
+            # --mlock: emit only when True, no value
+            if flag == "--mlock":
+                if value:
+                    command.append("--mlock")
+                continue
+            # --flash-attn: tri-state: auto->omit, on->--flash-attn 1, off->omit
             if flag == "--flash-attn":
                 if value in ("auto", ""):
                     continue
-                command.extend([flag, "1" if value in ("on", "1", True) else "0"])
+                if value in ("on", "1", True):
+                    command.extend([flag, "1"])
                 continue
             command.extend([flag, str(value)])
         draft_path = cls._resolve_draft_path(settings)
         if draft_path:
-            command.extend(["--draft-model", draft_path])
-            command.extend(["--speculative", str(settings.get("draft_method", "draft-simple"))])
-            command.extend(["--draft-max", str(settings.get("draft_max_tokens", 3))])
-            command.extend(["--draft-min", str(settings.get("draft_min_prob", 0.75))])
+            command.extend([DRAFT_FLAGS["draft_model"], draft_path])
+            command.extend([DRAFT_FLAGS["draft_method"], str(settings.get("draft_method", "draft-simple"))])
+            command.extend([DRAFT_FLAGS["draft_max_tokens"], str(settings.get("draft_max_tokens", 3))])
+            command.extend([DRAFT_FLAGS["draft_min_prob"], str(settings.get("draft_min_prob", 0.75))])
             dk = settings.get("draft_cache_type_k", "f16")
             dv = settings.get("draft_cache_type_v", "f16")
             if dk:
-                command.extend(["--draft-cache-type-k", str(dk)])
+                command.extend([DRAFT_FLAGS["draft_cache_type_k"], str(dk)])
             if dv:
-                command.extend(["--draft-cache-type-v", str(dv)])
+                command.extend([DRAFT_FLAGS["draft_cache_type_v"], str(dv)])
         command.extend(validate_additional_server_arguments(settings.get("extra_args", [])))
         return command
 
@@ -267,9 +285,11 @@ class LLMRuntime:
         return ServiceEndpoint(
             host=str(spec.settings.get("bind_host", public_host)), port=spec.port, service_type=spec.service_type
         )
+
     @staticmethod
     def readiness_url(endpoint: ServiceEndpoint) -> str:
         return f"{endpoint.base_url}/health"
+
     @staticmethod
     def probe(endpoint: ServiceEndpoint, timeout: float) -> requests.Response:
         return requests.get(LLMRuntime.readiness_url(endpoint), timeout=timeout)

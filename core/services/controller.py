@@ -126,6 +126,7 @@ class ServiceController:
             return LLMRuntime
         if spec.service_type == "sam3":
             from core.services.sam_runtime import SAMRuntime
+
             return SAMRuntime
         raise ValueError(f"Unsupported service type: {spec.service_type}")
 

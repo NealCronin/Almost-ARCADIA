@@ -13,8 +13,14 @@ if TYPE_CHECKING:
     from core.config import NodeConfig
 
 CACHE_TYPE_CHOICES = [
-    ("f16", "F16"), ("bf16", "BF16"), ("q8_0", "Q8_0"), ("q5_0", "Q5_0"),
-    ("q5_1", "Q5_1"), ("q4_0", "Q4_0"), ("q4_1", "Q4_1"), ("iq4_nl", "IQ4_NL"),
+    ("f16", "F16"),
+    ("bf16", "BF16"),
+    ("q8_0", "Q8_0"),
+    ("q5_0", "Q5_0"),
+    ("q5_1", "Q5_1"),
+    ("q4_0", "Q4_0"),
+    ("q4_1", "Q4_1"),
+    ("iq4_nl", "IQ4_NL"),
     ("", "Default"),
 ]
 
@@ -26,7 +32,7 @@ DRAFT_DEFAULTS = {
     "draft_cache_type_v": "f16",
 }
 
-DEFAULT_GENERATION = {"temperature": 0.2, "top_k": 40, "min_p": 0.05, "top_p": 0.95}
+DEFAULT_GENERATION = {"temperature": 0.1, "top_k": 20, "min_p": 0.05, "top_p": 0.9}
 DEFAULTS = {
     "bind_host": "127.0.0.1",
     "n_ctx": 32768,
@@ -46,30 +52,43 @@ NATIVE_FLAGS = {
     "flash_attn": "--flash-attn",
     "cache_type_k": "--cache-type-k",
     "cache_type_v": "--cache-type-v",
-    "use_mmap": "--no-mmap",
+    "use_mmap": "--mmap",
     "use_mlock": "--mlock",
     "model_alias": "--alias",
     "chat_format": "--chat-template",
 }
+
+DRAFT_FLAGS = {
+    "draft_model": "--spec-draft-model",
+    "draft_method": "--spec-type",
+    "draft_max_tokens": "--spec-draft-n-max",
+    "draft_min_prob": "--spec-draft-p-min",
+    "draft_cache_type_k": "--cache-type-k-draft",
+    "draft_cache_type_v": "--cache-type-v-draft",
+}
 MODEL_KEYS = {"hf_repo", "model_file_pattern", "models_cache_subdir"}
 VISION_KEYS = {"vision_enabled", "mmproj_repo", "mmproj_file_pattern", "chat_format"}
-GENERATION_KEYS = set(DEFAULT_GENERATION)
-RETIRED_SOURCE_KEYS = {"model_source", "model_path", "hf_file", "hf_cache_dir", "n_parallel"}
-OWNED_FLAGS = set(NATIVE_FLAGS.values()) | {
-    "--model",
-    "--mmproj",
-    "--host",
-    "--port",
-    "--hf-repo",
-    "--hf-file",
-    "--bind-host",
-    "--draft-model",
-    "--speculative",
-    "--draft-max",
-    "--draft-min",
-    "--draft-cache-type-k",
-    "--draft-cache-type-v",
+GENERATION_KEYS = set(DEFAULT_GENERATION) | {
+    "max_tokens",
+    "repeat_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "seed",
 }
+RETIRED_SOURCE_KEYS = {"model_source", "model_path", "hf_file", "hf_cache_dir", "n_parallel"}
+OWNED_FLAGS = (
+    set(NATIVE_FLAGS.values())
+    | set(DRAFT_FLAGS.values())
+    | {
+        "--model",
+        "--mmproj",
+        "--host",
+        "--port",
+        "--hf-repo",
+        "--hf-file",
+        "--bind-host",
+    }
+)
 DISALLOWED_ARGUMENTS = {
     "--",
     "-c",
@@ -89,7 +108,18 @@ DISALLOWED_ARGUMENTS = {
     "zsh",
 }
 REMOTE_LLM_KEYS = (
-    MODEL_KEYS | VISION_KEYS | set(NATIVE_FLAGS) | GENERATION_KEYS | {"bind_host", "extra_args"}
+    MODEL_KEYS
+    | VISION_KEYS
+    | set(NATIVE_FLAGS)
+    | set(DRAFT_FLAGS)
+    | GENERATION_KEYS
+    | {
+        "bind_host",
+        "extra_args",
+        "draft_enabled",
+        "draft_repo",
+        "draft_file_pattern",
+    }
 )
 
 
@@ -166,7 +196,12 @@ def validate_additional_server_arguments(args: list[str]) -> list[str]:
 
 def generation_settings(settings: Mapping[str, Any]) -> dict[str, float | int]:
     values = dict(DEFAULT_GENERATION)
-    for key, default in DEFAULT_GENERATION.items():
+    values.setdefault("max_tokens", 1024)
+    values.setdefault("repeat_penalty", 1.0)
+    values.setdefault("presence_penalty", 0.0)
+    values.setdefault("frequency_penalty", 0.0)
+    values.setdefault("seed", 0)
+    for key, default in values.items():
         value = settings.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"{key} must be a finite number.")
@@ -198,5 +233,18 @@ def validate_llm_settings(settings: Mapping[str, Any], *, remote: bool = False) 
     values["vision_enabled"] = bool(values.get("vision_enabled", False))
     values["bind_host"] = str(ipaddress.IPv4Address(str(values.get("bind_host", DEFAULTS["bind_host"]))))
     values["extra_args"] = validate_additional_server_arguments(values.get("extra_args", []))
+    values["draft_enabled"] = bool(values.get("draft_enabled", False))
+    if values["draft_enabled"]:
+        if values.get("draft_repo"):
+            values["draft_repo"] = validate_hf_repository(str(values["draft_repo"]))
+        if values.get("draft_file_pattern"):
+            values["draft_file_pattern"] = validate_gguf_pattern(values["draft_file_pattern"])
+            if values["draft_file_pattern"] is None:
+                values.pop("draft_file_pattern", None)
+        values["draft_method"] = str(values.get("draft_method", "draft-simple"))
+        values["draft_max_tokens"] = int(values.get("draft_max_tokens", 3))
+        values["draft_min_prob"] = float(values.get("draft_min_prob", 0.75))
+        values["draft_cache_type_k"] = str(values.get("draft_cache_type_k", "f16"))
+        values["draft_cache_type_v"] = str(values.get("draft_cache_type_v", "f16"))
     values.update(generation_settings(values))
     return values

@@ -16,7 +16,7 @@ from core.services.specs import ServiceSpec
 
 
 class StartServiceRequest(BaseModel):
-    service_type: Literal["llm", "sam3"]
+    service_type: Literal["llm", "visual_llm", "sam3"]
     port: int = Field(ge=1, le=65535)
     settings: dict[str, Any] = Field(default_factory=dict)
 
@@ -30,7 +30,7 @@ def _reject_remote_commands(settings: dict[str, Any], *, service_type: str, publ
     present = forbidden.intersection(settings)
     if present:
         raise HTTPException(status_code=422, detail=f"Remote settings cannot include: {', '.join(sorted(present))}")
-    if service_type != "llm":
+    if service_type == "sam3":
         return settings
     if settings.get("models_cache_subdir", "huggingface") != "huggingface":
         raise HTTPException(status_code=422, detail="Remote LLM cache must use the local huggingface cache.")

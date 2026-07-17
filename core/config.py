@@ -214,6 +214,7 @@ class PriorityMapOutputConfig:
         known = {"root", "preview"}
         return cls(Path(root), preview, copy.deepcopy({key: value for key, value in data.items() if key not in known}))
 
+
 @dataclass(slots=True)
 class PriorityMapToolConfig:
     services: dict[str, ConfiguredService] = field(default_factory=dict)
@@ -229,6 +230,7 @@ class PriorityMapToolConfig:
                 "services": {name: service.to_dict() for name, service in self.services.items()},
                 "pipeline": self.pipeline.to_dict(),
                 "output": self.output.to_dict(),
+                "visual_llm_mode": self.visual_llm_mode,
             }
         )
         return result
@@ -240,13 +242,20 @@ class PriorityMapToolConfig:
         services = data.get("services", {})
         if not isinstance(services, dict):
             raise ConfigurationError("Priority Map services must be an object.")
-        known = {"services", "pipeline", "output"}
+        known = {"services", "pipeline", "output", "visual_llm_mode"}
+        visual_llm_mode = data.get("visual_llm_mode", "same_as_logical")
+        if visual_llm_mode not in ("same_as_logical", "separate"):
+            raise ConfigurationError(
+                f"visual_llm_mode must be 'same_as_logical' or 'separate', got {visual_llm_mode!r}"
+            )
         return cls(
             services={str(name): ConfiguredService.from_dict(value) for name, value in services.items()},
             pipeline=PipelineConfig.from_dict(data.get("pipeline")),
             output=PriorityMapOutputConfig.from_dict(data.get("output")),
+            visual_llm_mode=visual_llm_mode,
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
+
 
 @dataclass(slots=True)
 class AppConfig:

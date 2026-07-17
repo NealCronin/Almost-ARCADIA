@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import os
-import tempfile
 import json
 import threading
 from pathlib import Path
@@ -407,6 +405,18 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
         try:
             runtime.analysis.assert_configuration_mutable()
             config = runtime.config_store.load()
+
+            # Handle visual_llm_mode toggle
+            if service_name == "visual_llm" and "visual_llm_mode" in request.POST:
+                mode = request.POST["visual_llm_mode"]
+                if mode not in ("same_as_logical", "separate"):
+                    messages.error(request, "Visual LLM mode must be 'same_as_logical' or 'separate'.")
+                    return redirect("priority_map_models")
+                config.priority_map.visual_llm_mode = mode
+                runtime.config_store.save(config)
+                messages.success(request, f"Visual LLM mode set to {mode}.")
+                return redirect("priority_map_models")
+
             form = _service_form(service_name, config, request.POST)
             if not form.is_valid():
                 return _render_models(
@@ -763,7 +773,6 @@ def run_endpoint_test(request: HttpRequest) -> HttpResponse:
     return render(request, "web/endpoint_test.html", {"form": form, "response_text": response_text})
 
 
-
 @require_POST
 def test_llm_chat(request: HttpRequest) -> JsonResponse:
     """Start Logical LLM, wait for readiness, send text prompt, return response."""
@@ -786,31 +795,40 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
     except ArcadiaError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
 
-    # Validate saved settings exist for the role
-    configured = config.priority_map.services.get(role)
-    if configured is None:
+    # Resolve which config and settings to use
+    if role == "visual_llm" and config.priority_map.visual_llm_mode == "same_as_logical":
+        configured = config.priority_map.services.get("llm")
+        if configured is None:
+            return JsonResponse(
+                {"error": "No Logical LLM configuration saved. Save Logical LLM settings first."},
+                status=400,
+            )
+        if not configured.settings.get("vision_enabled"):
+            return JsonResponse(
+                {"error": "Logical LLM must have vision enabled for shared visual mode."},
+                status=400,
+            )
+    else:
+        configured = config.priority_map.services.get(role)
+        if configured is None:
+            return JsonResponse(
+                {"error": f"No configuration saved for {role.upper()}. Save settings first."},
+                status=400,
+            )
+
+    # If require_vision, validate vision is enabled
+    if require_vision and not configured.settings.get("vision_enabled"):
         return JsonResponse(
-            {"error": f"No configuration saved for {role.upper()}. Save settings first."},
+            {"error": "Vision is not enabled for this service. Enable vision and save projector settings."},
             status=400,
         )
 
-    # If require_vision, validate vision is enabled and projector exists
-    if require_vision:
-        if not configured.settings.get("vision_enabled"):
-            return JsonResponse(
-                {"error": "Vision is not enabled for this service. Enable vision and save a projector file."},
-                status=400,
-            )
-        if not configured.settings.get("mmproj_repo") and not configured.settings.get("mmproj_file_pattern"):
-            return JsonResponse(
-                {"error": "No projector (MMProj) configured. Visual chat requires a multimodal projector."},
-                status=400,
-            )
-
     # Handle image upload for visual chat
     image_data: list[bytes] = []
-    if require_vision and request.FILES.get("image"):
-        uploaded = request.FILES["image"]
+    if require_vision:
+        uploaded = request.FILES.get("image")
+        if not uploaded:
+            return JsonResponse({"error": "An image is required for visual chat."}, status=400)
         if uploaded.size > 10 * 1024 * 1024:
             return JsonResponse({"error": "Image must be under 10 MB."}, status=400)
         allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -833,37 +851,37 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
             return JsonResponse({"error": f"Service {role} references unknown node {configured.node!r}."}, status=400)
 
         if node.mode == "local":
-            # Check if already running
             running_services = runtime.controller.list_services()
             running_ports = {s.port for s in running_services if s.running}
             if configured.port not in running_ports:
-                # Start the service (reuse same settings)
                 endpoint = runtime.controller.start(configured.spec)
             else:
-                # Build endpoint from existing service info
-                for svc in running_services:
-                    if svc.port == configured.port:
-                        endpoint = ServiceEndpoint(
-                            host="127.0.0.1",
-                            port=svc.port,
-                            service_type=svc.service_type,
-                        )
-                        break
-                else:
-                    endpoint = ServiceEndpoint(host="127.0.0.1", port=configured.port, service_type="llm")
-        else:
-            # Remote node - use instruction client
-            if node.instruction_port is None:
-                return JsonResponse(
-                    {"error": f"Remote node {configured.node!r} has no instruction port."}, status=400
+                # Build endpoint from running service info using configured bind host
+                bind_host = str(configured.settings.get("bind_host", "127.0.0.1"))
+                endpoint = ServiceEndpoint(
+                    host=bind_host,
+                    port=configured.port,
+                    service_type=configured.spec.service_type,
                 )
+        else:
+            if node.instruction_port is None:
+                return JsonResponse({"error": f"Remote node {configured.node!r} has no instruction port."}, status=400)
             client = InstructionClient(node.host, node.instruction_port)
             endpoint = client.start_service(configured.spec)
 
         # Build LLMClient and send chat request
-        role_defaults = {}
-        for key in ("temperature", "top_k", "min_p", "top_p", "max_tokens",
-                     "repeat_penalty", "presence_penalty", "frequency_penalty", "seed"):
+        role_defaults: dict[str, Any] = {}
+        for key in (
+            "temperature",
+            "top_k",
+            "min_p",
+            "top_p",
+            "max_tokens",
+            "repeat_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+        ):
             if key in configured.settings:
                 role_defaults[key] = configured.settings[key]
 

@@ -59,6 +59,7 @@ def test_legacy_configuration_migrates_without_losing_priority_map_settings(tmp_
                 },
                 "pipeline": config.priority_map.pipeline.to_dict(),
                 "output": {"root": "saved-runs", "preview": "mjpeg"},
+                "visual_llm_mode": "same_as_logical",
             }
         },
     }

@@ -18,45 +18,46 @@
   {% if node_error %}<p class="inline-error">{{ node_error }}</p>{% endif %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Instruction-server IP</th><th>Instruction port</th><th>Connection</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Instruction host</th><th>Instruction port</th><th>Type</th><th>Reachable</th><th></th></tr></thead>
       <tbody>
-      {% for node_name, node in nodes %}
+      {% for name, node in nodes %}
         <tr>
-          <td>{% if node_name == 'local' %}This computer{% else %}{{ node_name }}{% endif %}</td>
-          <td>{% if node_name == 'local' %}Local{% else %}Remote{% endif %}</td>
-          <td>{{ node.host }}</td><td>{% if node.instruction_port %}{{ node.instruction_port }}{% else %}—{% endif %}</td>
-          <td><span class="status-pill" data-node-state="{{ node_name }}">{% if node_name == 'local' %}Local{% else %}Not checked{% endif %}</span></td>
+          <td>{{ name }}</td>
+          <td>{{ node.host }}</td>
+          <td>{{ node.instruction_port|default:'—' }}</td>
+          <td><span class="status-pill {% if node.mode == 'local' %}status-pill--ready{% endif %}">{% if node.mode == 'local' %}This computer{% else %}Remote{% endif %}</span></td>
+          <td><span class="status-pill" data-node-status="{{ name }}">{% if node.mode == 'local' %}Local{% else %}Not checked{% endif %}</span></td>
           <td>
-            {% if node_name != 'local' %}
-              <button class="button button--ghost button--small" type="button" data-node-test data-node-test-url="{% url 'test_remote_node' node_name %}" data-node-state-target="{{ node_name }}">Test</button>
-              <a class="button button--ghost button--small" href="{% url 'priority_map_models' %}?edit={{ node_name|urlencode }}#edit-node">Edit</a>
-              <form method="post" action="{% url 'delete_remote_node' node_name %}" class="inline-form" data-node-delete>
-                {% csrf_token %}<button class="button button--danger button--small" type="submit">Delete</button>
+            {% if name != 'local' %}
+              <a href="?edit={{ name|urlencode }}">Edit</a>
+              <form method="post" action="{% url 'test_remote_node' name %}" class="inline-form" data-test-node="{{ name }}">
+                {% csrf_token %}<button class="button button--ghost button--small" type="button">Test</button>
               </form>
-            {% else %}<span class="muted">Built in</span>{% endif %}
+              <form method="post" action="{% url 'delete_remote_node' name %}" class="inline-form" data-delete-node="{{ name }}">
+                {% csrf_token %}<button class="button button--ghost button--danger button--small" type="button">Remove</button>
+              </form>
+            {% endif %}
           </td>
         </tr>
-        {% if editing_node == node_name and edit_node_form %}
-        <tr id="edit-node"><td colspan="6">
-          <form method="post" action="{% url 'edit_remote_node' node_name %}" class="form-grid" data-remote-node-form>
-            {% csrf_token %}
-            {{ edit_node_form.non_field_errors }}
-            <div class="form-field">{{ edit_node_form.name.as_field_group }}</div>
-            <div class="form-field">{{ edit_node_form.host.as_field_group }}</div>
-            <div class="form-field">{{ edit_node_form.instruction_port.as_field_group }}</div>
-            <div class="form-actions form-field--full">
-              <button class="button button--primary" type="submit">Save remote computer</button>
-              {% if allow_save_anyway %}<button class="button button--ghost" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
-              <a class="button button--ghost" href="{% url 'priority_map_models' %}">Cancel</a>
-            </div>
-          </form>
-        </td></tr>
-        {% endif %}
       {% endfor %}
       </tbody>
     </table>
   </div>
-  <details class="disclosure" {% if node_form.is_bound and not editing_node %}open{% endif %}>
+  {% if editing_node %}
+  <details class="disclosure" open>
+    <summary>Edit {{ editing_node }}</summary>
+    <form method="post" action="{% url 'edit_remote_node' editing_node %}" class="form-grid disclosure__body">
+      {% csrf_token %}
+      {{ edit_node_form.non_field_errors }}
+      <div class="form-field">{{ edit_node_form.name.as_field_group }}</div>
+      <div class="form-field">{{ edit_node_form.host.as_field_group }}</div>
+      <div class="form-field">{{ edit_node_form.instruction_port.as_field_group }}</div>
+      {% if allow_save_anyway %}<button class="button button--ghost button--small" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
+      <div class="form-actions"><button class="button button--primary" type="submit">Save</button></div>
+    </form>
+  </details>
+  {% else %}
+  <details class="disclosure" {% if node_form.is_bound %}open{% endif %}>
     <summary>Add remote computer</summary>
     <form method="post" action="{% url 'add_remote_node' %}" class="form-grid disclosure__body" data-remote-node-form>
       {% csrf_token %}
@@ -64,22 +65,41 @@
       <div class="form-field">{{ node_form.name.as_field_group }}</div>
       <div class="form-field">{{ node_form.host.as_field_group }}</div>
       <div class="form-field">{{ node_form.instruction_port.as_field_group }}</div>
-      <div class="form-actions form-field--full">
-        <button class="button button--primary" type="submit">Save remote computer</button>
-        {% if allow_save_anyway and not editing_node %}<button class="button button--ghost" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
-      </div>
+      {% if allow_save_anyway %}<button class="button button--ghost button--small" type="submit" name="save_anyway" value="1">Save anyway</button>{% endif %}
+      <div class="form-actions"><button class="button button--primary" type="submit">Add</button></div>
     </form>
   </details>
+  {% endif %}
+</section>
+
+<section class="panel service-registry">
+  <div class="panel__header">
+    <div><h2>Visual LLM mode</h2></div>
+  </div>
+  <form method="post" action="{% url 'start_service' 'visual_llm' %}" class="stack" data-visual-mode-form>
+    {% csrf_token %}
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="visual-llm-mode">Visual LLM</label>
+        <select id="visual-llm-mode" name="visual_llm_mode" data-visual-mode-select>
+          <option value="same_as_logical" {% if visual_llm_mode == 'same_as_logical' %}selected{% endif %}>Same as Logical LLM</option>
+          <option value="separate" {% if visual_llm_mode == 'separate' %}selected{% endif %}>Separate Visual LLM</option>
+        </select>
+        <p class="help-copy">In shared mode, the Logical LLM handles both text and vision. In separate mode, a dedicated Visual LLM serves image tasks.</p>
+      </div>
+    </div>
+    <div class="form-actions"><button class="button button--primary" type="submit">Save mode</button></div>
+  </form>
 </section>
 
 <div class="settings-layout service-grid">
   <section class="panel settings-card">
     <div class="panel__header">
-      <div><p class="eyebrow">Scene understanding</p><h2>LLM service</h2></div>
+      <div><p class="eyebrow">Priority Map</p><h2>Logical LLM</h2></div>
       {% if config.priority_map.services.llm %}<span class="status-pill">Port {{ config.priority_map.services.llm.port }}</span>{% endif %}
     </div>
     {% if llm_form.legacy_local_model %}<p class="inline-error">This saved local model must be migrated: choose a Hugging Face repository before saving.</p>{% endif %}
-    <form method="post" action="{% url 'start_service' 'llm' %}" class="stack" data-llm-form data-inspect-url="{% url 'inspect_llm_repository' %}">
+    <form method="post" action="{% url 'start_service' 'llm' %}" class="stack" data-llm-form data-inspect-url="{% url 'inspect_llm_repository' %}" data-role="llm">
       {{ node_hosts|json_script:"llm-node-hosts" }}
       {% csrf_token %}
       {{ llm_form.non_field_errors }}
@@ -88,66 +108,75 @@
         <div class="form-field">{{ llm_form.inference_port.as_field_group }}</div>
         <div class="form-field form-field--full">{{ llm_form.hf_repo.as_field_group }}</div>
         <div class="form-field">{{ llm_form.n_ctx.as_field_group }}</div>
+        <div class="form-field checkbox-field">{{ llm_form.vision_enabled.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.mmproj_repo.as_field_group }}</div>
         <div class="form-field">{{ llm_form.temperature.as_field_group }}</div>
         <div class="form-field">{{ llm_form.top_k.as_field_group }}</div>
-        <div class="form-field">{{ llm_form.min_p.as_field_group }}</div>
         <div class="form-field">{{ llm_form.top_p.as_field_group }}</div>
+        <div class="form-field">{{ llm_form.min_p.as_field_group }}</div>
       </div>
       <details class="disclosure" data-llm-advanced {% if llm_advanced_open %}open{% endif %}>
         <summary>Advanced settings</summary>
         <div class="disclosure__body stack">
           <fieldset class="settings-group"><legend>Model selection</legend><div class="form-grid">
-            <div class="form-field">{{ llm_form.model_file_pattern.as_field_group }}<datalist id="model-patterns"></datalist></div>
+            <div class="form-field">{{ llm_form.model_file_pattern.as_field_group }}<datalist id="llm-model-patterns"></datalist></div>
             <div class="form-field">{{ llm_form.model_alias.as_field_group }}</div>
             <div class="form-field form-field--full">{{ llm_form.chat_format.as_field_group }}</div>
           </div></fieldset>
-          <fieldset class="settings-group"><legend>Vision / MMProj</legend><div class="form-grid">
-            <div class="form-field form-field--full checkbox-field">{{ llm_form.vision_enabled.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.mmproj_repo.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.mmproj_file_pattern.as_field_group }}<datalist id="mmproj-patterns"></datalist></div>
+          <fieldset class="settings-group"><legend>Projector</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.mmproj_file_pattern.as_field_group }}<datalist id="llm-mmproj-patterns"></datalist></div>
           </div></fieldset>
-          <fieldset class="settings-group" data-local-bind-section><legend>Local networking</legend>
+          <fieldset class="settings-group"><legend>Draft model</legend><div class="form-grid">
+            <div class="form-field checkbox-field">{{ llm_form.draft_enabled.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_repo.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_file_pattern.as_field_group }}<datalist id="llm-draft-patterns"></datalist></div>
+            <div class="form-field">{{ llm_form.draft_method.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_max_tokens.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_min_prob.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_cache_type_k.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.draft_cache_type_v.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Compute</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.n_gpu_layers.as_field_group }}</div><div class="form-field">{{ llm_form.n_threads.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.n_batch.as_field_group }}</div><div class="form-field">{{ llm_form.n_ubatch.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.flash_attn.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Memory</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.cache_type_k.as_field_group }}</div><div class="form-field">{{ llm_form.cache_type_v.as_field_group }}</div>
+            <div class="form-field checkbox-field">{{ llm_form.use_mmap.as_field_group }}</div><div class="form-field checkbox-field">{{ llm_form.use_mlock.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Generation</legend><div class="form-grid">
+            <div class="form-field">{{ llm_form.max_tokens.as_field_group }}</div><div class="form-field">{{ llm_form.repeat_penalty.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.presence_penalty.as_field_group }}</div><div class="form-field">{{ llm_form.frequency_penalty.as_field_group }}</div>
+            <div class="form-field">{{ llm_form.seed.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group" data-local-bind-section><legend>Networking</legend>
             <div class="form-field">{{ llm_form.local_bind_host.as_field_group }}</div>
           </fieldset>
           <p class="help-copy" data-remote-bind-notice hidden></p>
-          <fieldset class="settings-group"><legend>Performance</legend><div class="form-grid">
-            <div class="form-field">{{ llm_form.n_gpu_layers.as_field_group }}</div><div class="form-field">{{ llm_form.n_threads.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.n_batch.as_field_group }}</div><div class="form-field">{{ llm_form.n_ubatch.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.main_gpu.as_field_group }}</div><div class="form-field">{{ llm_form.tensor_split.as_field_group }}</div>
-            <div class="form-field checkbox-field">{{ llm_form.flash_attn.as_field_group }}</div><div class="form-field checkbox-field">{{ llm_form.offload_kqv.as_field_group }}</div>
-          </div></fieldset>
-          <fieldset class="settings-group"><legend>Memory and cache</legend><div class="form-grid">
-            <div class="form-field">{{ llm_form.cache_type_k.as_field_group }}</div><div class="form-field">{{ llm_form.cache_type_v.as_field_group }}</div>
-            <div class="form-field checkbox-field">{{ llm_form.use_mmap.as_field_group }}</div><div class="form-field checkbox-field">{{ llm_form.use_mlock.as_field_group }}</div>
-            <div class="form-field checkbox-field">{{ llm_form.numa.as_field_group }}</div>
-          </div></fieldset>
-          <fieldset class="settings-group"><legend>Context extension</legend><div class="form-grid">
-            <div class="form-field">{{ llm_form.rope_scaling_type.as_field_group }}</div><div class="form-field">{{ llm_form.rope_freq_base.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.rope_freq_scale.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_ext_factor.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.yarn_attn_factor.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_beta_fast.as_field_group }}</div>
-            <div class="form-field">{{ llm_form.yarn_beta_slow.as_field_group }}</div><div class="form-field">{{ llm_form.yarn_orig_ctx.as_field_group }}</div>
-          </div></fieldset>
-          <fieldset class="settings-group"><legend>Server</legend><div class="form-grid">
-            <div class="form-field">{{ llm_form.startup_timeout.as_field_group }}</div>
+          <fieldset class="settings-group"><legend>Expert</legend><div class="form-grid">
             <div class="form-field form-field--full">{{ llm_form.additional_arguments.as_field_group }}</div>
           </div></fieldset>
           <button class="button button--ghost" type="button" data-inspect-repository>Inspect repository</button>
           <p class="help-copy" role="status" data-inspect-status></p>
         </div>
       </details>
-      <div class="form-actions"><button class="button button--primary" type="submit">Save LLM settings</button><button class="button button--secondary button--small" type="button" data-test-chat data-role="llm">Test chat</button></div>
+      <div class="form-actions">
+        <button class="button button--primary" type="submit">Save Logical LLM settings</button>
+        <button class="button button--secondary button--small" type="button" data-test-chat data-role="llm">Test chat</button>
+        <span data-test-result></span>
+      </div>
     </form>
-    {% if config.priority_map.services.llm %}<form method="post" action="{% url 'stop_service' 'llm' %}" class="inline-form">{% csrf_token %}<button class="button button--danger button--small" type="submit">Stop LLM</button></form>{% endif %}
+    {% if config.priority_map.services.llm %}<form method="post" action="{% url 'stop_service' 'llm' %}" class="inline-form">{% csrf_token %}<button class="button button--danger button--small" type="submit">Stop Logical LLM</button></form>{% endif %}
   </section>
 
   <section class="panel settings-card">
     <div class="panel__header">
-      <div><p class="eyebrow">Scene understanding</p><h2>Visual LLM</h2></div>
+      <div><p class="eyebrow">Priority Map</p><h2>Visual LLM</h2></div>
       {% if visual_llm_readonly %}
         {% if config.priority_map.services.llm %}<span class="status-pill">Port {{ config.priority_map.services.llm.port }}</span>{% endif %}
       {% elif config.priority_map.services.visual_llm %}<span class="status-pill">Port {{ config.priority_map.services.visual_llm.port }}</span>{% endif %}
     </div>
-
     {% if visual_llm_readonly %}
     <div class="stack">
       <p>Using Logical LLM settings.</p>
@@ -156,13 +185,12 @@
         <dt>Model</dt><dd>{{ llm_form.initial.hf_repo|default:"Not configured" }}</dd>
         <dt>Port</dt><dd>{{ llm_form.initial.inference_port|default:"8081" }}</dd>
       </dl>
-      <form method="post" action="{% url 'start_service' 'visual_llm' %}" class="inline-form">
-        {% csrf_token %}<button class="button button--primary button--small" type="submit">Test visual chat</button>
-      </form>
+      <button class="button button--primary button--small" type="button" data-test-chat data-role="visual_llm">Test visual chat</button>
+      <span data-test-result></span>
     </div>
     {% else %}
-    <form method="post" action="{% url 'start_service' 'visual_llm' %}" class="stack" data-llm-form data-inspect-url="{% url 'inspect_llm_repository' %}">
-      {{ node_hosts|json_script:"visual-llm-node-hosts" }}
+    <form method="post" action="{% url 'start_service' 'visual_llm' %}" class="stack" data-llm-form data-inspect-url="{% url 'inspect_llm_repository' %}" data-role="visual_llm">
+      {{ node_hosts|json_script:"vis-node-hosts" }}
       {% csrf_token %}
       {{ visual_llm_form.non_field_errors }}
       <div class="form-grid llm-quick-grid">
@@ -172,8 +200,8 @@
         <div class="form-field">{{ visual_llm_form.n_ctx.as_field_group }}</div>
         <div class="form-field">{{ visual_llm_form.temperature.as_field_group }}</div>
         <div class="form-field">{{ visual_llm_form.top_k.as_field_group }}</div>
-        <div class="form-field">{{ visual_llm_form.min_p.as_field_group }}</div>
         <div class="form-field">{{ visual_llm_form.top_p.as_field_group }}</div>
+        <div class="form-field">{{ visual_llm_form.min_p.as_field_group }}</div>
       </div>
       <details class="disclosure" data-llm-advanced>
         <summary>Advanced settings</summary>
@@ -183,42 +211,51 @@
             <div class="form-field">{{ visual_llm_form.model_alias.as_field_group }}</div>
             <div class="form-field form-field--full">{{ visual_llm_form.chat_format.as_field_group }}</div>
           </div></fieldset>
-          <fieldset class="settings-group"><legend>Vision / MMProj</legend><div class="form-grid">
-            <div class="form-field form-field--full checkbox-field">{{ visual_llm_form.vision_enabled.as_field_group }}</div>
+          <fieldset class="settings-group"><legend>Projector</legend><div class="form-grid">
             <div class="form-field">{{ visual_llm_form.mmproj_repo.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.mmproj_file_pattern.as_field_group }}<datalist id="vis-mmproj-patterns"></datalist></div>
-          </div></fieldset>
-          <fieldset class="settings-group" data-local-bind-section><legend>Local networking</legend>
-            <div class="form-field">{{ visual_llm_form.local_bind_host.as_field_group }}</div>
-          </fieldset>
-          <p class="help-copy" data-remote-bind-notice hidden></p>
-          <fieldset class="settings-group"><legend>Performance</legend><div class="form-grid">
-            <div class="form-field">{{ visual_llm_form.n_gpu_layers.as_field_group }}</div><div class="form-field">{{ visual_llm_form.n_threads.as_field_group }}</div>
-            <div class="form-field">{{ visual_llm_form.n_batch.as_field_group }}</div><div class="form-field">{{ visual_llm_form.n_ubatch.as_field_group }}</div>
-            <div class="form-field checkbox-field">{{ visual_llm_form.flash_attn.as_field_group }}</div>
-          </div></fieldset>
-          <fieldset class="settings-group"><legend>Memory and cache</legend><div class="form-grid">
-            <div class="form-field">{{ visual_llm_form.cache_type_k.as_field_group }}</div><div class="form-field">{{ visual_llm_form.cache_type_v.as_field_group }}</div>
-            <div class="form-field checkbox-field">{{ visual_llm_form.use_mmap.as_field_group }}</div><div class="form-field checkbox-field">{{ visual_llm_form.use_mlock.as_field_group }}</div>
           </div></fieldset>
           <fieldset class="settings-group"><legend>Draft model</legend><div class="form-grid">
             <div class="form-field checkbox-field">{{ visual_llm_form.draft_enabled.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.draft_repo.as_field_group }}</div>
-            <div class="form-field">{{ visual_llm_form.draft_file_pattern.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.draft_file_pattern.as_field_group }}<datalist id="vis-draft-patterns"></datalist></div>
             <div class="form-field">{{ visual_llm_form.draft_method.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.draft_max_tokens.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.draft_min_prob.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.draft_cache_type_k.as_field_group }}</div>
             <div class="form-field">{{ visual_llm_form.draft_cache_type_v.as_field_group }}</div>
           </div></fieldset>
-          <fieldset class="settings-group"><legend>Server</legend><div class="form-grid">
+          <fieldset class="settings-group"><legend>Compute</legend><div class="form-grid">
+            <div class="form-field">{{ visual_llm_form.n_gpu_layers.as_field_group }}</div><div class="form-field">{{ visual_llm_form.n_threads.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.n_batch.as_field_group }}</div><div class="form-field">{{ visual_llm_form.n_ubatch.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.flash_attn.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Memory</legend><div class="form-grid">
+            <div class="form-field">{{ visual_llm_form.cache_type_k.as_field_group }}</div><div class="form-field">{{ visual_llm_form.cache_type_v.as_field_group }}</div>
+            <div class="form-field checkbox-field">{{ visual_llm_form.use_mmap.as_field_group }}</div><div class="form-field checkbox-field">{{ visual_llm_form.use_mlock.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group"><legend>Generation</legend><div class="form-grid">
+            <div class="form-field">{{ visual_llm_form.max_tokens.as_field_group }}</div><div class="form-field">{{ visual_llm_form.repeat_penalty.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.presence_penalty.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.frequency_penalty.as_field_group }}</div>
+            <div class="form-field">{{ visual_llm_form.seed.as_field_group }}</div>
+          </div></fieldset>
+          <fieldset class="settings-group" data-local-bind-section><legend>Networking</legend>
+            <div class="form-field">{{ visual_llm_form.local_bind_host.as_field_group }}</div>
+          </fieldset>
+          <p class="help-copy" data-remote-bind-notice hidden></p>
+          <fieldset class="settings-group"><legend>Expert</legend><div class="form-grid">
             <div class="form-field form-field--full">{{ visual_llm_form.additional_arguments.as_field_group }}</div>
           </div></fieldset>
           <button class="button button--ghost" type="button" data-inspect-repository>Inspect repository</button>
           <p class="help-copy" role="status" data-inspect-status></p>
         </div>
       </details>
-      <div class="form-actions"><button class="button button--primary" type="submit">Save Visual LLM settings</button><button class="button button--secondary button--small" type="button" data-test-chat data-role="visual_llm">Test visual chat</button></div>
+      <div class="form-actions">
+        <button class="button button--primary" type="submit">Save Visual LLM settings</button>
+        <button class="button button--secondary button--small" type="button" data-test-chat data-role="visual_llm">Test visual chat</button>
+        <span data-test-result></span>
+      </div>
     </form>
     {% if config.priority_map.services.visual_llm %}<form method="post" action="{% url 'stop_service' 'visual_llm' %}" class="inline-form">{% csrf_token %}<button class="button button--danger button--small" type="submit">Stop Visual LLM</button></form>{% endif %}
     {% endif %}

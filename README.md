@@ -46,8 +46,8 @@ The `pipeline` extra installs Priority Map at commit `ea6d1064175b20c1e90dd3f1ff
 
 Almost ARCADIA launches a native `llama-server` binary instead of a Python server process. This provides:
 - separate multimodal projector GGUF support (`--mmproj`)
-- real speculative decoding (`--draft-model`, `--draft-simple`, `--draft-mtp`, `--draft-eagle3`)
-- separate main/draft KV cache types (`--cache-type-k`, `--draft-cache-type-k`, etc.)
+- real speculative decoding via `--spec-draft-model`, `--spec-type`, `--spec-draft-n-max`, `--spec-draft-p-min`
+- separate main/draft KV cache types (`--cache-type-k`, `--cache-type-v`, `--cache-type-k-draft`, `--cache-type-v-draft`)
 - direct access to the latest llama.cpp features
 
 #### Building the binary

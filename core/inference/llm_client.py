@@ -63,8 +63,15 @@ class LLMClient:
         }
         # Merge role defaults with explicit overrides (explicit beats default)
         for param in (
-            "temperature", "top_k", "min_p", "top_p", "max_tokens",
-            "repeat_penalty", "presence_penalty", "frequency_penalty", "seed",
+            "temperature",
+            "top_k",
+            "min_p",
+            "top_p",
+            "max_tokens",
+            "repeat_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
         ):
             explicit = locals()[param]
             value = explicit if explicit is not None else self.role_defaults.get(param)

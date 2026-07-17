@@ -27,7 +27,16 @@ def test_build_command_resolves_repository_and_runtime_flags(monkeypatch) -> Non
             },
         )
     )
-    assert command[:8] == ["/usr/local/bin/llama-server", "--host", "127.0.0.1", "--port", "8081", "--model", "/huggingface/model.Q4.gguf", "--mmproj"]
+    assert command[:8] == [
+        "/usr/local/bin/llama-server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--model",
+        "/huggingface/model.Q4.gguf",
+        "--mmproj",
+    ]
     assert "/mmproj/mmproj.gguf" in command
     assert "--ctx-size" in command and "4096" in command
 
@@ -41,6 +50,7 @@ def test_ambiguous_and_split_models_require_safe_selection(monkeypatch) -> None:
     monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["split-00001-of-00002.gguf"])
     with pytest.raises(ValueError, match="Only split GGUF"):
         LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
+
 
 def test_models_directory_honors_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
