@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ServiceType = Literal["llm", "sam3"]
+ServiceType = Literal["llm", "visual_llm", "sam3"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,8 +15,8 @@ class ServiceSpec:
     settings: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.service_type not in ("llm", "sam3"):
-            raise ValueError("service_type must be 'llm' or 'sam3'.")
+        if self.service_type not in ("llm", "visual_llm", "sam3"):
+            raise ValueError("service_type must be 'llm', 'visual_llm', or 'sam3'.")
         if isinstance(self.port, bool) or not isinstance(self.port, int):
             raise TypeError("Service port must be an integer.")
         if not 1 <= self.port <= 65535:
@@ -33,17 +33,19 @@ class ServiceSpec:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ServiceSpec:
+    def from_dict(cls, data: dict[str, Any]) -> "ServiceSpec":
         if not isinstance(data, dict):
-            raise TypeError("Service specification must be a dictionary.")
-        missing = [key for key in ("service_type", "port") if key not in data]
-        if missing:
-            raise ValueError(f"Missing required service field: {missing[0]}")
-        return cls(
-            service_type=data["service_type"],
-            port=data["port"],
-            settings=data.get("settings", {}),
-        )
+            raise TypeError("ServiceSpec.from_dict requires a dict")
+        service_type = data.get("service_type", "llm")
+        if service_type not in ("llm", "visual_llm", "sam3"):
+            raise ValueError(f"Unknown service type: {service_type!r}")
+        port = data.get("port", 8081)
+        if not isinstance(port, int) or not (1 <= port <= 65535):
+            raise ValueError(f"Invalid port: {port!r}")
+        settings = data.get("settings", {})
+        if not isinstance(settings, dict):
+            raise ValueError("settings must be a dict")
+        return cls(service_type=service_type, port=port, settings=dict(settings))
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,19 +58,21 @@ class ServiceEndpoint:
     scheme: str = "http"
 
     def __post_init__(self) -> None:
-        host = self.host.strip()
-        scheme = self.scheme.strip().lower()
+        host = self.host.strip().rstrip("/")
         if not host:
             raise ValueError("Endpoint host cannot be empty.")
-        if self.service_type not in ("llm", "sam3"):
-            raise ValueError("service_type must be 'llm' or 'sam3'.")
         if isinstance(self.port, bool) or not isinstance(self.port, int):
             raise TypeError("Endpoint port must be an integer.")
         if not 1 <= self.port <= 65535:
             raise ValueError("Endpoint port must be between 1 and 65535.")
+        if self.service_type not in ("llm", "visual_llm", "sam3"):
+            raise ValueError(f"Unknown service type: {self.service_type!r}")
+        scheme = self.scheme.strip().lower()
         if scheme not in ("http", "https"):
-            raise ValueError("Endpoint scheme must be 'http' or 'https'.")
-        object.__setattr__(self, "host", host.rstrip("/"))
+            raise ValueError(f"Invalid scheme: {self.scheme!r}")
+        object.__setattr__(self, "host", host)
+        object.__setattr__(self, "port", self.port)
+        object.__setattr__(self, "service_type", self.service_type)
         object.__setattr__(self, "scheme", scheme)
 
     @property
@@ -84,15 +88,16 @@ class ServiceEndpoint:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ServiceEndpoint:
+    def from_dict(cls, data: dict[str, Any]) -> "ServiceEndpoint":
         if not isinstance(data, dict):
-            raise TypeError("Service endpoint must be a dictionary.")
-        return cls(
-            host=data["host"],
-            port=data["port"],
-            service_type=data["service_type"],
-            scheme=data.get("scheme", "http"),
-        )
+            raise TypeError("ServiceEndpoint.from_dict requires a dict")
+        host = data.get("host", "127.0.0.1")
+        port = data.get("port", 8081)
+        service_type = data.get("service_type", "llm")
+        if service_type not in ("llm", "visual_llm", "sam3"):
+            raise ValueError(f"Unknown service type: {service_type!r}")
+        scheme = data.get("scheme", "http")
+        return cls(host=host, port=port, service_type=service_type, scheme=scheme)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +120,7 @@ class ServiceStatus:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ServiceStatus:
+    def from_dict(cls, data: dict[str, Any]) -> "ServiceStatus":
         return cls(
             port=data["port"],
             service_type=data["service_type"],

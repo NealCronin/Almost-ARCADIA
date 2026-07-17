@@ -12,11 +12,24 @@ from core.networking import local_ipv4_addresses
 if TYPE_CHECKING:
     from core.config import NodeConfig
 
+CACHE_TYPE_CHOICES = [
+    ("f16", "F16"), ("bf16", "BF16"), ("q8_0", "Q8_0"), ("q5_0", "Q5_0"),
+    ("q5_1", "Q5_1"), ("q4_0", "Q4_0"), ("q4_1", "Q4_1"), ("iq4_nl", "IQ4_NL"),
+    ("", "Default"),
+]
+
+DRAFT_DEFAULTS = {
+    "draft_method": "draft-simple",
+    "draft_max_tokens": 3,
+    "draft_min_prob": 0.75,
+    "draft_cache_type_k": "f16",
+    "draft_cache_type_v": "f16",
+}
+
 DEFAULT_GENERATION = {"temperature": 0.2, "top_k": 40, "min_p": 0.05, "top_p": 0.95}
 DEFAULTS = {
     "bind_host": "127.0.0.1",
     "n_ctx": 32768,
-    "startup_timeout": 600.0,
     "models_cache_subdir": "huggingface",
     **DEFAULT_GENERATION,
 }
@@ -24,49 +37,38 @@ REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?/[A-Za-z
 SPLIT_GGUF_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
 PROJECTOR_RE = re.compile(r"mmproj|^projector", re.IGNORECASE)
 
-RUNTIME_FLAGS = {
-    "n_ctx": "--n_ctx",
-    "n_gpu_layers": "--n_gpu_layers",
-    "n_threads": "--n_threads",
-    "n_batch": "--n_batch",
-    "n_ubatch": "--n_ubatch",
-    "flash_attn": "--flash_attn",
-    "cache_type_k": "--type_k",
-    "cache_type_v": "--type_v",
-    "use_mmap": "--use_mmap",
-    "use_mlock": "--use_mlock",
-    "numa": "--numa",
-    "tensor_split": "--tensor_split",
-    "main_gpu": "--main_gpu",
-    "offload_kqv": "--offload_kqv",
-    "chat_format": "--chat_format",
-    "model_alias": "--model_alias",
-    "rope_scaling_type": "--rope_scaling_type",
-    "rope_freq_base": "--rope_freq_base",
-    "rope_freq_scale": "--rope_freq_scale",
-    "yarn_ext_factor": "--yarn_ext_factor",
-    "yarn_attn_factor": "--yarn_attn_factor",
-    "yarn_beta_fast": "--yarn_beta_fast",
-    "yarn_beta_slow": "--yarn_beta_slow",
-    "yarn_orig_ctx": "--yarn_orig_ctx",
+NATIVE_FLAGS = {
+    "n_ctx": "--ctx-size",
+    "n_gpu_layers": "--n-gpu-layers",
+    "n_threads": "--threads",
+    "n_batch": "--batch-size",
+    "n_ubatch": "--ubatch-size",
+    "flash_attn": "--flash-attn",
+    "cache_type_k": "--cache-type-k",
+    "cache_type_v": "--cache-type-v",
+    "use_mmap": "--no-mmap",
+    "use_mlock": "--mlock",
+    "model_alias": "--alias",
+    "chat_format": "--chat-template",
 }
 MODEL_KEYS = {"hf_repo", "model_file_pattern", "models_cache_subdir"}
 VISION_KEYS = {"vision_enabled", "mmproj_repo", "mmproj_file_pattern", "chat_format"}
 GENERATION_KEYS = set(DEFAULT_GENERATION)
 RETIRED_SOURCE_KEYS = {"model_source", "model_path", "hf_file", "hf_cache_dir", "n_parallel"}
-OWNED_FLAGS = set(RUNTIME_FLAGS.values()) | {
+OWNED_FLAGS = set(NATIVE_FLAGS.values()) | {
     "--model",
+    "--mmproj",
     "--host",
     "--port",
-    "--clip_model_path",
-    "--hf_model_repo_id",
-    "--hf_repo",
-    "--hf_file",
-    "--hf_cache_dir",
-    "--model_path",
-    "--mmproj_repo",
-    "--mmproj_file_pattern",
-    "--bind_host",
+    "--hf-repo",
+    "--hf-file",
+    "--bind-host",
+    "--draft-model",
+    "--speculative",
+    "--draft-max",
+    "--draft-min",
+    "--draft-cache-type-k",
+    "--draft-cache-type-v",
 }
 DISALLOWED_ARGUMENTS = {
     "--",
@@ -87,7 +89,7 @@ DISALLOWED_ARGUMENTS = {
     "zsh",
 }
 REMOTE_LLM_KEYS = (
-    MODEL_KEYS | VISION_KEYS | set(RUNTIME_FLAGS) | GENERATION_KEYS | {"bind_host", "startup_timeout", "extra_args"}
+    MODEL_KEYS | VISION_KEYS | set(NATIVE_FLAGS) | GENERATION_KEYS | {"bind_host", "extra_args"}
 )
 
 

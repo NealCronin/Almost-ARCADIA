@@ -24,3 +24,4 @@ checkpoints/
 .idea/
 .DS_Store
 Thumbs.db
+vendor/llama.cpp/

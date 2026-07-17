@@ -214,12 +214,12 @@ class PriorityMapOutputConfig:
         known = {"root", "preview"}
         return cls(Path(root), preview, copy.deepcopy({key: value for key, value in data.items() if key not in known}))
 
-
 @dataclass(slots=True)
 class PriorityMapToolConfig:
     services: dict[str, ConfiguredService] = field(default_factory=dict)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     output: PriorityMapOutputConfig = field(default_factory=PriorityMapOutputConfig)
+    visual_llm_mode: str = "same_as_logical"  # "same_as_logical" | "separate"
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -247,7 +247,6 @@ class PriorityMapToolConfig:
             output=PriorityMapOutputConfig.from_dict(data.get("output")),
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
-
 
 @dataclass(slots=True)
 class AppConfig:

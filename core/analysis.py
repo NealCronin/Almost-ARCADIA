@@ -182,11 +182,19 @@ class AnalysisCoordinator:
                 self._write_effective_settings(config, input_path, output_directory, run_id)
                 if self._cancelled_checkpoint(output_directory):
                     return
-                self._log(log, "analysis starting")
-                self._set_status(stage="starting_llm", message="Starting LLM service")
+                self._set_status(stage="starting_llm", message="Starting LLM services")
                 llm_endpoint = self._ensure_service("llm", config, output_directory)
                 if self._cancelled_checkpoint(output_directory):
                     return
+
+                # Determine visual LLM endpoint
+                visual_endpoint = llm_endpoint
+                if config.priority_map.visual_llm_mode == "separate":
+                    self._set_status(stage="starting_visual_llm", message="Starting Visual LLM service")
+                    visual_endpoint = self._ensure_service("visual_llm", config, output_directory)
+                    if self._cancelled_checkpoint(output_directory):
+                        return
+
                 self._set_status(stage="starting_sam3", message="Starting SAM3 service")
                 if self._cancelled_checkpoint(output_directory):
                     return
@@ -198,12 +206,20 @@ class AnalysisCoordinator:
                 self._set_status(state="running", stage="preparing_input", message="Preparing input")
                 settings = config.priority_map.pipeline.to_dict()
                 settings["llm_generation"] = generation_settings(config.priority_map.services["llm"].settings)
+                settings["visual_llm_generation"] = generation_settings(
+                    config.priority_map.services.get("visual_llm", config.priority_map.services["llm"]).settings
+                )
                 settings["output_directory"] = str(output_directory)
                 settings["input_path"] = input_path
                 self._set_status(stage="priority_map", message="Running Priority Map")
                 if self._cancelled_checkpoint(output_directory):
                     return
-                result = self._run_adapter(input_path, output_directory, llm_endpoint, sam_endpoint, settings)
+                llm_client = LLMClient(llm_endpoint)
+                visual_llm_client = LLMClient(visual_endpoint)
+                result = self._run_adapter(
+                    input_path, output_directory, llm_endpoint, visual_endpoint, sam_endpoint, settings,
+                    llm_client, visual_llm_client,
+                )
                 self._set_status(stage="finalizing", message="Finalizing output")
                 if self._cancel_event.is_set():
                     self._finish_cancelled(output_directory, result.frames_processed)
@@ -229,8 +245,11 @@ class AnalysisCoordinator:
         input_path: str,
         output_directory: Path,
         llm_endpoint: ServiceEndpoint,
+        visual_endpoint: ServiceEndpoint,
         sam_endpoint: ServiceEndpoint,
         settings: dict[str, Any],
+        llm_client: LLMClient,
+        visual_llm_client: LLMClient,
     ) -> PipelineResult:
         attempts = 0
         while True:
@@ -238,7 +257,8 @@ class AnalysisCoordinator:
                 return self.adapter.run(
                     input_path=input_path,
                     output_directory=str(output_directory),
-                    llm_client=LLMClient(llm_endpoint),
+                    llm_client=llm_client,
+                    visual_llm_client=visual_llm_client,
                     sam_client=SAMClient(sam_endpoint),
                     pipeline_settings=settings,
                     progress_callback=self._progress,
@@ -260,6 +280,9 @@ class AnalysisCoordinator:
                     )
                 llm_endpoint = self._endpoints["llm"]
                 sam_endpoint = self._endpoints["sam3"]
+                visual_endpoint = self._endpoints.get("visual_llm", llm_endpoint)
+                llm_client = LLMClient(llm_endpoint)
+                visual_llm_client = LLMClient(visual_endpoint)
 
     def _ensure_service(self, name: str, config: AppConfig, output_directory: Path) -> ServiceEndpoint:
         configured = config.priority_map.services.get(name)
@@ -277,11 +300,11 @@ class AnalysisCoordinator:
             if self._cancelled_checkpoint(output_directory):
                 raise ServiceError("Analysis cancelled before remote service startup.")
             spec = configured.spec
-            if name == "llm":
+            if name in ("llm", "visual_llm"):
                 settings = {key: value for key, value in configured.settings.items() if key in REMOTE_LLM_KEYS}
                 settings = validate_llm_settings(settings, remote=True)
                 settings["bind_host"] = resolve_inference_bind_host(configured.node, config.nodes, None)
-                spec = ServiceSpec(service_type="llm", port=configured.port, settings=settings)
+                spec = ServiceSpec(service_type=name, port=configured.port, settings=settings)
             endpoint = InstructionClient(node.host, node.instruction_port).start_service(spec)
             if self._cancelled_checkpoint(output_directory):
                 raise ServiceError("Analysis cancelled after remote service startup.")

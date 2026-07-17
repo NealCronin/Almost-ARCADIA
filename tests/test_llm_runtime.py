@@ -11,6 +11,7 @@ from core.services.specs import ServiceEndpoint, ServiceSpec
 def test_build_command_resolves_repository_and_runtime_flags(monkeypatch) -> None:
     monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.Q4.gguf", "mmproj.gguf"])
     monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda repo, filename, cache: f"/{cache}/{filename}")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/usr/local/bin/llama-server")
     command = LLMRuntime.build_command(
         ServiceSpec(
             "llm",
@@ -26,24 +27,20 @@ def test_build_command_resolves_repository_and_runtime_flags(monkeypatch) -> Non
             },
         )
     )
-    assert command[:8] == [command[0], "-m", "llama_cpp.server", "--host", "127.0.0.1", "--port", "8081", "--model"]
-    assert "/huggingface/model.Q4.gguf" in command
-    assert ["--clip_model_path", "/mmproj/mmproj.gguf"] == command[
-        command.index("--clip_model_path") : command.index("--clip_model_path") + 2
-    ]
-    assert "--hf_model_repo_id" not in command and "--n_parallel" not in command
+    assert command[:8] == ["/usr/local/bin/llama-server", "--host", "127.0.0.1", "--port", "8081", "--model", "/huggingface/model.Q4.gguf", "--mmproj"]
+    assert "/mmproj/mmproj.gguf" in command
+    assert "--ctx-size" in command and "4096" in command
 
 
 def test_ambiguous_and_split_models_require_safe_selection(monkeypatch) -> None:
     monkeypatch.setattr(
         LLMRuntime, "list_repository_files", lambda _: ["a.Q4.gguf", "b.Q8.gguf", "split-00001-of-00002.gguf"]
     )
-    with pytest.raises(ValueError, match="Model file pattern"):
+    with pytest.raises(ValueError, match="select one"):
         LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
     monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["split-00001-of-00002.gguf"])
-    with pytest.raises(ValueError, match="No usable"):
+    with pytest.raises(ValueError, match="Only split GGUF"):
         LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
-
 
 def test_models_directory_honors_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
@@ -77,8 +74,8 @@ def test_legacy_local_path_is_rejected() -> None:
         LLMRuntime.build_command(ServiceSpec("llm", 8081, {"model_path": "old.gguf"}))
 
 
-def test_readiness_targets_openai_models_route() -> None:
-    assert LLMRuntime.readiness_url(ServiceEndpoint("127.0.0.1", 8081, "llm")) == "http://127.0.0.1:8081/v1/models"
+def test_readiness_targets_health_endpoint() -> None:
+    assert LLMRuntime.readiness_url(ServiceEndpoint("127.0.0.1", 8081, "llm")) == "http://127.0.0.1:8081/health"
 
 
 def test_wait_ready_reports_dead_child() -> None:

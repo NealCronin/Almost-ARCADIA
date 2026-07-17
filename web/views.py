@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import os
+import tempfile
 import json
 import threading
 from pathlib import Path
@@ -29,6 +31,7 @@ from web.forms import (
     PipelineForm,
     RemoteNodeForm,
     SAMServiceForm,
+    VisualLLMServiceForm,
 )
 from web.runtime import get_runtime
 from web.tools import TOOLS
@@ -38,7 +41,7 @@ _models_node_lock = threading.RLock()
 
 
 def _service_form(name: str, config: Any, data: Any = None):
-    form_classes = {"llm": LLMServiceForm, "sam3": SAMServiceForm}
+    form_classes = {"llm": LLMServiceForm, "visual_llm": VisualLLMServiceForm, "sam3": SAMServiceForm}
     if name not in TOOLS["priority-map"].required_services:
         raise ValueError(f"Unknown Priority Map service {name}.")
     form_class = form_classes[name]
@@ -77,6 +80,7 @@ def _models_context(
     *,
     llm_form: LLMServiceForm | None = None,
     sam_form: SAMServiceForm | None = None,
+    visual_llm_form: VisualLLMServiceForm | None = None,
     node_form: RemoteNodeForm | None = None,
     editing_node: str | None = None,
     edit_node_form: RemoteNodeForm | None = None,
@@ -84,10 +88,17 @@ def _models_context(
     node_error: str | None = None,
 ) -> dict[str, Any]:
     runtime = get_runtime()
+    visual_llm_configured = config.priority_map.services.get("visual_llm")
+    visual_llm_form = visual_llm_form or _service_form("visual_llm", config)
+    if visual_llm_configured:
+        visual_llm_form.initial_from(visual_llm_configured)
     context: dict[str, Any] = {
         "config": config,
         "llm_form": llm_form or _service_form("llm", config),
         "sam_form": sam_form or _service_form("sam3", config),
+        "visual_llm_form": visual_llm_form,
+        "visual_llm_mode": config.priority_map.visual_llm_mode,
+        "visual_llm_readonly": config.priority_map.visual_llm_mode == "same_as_logical",
         "node_form": node_form or RemoteNodeForm(),
         "editing_node": editing_node,
         "edit_node_form": edit_node_form,
@@ -134,6 +145,7 @@ def _render_models(
     *,
     llm_form: LLMServiceForm | None = None,
     sam_form: SAMServiceForm | None = None,
+    visual_llm_form: VisualLLMServiceForm | None = None,
     node_form: RemoteNodeForm | None = None,
     editing_node: str | None = None,
     edit_node_form: RemoteNodeForm | None = None,
@@ -149,6 +161,7 @@ def _render_models(
             config,
             llm_form=llm_form,
             sam_form=sam_form,
+            visual_llm_form=visual_llm_form,
             node_form=node_form,
             editing_node=editing_node,
             edit_node_form=edit_node_form,
@@ -387,7 +400,7 @@ def test_remote_node(request: HttpRequest, node_name: str) -> JsonResponse:
 
 @require_POST
 def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
-    if service_name not in ("llm", "sam3"):
+    if service_name not in ("llm", "visual_llm", "sam3"):
         return HttpResponse("Unknown service", status=404)
     runtime = get_runtime()
     with runtime.config_lock:
@@ -400,6 +413,7 @@ def start_service(request: HttpRequest, service_name: str) -> HttpResponse:
                     request,
                     config,
                     llm_form=form if service_name == "llm" else None,
+                    visual_llm_form=form if service_name == "visual_llm" else None,
                     sam_form=form if service_name == "sam3" else None,
                     status=400,
                 )
@@ -747,3 +761,121 @@ def run_endpoint_test(request: HttpRequest) -> HttpResponse:
         except (ArcadiaError, ValueError, OSError) as exc:
             form.add_error(None, str(exc))
     return render(request, "web/endpoint_test.html", {"form": form, "response_text": response_text})
+
+
+
+@require_POST
+def test_llm_chat(request: HttpRequest) -> JsonResponse:
+    """Start Logical LLM, wait for readiness, send text prompt, return response."""
+    return _test_chat(request, role="llm", require_vision=False)
+
+
+@require_POST
+def test_visual_llm_chat(request: HttpRequest) -> JsonResponse:
+    """Start Visual LLM (or reuse Logical), wait for readiness, send prompt+image, return response."""
+    return _test_chat(request, role="visual_llm", require_vision=True)
+
+
+def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonResponse:
+    """Validate saved settings, ensure service running, send chat request, return JSON."""
+    from core.errors import InferenceError, ServiceError
+
+    runtime = get_runtime()
+    try:
+        config = runtime.config_store.load()
+    except ArcadiaError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    # Validate saved settings exist for the role
+    configured = config.priority_map.services.get(role)
+    if configured is None:
+        return JsonResponse(
+            {"error": f"No configuration saved for {role.upper()}. Save settings first."},
+            status=400,
+        )
+
+    # If require_vision, validate vision is enabled and projector exists
+    if require_vision:
+        if not configured.settings.get("vision_enabled"):
+            return JsonResponse(
+                {"error": "Vision is not enabled for this service. Enable vision and save a projector file."},
+                status=400,
+            )
+        if not configured.settings.get("mmproj_repo") and not configured.settings.get("mmproj_file_pattern"):
+            return JsonResponse(
+                {"error": "No projector (MMProj) configured. Visual chat requires a multimodal projector."},
+                status=400,
+            )
+
+    # Handle image upload for visual chat
+    image_data: list[bytes] = []
+    if require_vision and request.FILES.get("image"):
+        uploaded = request.FILES["image"]
+        if uploaded.size > 10 * 1024 * 1024:
+            return JsonResponse({"error": "Image must be under 10 MB."}, status=400)
+        allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+        if uploaded.content_type not in allowed_types:
+            return JsonResponse(
+                {"error": f"Unsupported image type {uploaded.content_type}. Use JPEG, PNG, WebP, or GIF."},
+                status=400,
+            )
+        image_data = [uploaded.read()]
+
+    # Get the prompt from the request
+    prompt = request.POST.get("prompt", "").strip()
+    if not prompt:
+        prompt = "Describe the contents of this image." if require_vision else "Hello, what model are you?"
+
+    try:
+        # Ensure the service is running
+        node = config.nodes.get(configured.node)
+        if node is None:
+            return JsonResponse({"error": f"Service {role} references unknown node {configured.node!r}."}, status=400)
+
+        if node.mode == "local":
+            # Check if already running
+            running_services = runtime.controller.list_services()
+            running_ports = {s.port for s in running_services if s.running}
+            if configured.port not in running_ports:
+                # Start the service (reuse same settings)
+                endpoint = runtime.controller.start(configured.spec)
+            else:
+                # Build endpoint from existing service info
+                for svc in running_services:
+                    if svc.port == configured.port:
+                        endpoint = ServiceEndpoint(
+                            host="127.0.0.1",
+                            port=svc.port,
+                            service_type=svc.service_type,
+                        )
+                        break
+                else:
+                    endpoint = ServiceEndpoint(host="127.0.0.1", port=configured.port, service_type="llm")
+        else:
+            # Remote node - use instruction client
+            if node.instruction_port is None:
+                return JsonResponse(
+                    {"error": f"Remote node {configured.node!r} has no instruction port."}, status=400
+                )
+            client = InstructionClient(node.host, node.instruction_port)
+            endpoint = client.start_service(configured.spec)
+
+        # Build LLMClient and send chat request
+        role_defaults = {}
+        for key in ("temperature", "top_k", "min_p", "top_p", "max_tokens",
+                     "repeat_penalty", "presence_penalty", "frequency_penalty", "seed"):
+            if key in configured.settings:
+                role_defaults[key] = configured.settings[key]
+
+        llm_client = LLMClient(endpoint, role_defaults=role_defaults)
+        result = llm_client.chat(
+            prompt,
+            images=image_data if image_data else None,
+            model=configured.settings.get("model_alias", "local-model"),
+        )
+        return JsonResponse({"response": result.text})
+
+    except (InferenceError, ServiceError, ArcadiaError, ValueError, OSError) as exc:
+        return JsonResponse({"error": str(exc)}, status=500)
+    except Exception as exc:
+        return JsonResponse({"error": f"Unexpected error: {exc}"}, status=500)

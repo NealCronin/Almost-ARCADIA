@@ -16,18 +16,17 @@ def llm_data(**overrides: object) -> dict[str, object]:
         "inference_port": 8081,
         "hf_repo": "org/model-GGUF",
         "n_ctx": 32768,
+        "vision_enabled": False,
         "temperature": 0.2,
         "top_k": 40,
         "min_p": 0.05,
         "top_p": 0.95,
         "local_bind_host": "127.0.0.1",
-        "n_gpu_layers": -1,
+        "n_gpu_layers": "all",
         "n_batch": 2048,
         "n_ubatch": 512,
         "flash_attn": "on",
-        "offload_kqv": "on",
-        "use_mmap": "on",
-        "startup_timeout": 600,
+        "use_mmap": True,
     }
     data.update(overrides)
     return data
@@ -46,10 +45,10 @@ def test_llm_quick_fields_are_declared_in_required_order() -> None:
         "inference_port",
         "hf_repo",
         "n_ctx",
+        "vision_enabled",
+        "mmproj_repo",
         "temperature",
         "top_k",
-        "min_p",
-        "top_p",
     ]
     assert not {"model_source", "model_path", "hf_file", "hf_cache_dir", "n_parallel"}.intersection(form.fields)
 
@@ -66,7 +65,6 @@ def test_llm_repository_and_generation_validation(monkeypatch) -> None:
         assert not LLMServiceForm(llm_data(hf_repo=repository), nodes=NODES).is_valid()
     assert not LLMServiceForm(llm_data(n_batch=1, n_ubatch=2), nodes=NODES).is_valid()
     assert not LLMServiceForm(llm_data(top_p=0), nodes=NODES).is_valid()
-    assert not LLMServiceForm(llm_data(rope_scaling_type="invalid"), nodes=NODES).is_valid()
 
 
 def test_remote_node_address_wins_over_posted_local_host() -> None:

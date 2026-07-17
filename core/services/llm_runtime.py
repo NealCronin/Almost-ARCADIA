@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import os
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from typing import IO
 import requests
 
 from core.errors import ServiceStartupError
-from core.services.llm_settings import PROJECTOR_RE, RUNTIME_FLAGS, SPLIT_GGUF_RE, validate_additional_server_arguments
+from core.services.llm_settings import NATIVE_FLAGS, PROJECTOR_RE, SPLIT_GGUF_RE, validate_additional_server_arguments
 from core.services.specs import ServiceEndpoint, ServiceSpec
 from project.settings import BASE_DIR
 
@@ -25,6 +26,9 @@ class LLMRuntime:
     ``--n_ctx`` and ``--chat_format``. The server exposes ``/v1/models``.
     """
 
+    _download_locks: dict[str, threading.Lock] = {}
+    _download_locks_lock: threading.Lock = threading.Lock()
+
     @staticmethod
     def models_directory() -> Path:
         return (
@@ -35,13 +39,24 @@ class LLMRuntime:
 
     @classmethod
     def _download_hf_model(cls, repo_id: str, filename: str, cache_subdirectory: str) -> str:
-        try:
-            from huggingface_hub import hf_hub_download
-        except ImportError as exc:
-            raise ValueError("Hugging Face model sources require huggingface-hub.") from exc
         cache_dir = cls.models_directory() / cache_subdirectory
         cache_dir.mkdir(parents=True, exist_ok=True)
-        return str(hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=cache_dir, token=None))
+        target = cache_dir / filename
+        if target.is_file():
+            return str(target)
+        lock_key = f"{repo_id}/{filename}"
+        with cls._download_locks_lock:
+            if lock_key not in cls._download_locks:
+                cls._download_locks[lock_key] = threading.Lock()
+        lock = cls._download_locks[lock_key]
+        with lock:
+            if target.is_file():
+                return str(target)
+            try:
+                from huggingface_hub import hf_hub_download
+            except ImportError as exc:
+                raise ValueError("Hugging Face model sources require huggingface-hub.") from exc
+            return str(hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=cache_dir, token=None))
 
     @staticmethod
     def list_repository_files(repo_id: str, *, limit: int = 500) -> list[str]:
@@ -84,10 +99,22 @@ class LLMRuntime:
             for filename in files
             if filename.lower().endswith(".gguf")
             and bool(PROJECTOR_RE.search(Path(filename).name)) == projector
-            and not SPLIT_GGUF_RE.search(Path(filename).name)
         ]
         if pattern:
             candidates = [filename for filename in candidates if fnmatch.fnmatchcase(Path(filename).name, pattern)]
+        if not candidates:
+            kind = "projector" if projector else "model"
+            raise ValueError(f"No usable {kind} GGUF matched the selected repository and pattern.")
+        # Check if all candidates are split shards
+        split_candidates = [f for f in candidates if SPLIT_GGUF_RE.search(Path(f).name)]
+        if split_candidates and len(split_candidates) == len(candidates):
+            if pattern:
+                return candidates[0]  # caller resolves via _resolve_split_or_single
+            raise ValueError(
+                "Only split GGUF files found. Provide a model file pattern to select one."
+            )
+        # Filter out split shards from auto-selection
+        candidates = [f for f in candidates if not SPLIT_GGUF_RE.search(Path(f).name)]
         if len(candidates) == 1:
             return candidates[0]
         if not candidates:
@@ -110,7 +137,8 @@ class LLMRuntime:
         if pattern is not None and not isinstance(pattern, str):
             raise ValueError("Model file pattern must be a string.")
         filename = cls._select_file(cls.list_repository_files(repo), pattern, projector=False)
-        return cls._download_hf_model(repo, filename, "huggingface")
+        shards = cls._resolve_split_or_single(filename, repo, "huggingface")
+        return shards[0]
 
     @classmethod
     def _resolve_projector_path(cls, settings: dict[str, object]) -> str | None:
@@ -126,6 +154,67 @@ class LLMRuntime:
         return cls._download_hf_model(repo, filename, "mmproj")
 
     @classmethod
+    def _resolve_draft_path(cls, settings: dict[str, object]) -> str | None:
+        if not settings.get("draft_enabled"):
+            return None
+        repo = settings.get("draft_repo") or settings.get("hf_repo")
+        if not isinstance(repo, str) or not repo:
+            raise ValueError("Draft model requires a repository.")
+        pattern = settings.get("draft_file_pattern")
+        if pattern is not None and not isinstance(pattern, str):
+            raise ValueError("Draft file pattern must be a string.")
+        files = cls.list_repository_files(repo)
+        filename = cls._select_file(files, pattern, projector=False)
+        resolved = cls._download_hf_model(repo, filename, "huggingface")
+        return str(Path(resolved))
+
+    @classmethod
+    def _resolve_split_or_single(cls, filepath: str, repo: str, cache_subdir: str) -> list[str]:
+        filename = Path(filepath).name
+        m = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", filename, re.IGNORECASE)
+        if not m:
+            return [cls._download_hf_model(repo, filename, cache_subdir)]
+        shard_num = int(m.group(1))
+        total_shards = int(m.group(2))
+        if shard_num != 1:
+            raise ValueError(f"Model selection must start from shard 1, got shard {shard_num}")
+        prefix = filename[:m.start()]
+        all_files = cls.list_repository_files(repo)
+        downloaded = []
+        for i in range(1, total_shards + 1):
+            shard_name = f"{prefix}-{i:05d}-of-{total_shards:05d}.gguf"
+            if shard_name not in all_files:
+                raise ValueError(f"Split model missing shard {i}/{total_shards}: {shard_name}")
+            downloaded.append(cls._download_hf_model(repo, shard_name, cache_subdir))
+        return downloaded
+
+    @classmethod
+    def _find_executable(cls) -> str:
+        env_exe = os.environ.get("ARCADIA_LLAMA_SERVER")
+        if env_exe:
+            return env_exe
+        base_dir = BASE_DIR
+        candidates = []
+        if sys.platform == "win32":
+            candidates.extend([
+                str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "Release" / "llama-server.exe"),
+                str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "llama-server.exe"),
+            ])
+        else:
+            candidates.append(str(base_dir / "vendor" / "llama.cpp" / "build" / "bin" / "llama-server"))
+        import shutil
+        which_candidate = shutil.which("llama-server") or (shutil.which("llama-server.exe") if sys.platform == "win32" else None)
+        if which_candidate:
+            candidates.append(which_candidate)
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        raise ServiceStartupError(
+            f"No llama-server binary found. Searched: {', '.join(candidates)}. "
+            "Set ARCADIA_LLAMA_SERVER or run scripts/install_macos_metal.sh / install_windows_cuda.ps1."
+        )
+
+    @classmethod
     def build_command(cls, spec: ServiceSpec, *, allow_test_command: bool = False) -> list[str]:
         settings = spec.settings
         raw_command = settings.get("command")
@@ -137,29 +226,50 @@ class LLMRuntime:
             ):
                 raise ValueError("command is available only to unit tests.")
             return list(raw_command)
+        executable = cls._find_executable()
         host = str(settings.get("bind_host", "127.0.0.1"))
-        command = [sys.executable, "-m", "llama_cpp.server", "--host", host, "--port", str(spec.port)]
+        command = [executable, "--host", host, "--port", str(spec.port)]
         command.extend(["--model", cls._resolve_model_path(settings)])
         projector = cls._resolve_projector_path(settings)
         if projector:
-            command.extend(["--clip_model_path", projector])
-        for key, flag in RUNTIME_FLAGS.items():
+            command.extend(["--mmproj", projector])
+        for key, flag in NATIVE_FLAGS.items():
             value = settings.get(key)
-            if value not in (None, ""):
-                command.extend([flag, str(value).lower() if isinstance(value, bool) else str(value)])
+            if value in (None, ""):
+                continue
+            # --no-mmap: emit only when disabled
+            if flag == "--no-mmap" and value:
+                continue
+            # --flash-attn: tri-state
+            if flag == "--flash-attn":
+                if value in ("auto", ""):
+                    continue
+                command.extend([flag, "1" if value in ("on", "1", True) else "0"])
+                continue
+            command.extend([flag, str(value)])
+        draft_path = cls._resolve_draft_path(settings)
+        if draft_path:
+            command.extend(["--draft-model", draft_path])
+            command.extend(["--speculative", str(settings.get("draft_method", "draft-simple"))])
+            command.extend(["--draft-max", str(settings.get("draft_max_tokens", 3))])
+            command.extend(["--draft-min", str(settings.get("draft_min_prob", 0.75))])
+            dk = settings.get("draft_cache_type_k", "f16")
+            dv = settings.get("draft_cache_type_v", "f16")
+            if dk:
+                command.extend(["--draft-cache-type-k", str(dk)])
+            if dv:
+                command.extend(["--draft-cache-type-v", str(dv)])
         command.extend(validate_additional_server_arguments(settings.get("extra_args", [])))
         return command
 
     @staticmethod
     def endpoint(spec: ServiceSpec, public_host: str) -> ServiceEndpoint:
         return ServiceEndpoint(
-            host=str(spec.settings.get("bind_host", public_host)), port=spec.port, service_type="llm"
+            host=str(spec.settings.get("bind_host", public_host)), port=spec.port, service_type=spec.service_type
         )
-
     @staticmethod
     def readiness_url(endpoint: ServiceEndpoint) -> str:
-        return f"{endpoint.base_url}/v1/models"
-
+        return f"{endpoint.base_url}/health"
     @staticmethod
     def probe(endpoint: ServiceEndpoint, timeout: float) -> requests.Response:
         return requests.get(LLMRuntime.readiness_url(endpoint), timeout=timeout)

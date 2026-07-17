@@ -98,18 +98,17 @@ def llm_post_data(**overrides):
         "inference_port": 8081,
         "hf_repo": "org/model",
         "n_ctx": 32768,
+        "vision_enabled": False,
         "temperature": 0.2,
         "top_k": 40,
         "min_p": 0.05,
         "top_p": 0.95,
         "local_bind_host": "127.0.0.1",
-        "startup_timeout": 600,
-        "n_gpu_layers": -1,
+        "n_gpu_layers": "all",
         "n_batch": 2048,
         "n_ubatch": 512,
         "flash_attn": "on",
-        "offload_kqv": "on",
-        "use_mmap": "on",
+        "use_mmap": True,
         "additional_arguments": "",
     }
     data.update(overrides)
@@ -157,7 +156,7 @@ def test_service_forms_render_without_raw_json(client, monkeypatch, runtime):
     response = client.get("/services/")
     assert response.status_code == 200
     assert b"settings_json" not in response.content
-    assert b"Hugging Face repository" in response.content
+    assert b"model repository" in response.content
     assert b"Checkpoint path" in response.content
 
 

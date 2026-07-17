@@ -122,11 +122,10 @@ class ServiceController:
             return "\n".join(lines[-max(1, min(tail, 5000)) :])
 
     def _runtime_for(self, spec: ServiceSpec):
-        if spec.service_type == "llm":
+        if spec.service_type in ("llm", "visual_llm"):
             return LLMRuntime
         if spec.service_type == "sam3":
             from core.services.sam_runtime import SAMRuntime
-
             return SAMRuntime
         raise ValueError(f"Unsupported service type: {spec.service_type}")
 

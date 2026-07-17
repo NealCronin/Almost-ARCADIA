@@ -15,6 +15,8 @@ urlpatterns = [
         views.inspect_llm_repository,
         name="inspect_llm_repository",
     ),
+    path("client/priority-map/models/llm/test-chat/", views.test_llm_chat, name="test_llm_chat"),
+    path("client/priority-map/models/visual_llm/test-chat/", views.test_visual_llm_chat, name="test_visual_llm_chat"),
     path("client/priority-map/models/nodes/add/", views.add_remote_node, name="add_remote_node"),
     path("client/priority-map/models/nodes/<str:node_name>/edit/", views.edit_remote_node, name="edit_remote_node"),
     path(

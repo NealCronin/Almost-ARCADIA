@@ -15,11 +15,17 @@ from core.services.specs import ServiceEndpoint
 class LLMClient:
     """Call an already-running OpenAI-compatible LLM data-plane endpoint."""
 
-    def __init__(self, endpoint: ServiceEndpoint, timeout: float = 120.0) -> None:
-        if endpoint.service_type != "llm":
+    def __init__(
+        self,
+        endpoint: ServiceEndpoint,
+        timeout: float = 120.0,
+        role_defaults: dict[str, Any] | None = None,
+    ) -> None:
+        if endpoint.service_type not in ("llm", "visual_llm"):
             raise ValueError("LLMClient requires an LLM endpoint.")
         self.endpoint = endpoint
         self.timeout = timeout
+        self.role_defaults = role_defaults or {}
 
     def chat(
         self,
@@ -27,12 +33,16 @@ class LLMClient:
         image_paths: Iterable[str | Path] | None = None,
         *,
         images: Iterable[bytes | tuple[str, bytes]] | None = None,
-        model: str = "local-model",
+        model: str | None = None,
         temperature: float | None = None,
         top_k: int | None = None,
         min_p: float | None = None,
         top_p: float | None = None,
         max_tokens: int | None = None,
+        repeat_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        seed: int | None = None,
     ) -> LLMResult:
         if not prompt.strip():
             raise ValueError("prompt cannot be empty")
@@ -48,19 +58,18 @@ class LLMClient:
             content.append({"type": "image_url", "image_url": {"url": self._data_uri(raw, mime=mime)}})
 
         body: dict[str, Any] = {
-            "model": model,
+            "model": model or self.role_defaults.get("model", "local-model"),
             "messages": [{"role": "user", "content": content}],
         }
-        if temperature is not None:
-            body["temperature"] = temperature
-        if top_k is not None:
-            body["top_k"] = top_k
-        if min_p is not None:
-            body["min_p"] = min_p
-        if top_p is not None:
-            body["top_p"] = top_p
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
+        # Merge role defaults with explicit overrides (explicit beats default)
+        for param in (
+            "temperature", "top_k", "min_p", "top_p", "max_tokens",
+            "repeat_penalty", "presence_penalty", "frequency_penalty", "seed",
+        ):
+            explicit = locals()[param]
+            value = explicit if explicit is not None else self.role_defaults.get(param)
+            if value is not None:
+                body[param] = value
         try:
             response = requests.post(
                 f"{self.endpoint.base_url}/v1/chat/completions",
@@ -70,7 +79,7 @@ class LLMClient:
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, OSError, ValueError) as exc:
-            raise InferenceError(f"LLM request failed: {exc}", service_type="llm") from exc
+            raise InferenceError(f"LLM request failed: {exc}", service_type=self.endpoint.service_type) from exc
         try:
             message = payload["choices"][0]["message"]["content"]
             if isinstance(message, list):
@@ -80,7 +89,7 @@ class LLMClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise InferenceError(
                 "LLM response did not contain choices[0].message.content.",
-                service_type="llm",
+                service_type=self.endpoint.service_type,
             ) from exc
         return LLMResult(text=text, raw_response=payload if isinstance(payload, dict) else None)
 

@@ -262,13 +262,56 @@ class _RemoteSegment:
         )
 
 
+class _GraphAgent:
+    """Priority Map-compatible graph agent using Logical LLM client."""
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        model: str = "local-model",
+        llm_generation: dict[str, float | int] | None = None,
+        graph_context_window: int = 10,
+    ) -> None:
+        self.llm_client = llm_client
+        self.model = model
+        self.llm_generation = llm_generation or {}
+        self.graph_context_window = graph_context_window
+        self._history: list[dict[str, Any]] = []
+        self._finished = False
+        self._context: dict[str, Any] = {}
+
+    async def start_async_if_ready(self) -> bool:
+        return True
+
+    def poll_finished(self) -> bool:
+        return self._finished
+
+    def update_priorities(self, scores: dict[str, float]) -> None:
+        self._history.append({"scores": scores, "context": dict(self._context)})
+        if len(self._history) > self.graph_context_window:
+            self._history.pop(0)
+
+    def get_context(self) -> dict[str, Any]:
+        return self._context
+
+    def close(self) -> None:
+        self._history.clear()
+
+
 class PriorityMapAdapter:
     """The only Almost ARCADIA integration boundary for external Priority Map."""
 
     PRIORITY_MAP_API_COMMIT = "ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"
 
-    def __init__(self, runner_factory: Callable[..., Any] | None = None) -> None:
+    def __init__(
+        self,
+        runner_factory: Callable[..., Any] | None = None,
+        visual_llm_client: LLMClient | None = None,
+        graph_agent: _GraphAgent | None = None,
+    ) -> None:
         self.runner_factory = runner_factory
+        self.visual_llm_client = visual_llm_client
+        self.graph_agent = graph_agent
 
     def run(
         self,
@@ -277,6 +320,8 @@ class PriorityMapAdapter:
         output_directory: str,
         llm_client: LLMClient,
         sam_client: SAMClient,
+        visual_llm_client: LLMClient | None = None,
+        graph_agent: _GraphAgent | None = None,
         pipeline_settings: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
@@ -300,6 +345,8 @@ class PriorityMapAdapter:
             output_directory=output_path,
             llm_client=llm_client,
             sam_client=sam_client,
+            visual_llm_client=visual_llm_client,
+            graph_agent=graph_agent,
             settings=settings,
         )
         try:
@@ -326,6 +373,8 @@ class PriorityMapAdapter:
         output_directory: Path,
         llm_client: LLMClient,
         sam_client: SAMClient,
+        visual_llm_client: LLMClient | None = None,
+        graph_agent: _GraphAgent | None = None,
         settings: dict[str, Any],
     ):
         if self.runner_factory is not None:
@@ -334,6 +383,8 @@ class PriorityMapAdapter:
                 output_directory=str(output_directory),
                 llm_client=llm_client,
                 sam_client=sam_client,
+                visual_llm_client=visual_llm_client,
+                graph_agent=graph_agent,
                 settings=settings,
             )
         try:
@@ -363,7 +414,7 @@ class PriorityMapAdapter:
             sam_resize = (sam_resize, sam_resize)
         try:
             priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
-                llm_client,
+                visual_llm_client or llm_client,
                 configured_prompts=settings.get("prompts", []),
                 model=settings.get("scene_model") or "local-model",
                 llm_generation=settings.get("llm_generation"),
@@ -386,7 +437,7 @@ class PriorityMapAdapter:
                 debug=bool(settings.get("debug", False)),
                 record=bool(settings.get("record", True)),
                 panoramic=bool(settings.get("panoramic", False)),
-                graph_agent=bool(settings.get("graph_agent", False)),
+                graph_agent=graph_agent or bool(settings.get("graph_agent", False)),
                 gps_csv=settings.get("gps_csv"),
                 camera_intrinsics=settings.get("camera_intrinsics"),
                 scene_model=settings.get("scene_model"),
