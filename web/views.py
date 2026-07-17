@@ -795,8 +795,9 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
     except ArcadiaError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
 
-    # Resolve which config and settings to use
-    if role == "visual_llm" and config.priority_map.visual_llm_mode == "same_as_logical":
+    # Resolve the backing service: shared visual → logical, separate visual → visual_llm, logical → llm
+    visual_mode = config.priority_map.visual_llm_mode
+    if role == "visual_llm" and visual_mode == "same_as_logical":
         configured = config.priority_map.services.get("llm")
         if configured is None:
             return JsonResponse(
@@ -845,7 +846,7 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
         prompt = "Describe the contents of this image." if require_vision else "Hello, what model are you?"
 
     try:
-        # Ensure the service is running
+        # Ensure the service is running using the backing role's key for port lookup
         node = config.nodes.get(configured.node)
         if node is None:
             return JsonResponse({"error": f"Service {role} references unknown node {configured.node!r}."}, status=400)
@@ -856,7 +857,7 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
             if configured.port not in running_ports:
                 endpoint = runtime.controller.start(configured.spec)
             else:
-                # Build endpoint from running service info using configured bind host
+                # Reuse existing endpoint with configured bind host
                 bind_host = str(configured.settings.get("bind_host", "127.0.0.1"))
                 endpoint = ServiceEndpoint(
                     host=bind_host,
@@ -869,7 +870,7 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
             client = InstructionClient(node.host, node.instruction_port)
             endpoint = client.start_service(configured.spec)
 
-        # Build LLMClient and send chat request
+        # Build LLMClient with role-appropriate generation settings
         role_defaults: dict[str, Any] = {}
         for key in (
             "temperature",
@@ -885,11 +886,14 @@ def _test_chat(request: HttpRequest, role: str, require_vision: bool) -> JsonRes
             if key in configured.settings:
                 role_defaults[key] = configured.settings[key]
 
+        # Use role-appropriate alias
+        model_alias = configured.settings.get("model_alias") or ""
+
         llm_client = LLMClient(endpoint, role_defaults=role_defaults)
         result = llm_client.chat(
             prompt,
             images=image_data if image_data else None,
-            model=configured.settings.get("model_alias", "local-model"),
+            model=model_alias,
         )
         return JsonResponse({"response": result.text})
 

@@ -141,8 +141,8 @@ class LLMServiceForm(ServiceForm):
         required=False,
     )
     # Advanced - Memory
-    cache_type_k = forms.ChoiceField(label="K-cache type", choices=CACHE_TYPE_CHOICES, required=False)
-    cache_type_v = forms.ChoiceField(label="V-cache type", choices=CACHE_TYPE_CHOICES, required=False)
+    cache_type_k = forms.ChoiceField(label="K-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False)
+    cache_type_v = forms.ChoiceField(label="V-cache type", choices=CACHE_TYPE_CHOICES, initial="f16", required=False)
     use_mmap = forms.BooleanField(label="Use mmap", required=False, initial=True)
     use_mlock = forms.BooleanField(label="Use mlock", required=False)
     # Advanced - Generation

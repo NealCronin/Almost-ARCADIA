@@ -93,3 +93,191 @@ def test_wait_ready_reports_dead_child() -> None:
     process.poll.return_value = 1
     with pytest.raises(ServiceStartupError):
         LLMRuntime.wait_ready(process, ServiceEndpoint("127.0.0.1", 8081, "llm"), timeout=1, poll_interval=0)
+
+
+# ── Flash Attention tri-state ──────────────────────────────────────────
+
+
+def test_flash_attn_auto_emits_flag(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "auto"}))
+    assert "--flash-attn" in command
+    idx = command.index("--flash-attn")
+    assert command[idx + 1] == "auto"
+
+
+def test_flash_attn_on_emits_flag(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "on"}))
+    assert "--flash-attn" in command
+    idx = command.index("--flash-attn")
+    assert command[idx + 1] == "on"
+
+
+def test_flash_attn_off_emits_flag(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "off"}))
+    assert "--flash-attn" in command
+    idx = command.index("--flash-attn")
+    assert command[idx + 1] == "off"
+
+
+def test_flash_attn_no_numeric_one(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "on"}))
+    assert "1" not in [command[i + 1] for i, a in enumerate(command) if a == "--flash-attn"]
+
+
+def test_flash_attn_not_set_omits_flag(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
+    assert "--flash-attn" not in command
+
+
+# ── Nested paths ────────────────────────────────────────────────────────
+
+
+def test_nested_single_model_preserves_path(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["Q4_K/model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "*.gguf"}))
+    assert downloads[0] == "Q4_K/model.gguf"
+
+
+def test_nested_split_main_model(monkeypatch) -> None:
+    files = [
+        "Q6/model-00001-of-00003.gguf",
+        "Q6/model-00002-of-00003.gguf",
+        "Q6/model-00003-of-00003.gguf",
+    ]
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: list(files))
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00001*"}))
+    assert len(downloads) == 3
+    assert "Q6/model-00001-of-00003.gguf" in downloads
+    assert "Q6/model-00002-of-00003.gguf" in downloads
+    assert "Q6/model-00003-of-00003.gguf" in downloads
+
+
+def test_nested_split_draft_model(monkeypatch) -> None:
+    main_files = ["main.gguf"]
+    draft_files = [
+        "draft/draft-00001-of-00002.gguf",
+        "draft/draft-00002-of-00002.gguf",
+    ]
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+
+    def _list_files(repo):
+        return main_files if repo == "org/model" else draft_files
+
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", _list_files)
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(
+        ServiceSpec(
+            "llm",
+            8081,
+            {
+                "hf_repo": "org/model",
+                "draft_enabled": True,
+                "draft_repo": "org/draft-model",
+                "draft_file_pattern": "draft-00001*",
+            },
+        )
+    )
+    assert "draft/draft-00001-of-00002.gguf" in downloads
+    assert "draft/draft-00002-of-00002.gguf" in downloads
+
+
+def test_missing_shard_reports_error(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model-00001-of-00003.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: f"/cache/{f}")
+    with pytest.raises(ValueError, match="missing shard"):
+        LLMRuntime.build_command(
+            ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00001*"})
+        )
+
+
+def test_first_shard_enforcement(monkeypatch) -> None:
+    monkeypatch.setattr(
+        LLMRuntime,
+        "list_repository_files",
+        lambda _: ["model-00002-of-00003.gguf", "model-00003-of-00003.gguf"],
+    )
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: f"/cache/{f}")
+    with pytest.raises(ValueError, match="must start from shard 1"):
+        LLMRuntime.build_command(
+            ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00002*"})
+        )
+
+
+def test_nested_projector_path(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf", "mmproj/mmproj.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(
+        ServiceSpec(
+            "llm",
+            8081,
+            {
+                "hf_repo": "org/model",
+                "vision_enabled": True,
+                "model_file_pattern": "model.gguf",
+                "mmproj_file_pattern": "mmproj.gguf",
+            },
+        )
+    )
+    assert "mmproj/mmproj.gguf" in downloads
+
+
+# ── Case-insensitive pattern ───────────────────────────────────────────
+
+
+def test_case_insensitive_pattern(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["MODEL-Q6_K.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "*q6_k*.gguf"}))
+    assert downloads[0] == "MODEL-Q6_K.gguf"
+
+
+# ── Projector excluded from main model ─────────────────────────────────
+
+
+def test_projector_not_selected_as_main_model(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf", "mmproj.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    downloads = []
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
+    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
+    assert downloads[0] == "model.gguf"
+
+
+# ── Command is always an argument list ──────────────────────────────────
+
+
+def test_command_remains_argument_list(monkeypatch) -> None:
+    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
+    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
+    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
+    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "auto"}))
+    assert isinstance(command, list)
+    assert all(isinstance(arg, str) for arg in command)

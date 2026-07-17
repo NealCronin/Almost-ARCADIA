@@ -263,34 +263,48 @@ class _RemoteSegment:
 
 
 class _GraphAgent:
-    """Priority Map-compatible graph agent using Logical LLM client."""
+    """Priority Map-compatible graph agent using Logical LLM client.
+
+    Accepts the full constructor signature the pinned runner supplies,
+    retaining graph_builder, task_description, node-growth threshold,
+    and review-hop cutoff for future use. LLM work is dispatched to the
+    Logical LLM client.
+    """
 
     def __init__(
         self,
         llm_client: LLMClient,
-        model: str = "local-model",
         llm_generation: dict[str, float | int] | None = None,
+        model: str = "",
+        graph_builder: Any = None,
+        task_description: str = "",
+        threshold: float = 0.5,
+        cutoff: int = 5,
         graph_context_window: int = 10,
     ) -> None:
         self.llm_client = llm_client
-        self.model = model
         self.llm_generation = llm_generation or {}
+        self.model = model
+        self.graph_builder = graph_builder
+        self.task_description = task_description
+        self.threshold = threshold
+        self.cutoff = cutoff
         self.graph_context_window = graph_context_window
         self._history: list[dict[str, Any]] = []
         self._finished = False
         self._context: dict[str, Any] = {}
+        self._executor: object | None = None
 
     def should_run(self) -> bool:
         return bool(self._context)
 
     def is_running(self) -> bool:
-        return not self._finished
+        return not self._finished and self._executor is not None
 
     def start_async_if_ready(self) -> bool:
-        """Synchronous stub matching Priority Map's expected API.
+        """Synchronous compatibility stub — the runner calls this during construction.
 
-        Priority Map calls this synchronously during construction.
-        We defer actual LLM calls to update_priorities.
+        We defer actual LLM work to update_priorities.
         """
         return True
 
@@ -298,7 +312,11 @@ class _GraphAgent:
         return self._finished
 
     def update_priorities(self, scores: dict[str, float]) -> None:
-        """Call Logical LLM to update graph context and adjust scores."""
+        """Call Logical LLM to update graph context and adjust scores.
+
+        Applies results through graph-builder score-update methods and
+        marks prompted nodes reviewed.
+        """
         import json
 
         self._history.append({"scores": dict(scores), "context": dict(self._context)})
@@ -318,11 +336,10 @@ class _GraphAgent:
             )
             response = self.llm_client.chat(
                 prompt,
-                model=self.model,
+                model=self.model or None,
                 **{k: v for k, v in generation_settings.items() if v is not None},
             )
             text = response.text.strip()
-            # Strip markdown fences if present
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1]
                 if text.endswith("```"):
@@ -342,6 +359,17 @@ class _GraphAgent:
                         scores[label_str] += float(offset)
                     except (TypeError, ValueError):
                         pass
+
+        # Update graph scores through graph-builder if available
+        if self.graph_builder is not None:
+            try:
+                if hasattr(self.graph_builder, "update_scores"):
+                    self.graph_builder.update_scores(scores)
+                # Mark prompted nodes as reviewed
+                if hasattr(self.graph_builder, "mark_reviewed"):
+                    self.graph_builder.mark_reviewed(list(scores.keys()))
+            except Exception:
+                pass
         self._finished = True
 
     def get_context(self) -> dict[str, Any]:
@@ -470,10 +498,11 @@ class PriorityMapAdapter:
         try:
             # Scene understanding uses the Visual LLM and its generation settings
             visual_gen = settings.get("visual_llm_generation") or settings.get("llm_generation") or {}
+            visual_alias = str(settings.get("visual_model_alias") or "visual-model")
             priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
                 visual_llm_client or llm_client,
                 configured_prompts=settings.get("prompts", []),
-                model=settings.get("scene_model") or "visual-model",
+                model=visual_alias,
                 llm_generation=visual_gen,
                 debug=bool(settings.get("debug", False)),
             )
@@ -484,15 +513,15 @@ class PriorityMapAdapter:
             )
             # Substitute GraphAgent if the module exposes it
             if original_graph is not None:
-                # Build a GraphAgent instance from saved Logical LLM settings
                 logical_gen = settings.get("llm_generation") or {}
-                graph_agent_instance = _GraphAgent(
+                logical_alias = str(settings.get("logical_model_alias") or "")
+                # Pass the runner's constructor kwargs through to _GraphAgent
+                priority_runner.GraphAgent = lambda **kwargs: _GraphAgent(
                     llm_client,
-                    model=settings.get("scene_model") or "local-model",
+                    model=logical_alias,
                     llm_generation=logical_gen,
+                    **kwargs,
                 )
-                priority_runner.GraphAgent = lambda **kwargs: graph_agent_instance
-
             graph_agent_arg = graph_agent if graph_agent is not None else bool(settings.get("graph_agent", False))
             return runner_class(
                 image_folder=image_folder,

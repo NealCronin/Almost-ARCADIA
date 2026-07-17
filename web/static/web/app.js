@@ -132,62 +132,78 @@
     draftCheckbox?.addEventListener('change', updateDraftFields);
     updateDraftFields();
 
-    // Dirty tracking
-    let isDirty = false;
+    // Dirty tracking per role
+    const dirtyMap = window.__arcadiaDirtyForms = window.__arcadiaDirtyForms || {};
+    dirtyMap[role] = false;
     const allInputs = qsa('input, select, textarea', llmForm);
     allInputs.forEach((el) => {
-      el.addEventListener('change', () => { isDirty = true; });
-      el.addEventListener('input', () => { isDirty = true; });
+      el.addEventListener('change', () => { dirtyMap[role] = true; });
+      el.addEventListener('input', () => { dirtyMap[role] = true; });
     });
+  });
 
-    // Test chat button
-    const testBtn = qs('[data-test-chat]', llmForm);
-    if (testBtn) {
-      testBtn.addEventListener('click', async () => {
-        if (isDirty) {
-          alert('Save changes before testing.');
-          return;
-        }
-        const originalText = testBtn.textContent;
-        testBtn.textContent = 'Testing…';
-        testBtn.disabled = true;
+  // ======== Test chat — initialize all [data-test-chat-component] ========
+  qsa('[data-test-chat-component]').forEach((component) => {
+    const role = component.dataset.role || 'llm';
+    const testBtn = qs('[data-test-chat]', component);
+    if (!testBtn) return;
+    const testUrl = component.dataset.testUrl || '';
 
-        try {
-          const url = role === 'llm'
-            ? '/client/priority-map/models/test-llm-chat/'
-            : '/client/priority-map/models/test-visual-llm-chat/';
-          const formData = new FormData();
-          const promptEl = qs('[data-test-prompt]', llmForm);
-          formData.append('prompt', promptEl?.value || '');
-          const imageEl = qs('[data-test-image]', llmForm);
-          if (imageEl?.files?.length) {
-            formData.append('image', imageEl.files[0]);
+    testBtn.addEventListener('click', async () => {
+      const dirtyMap = window.__arcadiaDirtyForms || {};
+      // Check dirty state: for logical role check logical form; for visual check both
+      const isLogicalDirty = dirtyMap['llm'] === true;
+      const isVisualDirty = dirtyMap['visual_llm'] === true;
+      if (role === 'visual_llm' && isLogicalDirty) {
+        alert('Save Logical LLM changes before testing Visual chat.');
+        return;
+      }
+      if (dirtyMap[role]) {
+        alert('Save changes before testing.');
+        return;
+      }
+
+      const originalText = testBtn.textContent;
+      testBtn.textContent = 'Testing…';
+      testBtn.disabled = true;
+
+      try {
+        if (!testUrl) throw new Error('No test endpoint configured.');
+        const formData = new FormData();
+        const promptEl = qs('[data-test-prompt]', component);
+        formData.append('prompt', promptEl?.value || '');
+        const imageEl = qs('[data-test-image]', component);
+        // Visual roles require an image
+        if (role === 'visual_llm') {
+          if (!imageEl?.files?.length) {
+            throw new Error('An image is required for visual chat.');
           }
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'X-CSRFToken': csrfToken(), 'Accept': 'application/json' },
-            body: formData,
-          });
-          const data = await response.json();
-          const resultEl = qs('[data-test-result]', llmForm);
-          if (resultEl) {
-            if (response.ok) {
-              resultEl.textContent = data.response || JSON.stringify(data);
-              resultEl.className = 'help-copy';
-            } else {
-              resultEl.textContent = data.error || 'Unknown error';
-              resultEl.className = 'inline-error';
-            }
-          }
-        } catch (error) {
-          const resultEl = qs('[data-test-result]', llmForm);
-          if (resultEl) { resultEl.textContent = error.message || 'Request failed'; resultEl.className = 'inline-error'; }
-        } finally {
-          testBtn.textContent = originalText;
-          testBtn.disabled = false;
+          formData.append('image', imageEl.files[0]);
         }
-      });
-    }
+        const response = await fetch(testUrl, {
+          method: 'POST',
+          headers: { 'X-CSRFToken': csrfToken(), 'Accept': 'application/json' },
+          body: formData,
+        });
+        const data = await response.json();
+        const resultEl = qs('[data-test-result]', component);
+        if (resultEl) {
+          if (response.ok) {
+            resultEl.textContent = data.response || JSON.stringify(data);
+            resultEl.className = 'help-copy';
+          } else {
+            resultEl.textContent = data.error || 'Unknown error';
+            resultEl.className = 'inline-error';
+          }
+        }
+      } catch (error) {
+        const resultEl = qs('[data-test-result]', component);
+        if (resultEl) { resultEl.textContent = error.message || 'Request failed'; resultEl.className = 'inline-error'; }
+      } finally {
+        testBtn.textContent = originalText;
+        testBtn.disabled = false;
+      }
+    });
   });
 
   // Compute nodes

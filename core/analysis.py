@@ -240,6 +240,20 @@ class AnalysisCoordinator:
                     settings["llm_generation"] = gen
                     settings["visual_llm_generation"] = gen
 
+                # Pass model aliases for the adapter
+                if logical_service:
+                    settings["logical_model_alias"] = logical_service.settings.get("model_alias", "")
+                if visual_mode == "separate":
+                    visual_service = config.priority_map.services.get("visual_llm")
+                    if visual_service:
+                        settings["visual_model_alias"] = visual_service.settings.get("model_alias", "visual-model")
+                    else:
+                        settings["visual_model_alias"] = "visual-model"
+                else:
+                    # Shared mode: Visual uses the same Logical alias
+                    if logical_service:
+                        settings["visual_model_alias"] = logical_service.settings.get("model_alias", "")
+
                 settings["output_directory"] = str(output_directory)
                 settings["input_path"] = input_path
                 self._set_status(stage="priority_map", message="Running Priority Map")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -27,9 +26,9 @@ from project.settings import BASE_DIR
 class LLMRuntime:
     """Translate one LLM spec into a native llama-server process.
 
-    llama-server generates CLI flags from field names; public server flags
-    use the native underscore spellings such as ``--ctx-size`` and
-    ``--chat-template``. The server exposes ``/v1/models``.
+    Flags use hyphenated native spellings such as ``--ctx-size`` and
+    ``--chat-template``. Readiness is checked at ``/health``; inference
+    uses the OpenAI-compatible ``/v1/chat/completions`` endpoint.
     """
 
     _download_locks: dict[str, threading.Lock] = {}
@@ -106,7 +105,9 @@ class LLMRuntime:
             if filename.lower().endswith(".gguf") and bool(PROJECTOR_RE.search(Path(filename).name)) == projector
         ]
         if pattern:
-            candidates = [filename for filename in candidates if fnmatch.fnmatchcase(Path(filename).name, pattern)]
+            candidates = [
+                filename for filename in candidates if fnmatch.fnmatch(Path(filename).name.lower(), pattern.lower())
+            ]
         if not candidates:
             kind = "projector" if projector else "model"
             raise ValueError(f"No usable {kind} GGUF matched the selected repository and pattern.")
@@ -168,15 +169,18 @@ class LLMRuntime:
             raise ValueError("Draft file pattern must be a string.")
         files = cls.list_repository_files(repo)
         filename = cls._select_file(files, pattern, projector=False)
-        resolved = cls._download_hf_model(repo, filename, "huggingface")
-        return str(Path(resolved))
+        shards = cls._resolve_split_or_single(filename, repo, "huggingface")
+        return shards[0]
 
     @classmethod
     def _resolve_split_or_single(cls, filepath: str, repo: str, cache_subdir: str) -> list[str]:
-        filename = Path(filepath).name
-        m = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", filename, re.IGNORECASE)
+        # Preserve repository-relative parent directory for nested paths like Q6/model-00001-of-00003.gguf
+        directory = str(Path(filepath).parent)
+        parent_prefix = f"{directory}/" if directory and directory != "." else ""
+        m = SPLIT_GGUF_RE.search(Path(filepath).name)
         if not m:
-            return [cls._download_hf_model(repo, filename, cache_subdir)]
+            return [cls._download_hf_model(repo, filepath, cache_subdir)]
+        filename = Path(filepath).name
         shard_num = int(m.group(1))
         total_shards = int(m.group(2))
         if shard_num != 1:
@@ -185,7 +189,7 @@ class LLMRuntime:
         all_files = cls.list_repository_files(repo)
         downloaded = []
         for i in range(1, total_shards + 1):
-            shard_name = f"{prefix}-{i:05d}-of-{total_shards:05d}.gguf"
+            shard_name = f"{parent_prefix}{prefix}-{i:05d}-of-{total_shards:05d}.gguf"
             if shard_name not in all_files:
                 raise ValueError(f"Split model missing shard {i}/{total_shards}: {shard_name}")
             downloaded.append(cls._download_hf_model(repo, shard_name, cache_subdir))
@@ -257,12 +261,10 @@ class LLMRuntime:
                 if value:
                     command.append("--mlock")
                 continue
-            # --flash-attn: tri-state: auto->omit, on->--flash-attn 1, off->omit
+            # --flash-attn: tri-state: emit auto/on/off exactly
             if flag == "--flash-attn":
-                if value in ("auto", ""):
-                    continue
-                if value in ("on", "1", True):
-                    command.extend([flag, "1"])
+                if value in ("auto", "on", "off"):
+                    command.extend([flag, str(value)])
                 continue
             command.extend([flag, str(value)])
         draft_path = cls._resolve_draft_path(settings)

@@ -40,7 +40,7 @@ DEFAULTS = {
     **DEFAULT_GENERATION,
 }
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$")
-SPLIT_GGUF_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
+SPLIT_GGUF_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
 PROJECTOR_RE = re.compile(r"mmproj|^projector", re.IGNORECASE)
 
 NATIVE_FLAGS = {
@@ -81,12 +81,16 @@ OWNED_FLAGS = (
     | set(DRAFT_FLAGS.values())
     | {
         "--model",
+        "-m",
         "--mmproj",
         "--host",
+        "-H",
         "--port",
         "--hf-repo",
         "--hf-file",
         "--bind-host",
+        "-ngl",
+        "--n-gpu-layers",
     }
 )
 DISALLOWED_ARGUMENTS = {
@@ -195,24 +199,38 @@ def validate_additional_server_arguments(args: list[str]) -> list[str]:
 
 
 def generation_settings(settings: Mapping[str, Any]) -> dict[str, float | int]:
-    values = dict(DEFAULT_GENERATION)
+    values: dict[str, Any] = dict(DEFAULT_GENERATION)
     values.setdefault("max_tokens", 1024)
     values.setdefault("repeat_penalty", 1.0)
     values.setdefault("presence_penalty", 0.0)
     values.setdefault("frequency_penalty", 0.0)
-    values.setdefault("seed", 0)
-    for key, default in values.items():
+
+    for key, default in list(values.items()):
         value = settings.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"{key} must be a finite number.")
         values[key] = int(value) if isinstance(default, int) else float(value)
-    if (
-        values["temperature"] < 0
-        or values["top_k"] < 0
-        or not 0 <= values["min_p"] <= 1
-        or not 0 < values["top_p"] <= 1
-    ):
-        raise ValueError("Generation settings are out of range.")
+
+    # Validate ranges
+    if values["temperature"] < 0:
+        raise ValueError("Temperature must be >= 0.")
+    if values["top_k"] < 0:
+        raise ValueError("Top K must be >= 0.")
+    if not (0 <= values["top_p"] <= 1):
+        raise ValueError("Top P must be between 0 and 1.")
+    if not (0 <= values["min_p"] <= 1):
+        raise ValueError("Min P must be between 0 and 1.")
+    if values["max_tokens"] <= 0:
+        raise ValueError("Max tokens must be positive.")
+    if values["repeat_penalty"] <= 0:
+        raise ValueError("Repeat penalty must be positive.")
+
+    # Seed: only include when explicitly configured; missing means random/backend default
+    if "seed" in settings and settings["seed"] is not None:
+        seed_value = settings["seed"]
+        if not isinstance(seed_value, int):
+            raise ValueError("Seed must be an integer.")
+        values["seed"] = seed_value
     return values
 
 
