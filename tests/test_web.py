@@ -248,6 +248,8 @@ def test_sam3_test_returns_segmented_png(config_path, monkeypatch):
     assert response["Content-Type"] == "image/png"
     assert response["X-Arcadia-Segment-Count"] == "1"
     assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    decoded = cv2.imdecode(np.frombuffer(response.content, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None
 
 
 @override_settings(ALLOWED_HOSTS=["testserver"])
@@ -336,6 +338,8 @@ def test_host_page_renders_and_saves_sam3_checkpoint_controls(config_path, tmp_p
     checkpoint.write_bytes(b"checkpoint")
 
     body = Client().get("/host/").content.decode()
+    assert "Applied device" in body
+    assert "Restart required" in body
     assert "SAM3 checkpoint" in body
     assert "Browse or upload" in body
     assert "Save checkpoint" in body
@@ -344,3 +348,20 @@ def test_host_page_renders_and_saves_sam3_checkpoint_controls(config_path, tmp_p
 
     assert response.status_code == 302
     assert ConfigStore(config_path).load().host_listener.sam3_checkpoint == str(checkpoint.resolve())
+
+
+def test_host_restart_requirement_compares_checkpoint_and_device():
+    from core.services.specs import ServiceStatus
+    from web.views import _sam_restart_required
+
+    running = ServiceStatus(
+        port=8090,
+        service_type="sam3",
+        running=True,
+        settings={"checkpoint": "/host/huggingface/models/sam3.pt", "device": "mps"},
+        log_path="",
+    )
+
+    assert not _sam_restart_required(running, "/host/huggingface/models/sam3.pt", "mps")
+    assert _sam_restart_required(running, "/host/huggingface/models/new.pt", "mps")
+    assert _sam_restart_required(running, "/host/huggingface/models/sam3.pt", "cpu")

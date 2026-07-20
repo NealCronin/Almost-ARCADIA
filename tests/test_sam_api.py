@@ -4,6 +4,7 @@ import base64
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from core.services.sam_runtime import create_app
@@ -43,6 +44,9 @@ def test_valid_prediction_returns_compact_png_masks():
     assert predictor.calls == [("person", 0.25)]
     assert payload["detections"][0]["label"] == "person"
     assert payload["detections"][0]["box"] == [0, 0, 4, 3]
+    assert payload["detections"][0]["centroid"] == [2.0, 1.5]
+    assert payload["image_width"] == 5
+    assert payload["image_height"] == 4
     assert cv2.imdecode(
         np.frombuffer(base64.b64decode(payload["detections"][0]["mask_png_base64"]), dtype=np.uint8),
         cv2.IMREAD_GRAYSCALE,
@@ -63,6 +67,28 @@ def test_predict_rejects_invalid_confidence_with_fastapi_detail():
     client, _predictor = client_with([])
 
     response = client.post("/v1/predict", json={"image_base64": encoded_image(), "text": "person", "confidence": 1.1})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]
+
+
+@pytest.mark.parametrize("confidence", (-0.01, 1.01))
+def test_predict_rejects_out_of_range_confidence(confidence):
+    client, _predictor = client_with([])
+
+    response = client.post(
+        "/v1/predict",
+        json={"image_base64": encoded_image(), "text": "person", "confidence": confidence},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]
+
+
+def test_predict_rejects_whitespace_only_search_text():
+    client, _predictor = client_with([])
+
+    response = client.post("/v1/predict", json={"image_base64": encoded_image(), "text": "   "})
 
     assert response.status_code == 422
     assert response.json()["detail"]
@@ -96,6 +122,10 @@ def test_predict_handles_empty_detections():
 
     assert response.status_code == 200
     assert response.json()["detections"] == []
+    payload = response.json()
+    assert base64.b64decode(payload["overlay_png_base64"])
+    assert payload["image_width"] == 5
+    assert payload["image_height"] == 4
 
 
 def test_predict_handles_multiple_masks_and_missing_boxes():
@@ -122,3 +152,28 @@ def test_predict_accepts_legacy_aliases_and_normalizes_them():
 
     assert response.status_code == 200
     assert predictor.calls == [("person", 0.25)]
+
+
+def test_service_shutdown_releases_predictor():
+    class CloseablePredictor(FakePredictor):
+        def __init__(self):
+            super().__init__([])
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    predictor = CloseablePredictor()
+    with TestClient(create_app("unused.pt", predictor=predictor)):
+        pass
+
+    assert predictor.closed is True
+
+
+def test_health_reports_applied_device_and_checkpoint():
+    predictor = FakePredictor([])
+    response = TestClient(create_app("/tmp/sam3.pt", predictor=predictor, device="cpu")).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["device"] == "cpu"
+    assert response.json()["checkpoint"] == "/tmp/sam3.pt"

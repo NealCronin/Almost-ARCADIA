@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from core.config import ConfiguredService, NodeConfig
 from core.services.specs import ServiceSpec
-from web.forms import LLMServiceForm, VisualLLMServiceForm
+from web.forms import LLMServiceForm, SAMServiceForm, VisualLLMServiceForm
 
 NODES = {
     "local": NodeConfig("local", "127.0.0.1"),
@@ -90,3 +90,20 @@ def test_legacy_cache_subdir_is_not_persisted():
     form = LLMServiceForm(llm_data(), nodes=NODES)
     assert form.is_valid(), form.errors
     assert "models_cache_subdir" not in form.to_spec().settings
+
+
+def test_sam_form_defaults_to_automatic_device():
+    form = SAMServiceForm(
+        {
+            "node": "gpu",
+            "inference_port": "8090",
+            "bind_host": "192.168.1.20",
+            "checkpoint": "/host/huggingface/models/sam3.pt",
+            "confidence": "0.25",
+            "additional_arguments": "",
+        },
+        nodes=NODES,
+    )
+
+    assert form.is_valid(), form.errors
+    assert form.to_spec().settings["device"] == "auto"

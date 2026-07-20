@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import logging
 import subprocess
 import sys
 import threading
@@ -16,6 +17,23 @@ from core.errors import ServiceStartupError
 from core.networking import validate_ipv4
 from core.services.sam_checkpoint import SAMCheckpointStore
 from core.services.specs import ServiceEndpoint, ServiceSpec
+
+logger = logging.getLogger(__name__)
+
+
+class SAM3Detection(BaseModel):
+    label: str
+    confidence: float
+    box: list[float] | None = None
+    centroid: list[float] | None = None
+    mask_png_base64: str | None = None
+
+
+class SAM3PredictResponse(BaseModel):
+    detections: list[SAM3Detection]
+    overlay_png_base64: str
+    image_width: int
+    image_height: int
 
 
 class SAM3PredictRequest(BaseModel):
@@ -66,7 +84,31 @@ def _decode_image(encoded: str):
     return image
 
 
-def _load_predictor(checkpoint: Path, confidence: float = 0.25) -> Any:
+def resolve_sam_device(requested: str, *, torch_module: Any | None = None) -> str:
+    """Resolve and validate the device on the compute host that loads SAM3."""
+    normalized = str(requested).strip().lower()
+    if normalized not in {"auto", "cuda", "mps", "cpu"}:
+        raise ValueError("SAM3 device must be one of: auto, cuda, mps, cpu.")
+    if torch_module is None:
+        try:
+            import torch as loaded_torch
+
+            torch_module = loaded_torch
+        except ImportError as exc:
+            raise RuntimeError("SAM3 requires PyTorch to select an inference device.") from exc
+    cuda_available = bool(getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)())
+    mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+    mps_available = bool(getattr(mps_backend, "is_available", lambda: False)())
+    if normalized == "auto":
+        return "cuda" if cuda_available else "mps" if mps_available else "cpu"
+    if normalized == "cuda" and not cuda_available:
+        raise ValueError("SAM3 device 'cuda' was selected, but CUDA is unavailable on this host.")
+    if normalized == "mps" and not mps_available:
+        raise ValueError("SAM3 device 'mps' was selected, but Apple MPS is unavailable on this host.")
+    return normalized
+
+
+def _load_predictor(checkpoint: Path, confidence: float = 0.25, device: str = "auto") -> Any:
     try:
         from ultralytics.models.sam import SAM3SemanticPredictor
     except ImportError as exc:
@@ -75,8 +117,10 @@ def _load_predictor(checkpoint: Path, confidence: float = 0.25) -> Any:
         raise ValueError("SAM3 checkpoint must be a .pt file.")
     if not checkpoint.is_file():
         raise FileNotFoundError(f"SAM3 checkpoint does not exist: {checkpoint}")
+    applied_device = resolve_sam_device(device)
     overrides = {
         "conf": confidence,
+        "device": applied_device,
         "task": "segment",
         "mode": "predict",
         "model": str(checkpoint),
@@ -84,25 +128,39 @@ def _load_predictor(checkpoint: Path, confidence: float = 0.25) -> Any:
         "save": False,
         "verbose": False,
     }
-    return _UltralyticsPredictor(SAM3SemanticPredictor(overrides=overrides))
+    wrapper = _UltralyticsPredictor(SAM3SemanticPredictor(overrides=overrides), applied_device)
+    wrapper.initialize()
+    return wrapper
 
 
 class _UltralyticsPredictor:
-    def __init__(self, predictor: Any) -> None:
+    def __init__(self, predictor: Any, device: str = "cpu") -> None:
         self.predictor = predictor
+        self.device = device
+        self.initialized = False
+
+    def initialize(self) -> None:
+        if getattr(self.predictor, "model", None) is None:
+            self.predictor.setup_model(verbose=False)
+        self.initialized = True
+
+    def close(self) -> None:
+        reset_image = getattr(self.predictor, "reset_image", None)
+        if callable(reset_image):
+            reset_image()
+        self.initialized = False
 
     def predict(self, image: Any, text: str, confidence: float) -> list[dict[str, Any]]:
         import numpy as np
 
-        if getattr(self.predictor, "model", None) is None:
-            self.predictor.setup_model(verbose=False)
+        self.initialize()
         if hasattr(self.predictor, "args"):
             self.predictor.args.conf = confidence
 
         # Ultralytics 8.4 SAM3 semantic inference requires set_image() before
         # calling the predictor with its text keyword.
-        self.predictor.set_image(image)
         try:
+            self.predictor.set_image(image)
             results = self.predictor(text=[text])
         finally:
             reset_image = getattr(self.predictor, "reset_image", None)
@@ -148,6 +206,7 @@ class SAMRuntime:
         if not checkpoint:
             raise ValueError("SAM3 service requires a checkpoint setting.")
         checkpoint_path = SAMCheckpointStore.validate_checkpoint_path(str(checkpoint))
+        device = resolve_sam_device(str(settings.get("device", "auto")))
         extra_args = settings.get("extra_args", [])
         if not isinstance(extra_args, list) or not all(isinstance(item, str) for item in extra_args):
             raise ValueError("SAM3 extra_args must be a list of strings.")
@@ -163,6 +222,8 @@ class SAMRuntime:
             str(checkpoint_path),
             "--confidence",
             str(settings.get("confidence", 0.25)),
+            "--device",
+            device,
         ] + extra_args
 
     @staticmethod
@@ -220,14 +281,20 @@ class SAMRuntime:
         return process, log_handle, cls.endpoint(spec, public_host)
 
 
-def create_app(checkpoint: str | Path, predictor: Any | None = None, confidence: float = 0.25):
+def create_app(
+    checkpoint: str | Path,
+    predictor: Any | None = None,
+    confidence: float = 0.25,
+    device: str = "auto",
+):
     from fastapi import FastAPI, HTTPException
 
     if not 0 <= confidence <= 1:
         raise ValueError("SAM3 confidence must be between 0.0 and 1.0.")
     checkpoint_path = Path(checkpoint).expanduser()
+    applied_device = resolve_sam_device(device)
     if predictor is None:
-        predictor = _load_predictor(checkpoint_path, confidence=confidence)
+        predictor = _load_predictor(checkpoint_path, confidence=confidence, device=applied_device)
     lock = threading.Lock()
     app = FastAPI(title="Almost ARCADIA SAM3 service")
 
@@ -242,6 +309,17 @@ def create_app(checkpoint: str | Path, predictor: Any | None = None, confidence:
         if not success:
             raise ValueError("SAM3 mask could not be encoded.")
         return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+    def centroid_from_mask(mask: Any) -> list[float] | None:
+        import numpy as np
+
+        array = np.asarray(mask, dtype=np.uint8).squeeze()
+        if array.ndim != 2 or array.size == 0:
+            return None
+        y_coords, x_coords = np.nonzero(array > 0)
+        if not len(x_coords):
+            return None
+        return [float(np.mean(x_coords)), float(np.mean(y_coords))]
 
     def render_overlay(image: Any, detections: list[dict[str, Any]]) -> str:
         import cv2
@@ -270,31 +348,59 @@ def create_app(checkpoint: str | Path, predictor: Any | None = None, confidence:
         return base64.b64encode(encoded.tobytes()).decode("ascii")
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ready", "service_type": "sam3"}
+    def health() -> dict[str, Any]:
+        try:
+            modified = checkpoint_path.stat().st_mtime_ns
+        except OSError:
+            modified = None
+        return {
+            "status": "ready",
+            "service_type": "sam3",
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_mtime_ns": modified,
+            "device": getattr(predictor, "device", applied_device),
+            "initialized": bool(getattr(predictor, "initialized", True)),
+        }
 
-    @app.post("/v1/predict")
-    def predict(request: SAM3PredictRequest) -> dict[str, Any]:
+    @app.on_event("shutdown")
+    def shutdown_predictor() -> None:
+        close = getattr(predictor, "close", None)
+        if callable(close):
+            close()
+
+    @app.post("/v1/predict", response_model=SAM3PredictResponse)
+    def predict(request: SAM3PredictRequest) -> SAM3PredictResponse:
         try:
             image = _decode_image(request.image_base64)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
             with lock:
                 raw_detections = predictor.predict(image, request.text, request.confidence)
             if not isinstance(raw_detections, list):
                 raise RuntimeError("SAM predictor returned an invalid result.")
             detections = [
-                {
-                    "label": str(detection.get("label", request.text)),
-                    "confidence": float(detection.get("confidence", request.confidence)),
-                    "box": detection.get("box"),
-                    "mask_png_base64": encode_mask(detection.get("mask")),
-                }
+                SAM3Detection(
+                    label=str(detection.get("label", request.text)),
+                    confidence=float(detection.get("confidence", request.confidence)),
+                    box=detection.get("box"),
+                    centroid=centroid_from_mask(detection.get("mask")),
+                    mask_png_base64=encode_mask(detection.get("mask")),
+                )
                 for detection in raw_detections
                 if isinstance(detection, dict)
             ]
-            return {"detections": detections, "overlay_png_base64": render_overlay(image, raw_detections)}
-        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            height, width = image.shape[:2]
+            return SAM3PredictResponse(
+                detections=detections,
+                overlay_png_base64=render_overlay(image, raw_detections),
+                image_width=int(width),
+                image_height=int(height),
+            )
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
+            logger.exception("SAM3 inference failed")
             raise HTTPException(status_code=500, detail=f"SAM3 inference failed: {exc}") from exc
 
     return app
@@ -306,10 +412,15 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--confidence", type=float, default=0.25)
+    parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     args = parser.parse_args()
     import uvicorn
 
-    uvicorn.run(create_app(args.checkpoint, confidence=args.confidence), host=args.host, port=args.port)
+    uvicorn.run(
+        create_app(args.checkpoint, confidence=args.confidence, device=args.device),
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":

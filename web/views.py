@@ -23,7 +23,7 @@ from core.services.instruction_client import InstructionClient
 from core.services.llm_runtime import LLMRuntime
 from core.services.llm_settings import PROJECTOR_RE, generation_settings, parse_hf_source, validate_llm_settings
 from core.services.sam_checkpoint import SAMCheckpointStore
-from core.services.specs import ServiceEndpoint, ServiceSpec, ServiceType
+from core.services.specs import ServiceEndpoint, ServiceSpec, ServiceStatus, ServiceType
 from web.artifacts import ArtifactStore
 from web.forms import (
     AnalysisForm,
@@ -63,6 +63,8 @@ def _service_form(name: str, config: AppConfig, data: Any = None):
     form.initial_from(config.priority_map.services.get(name))
     if name == "sam3" and "checkpoint" not in form.initial and config.host_listener.sam3_checkpoint:
         form.initial["checkpoint"] = config.host_listener.sam3_checkpoint
+    if name == "sam3" and "device" not in form.initial:
+        form.initial["device"] = config.host_listener.sam3_device
     return form
 
 
@@ -446,6 +448,17 @@ def service_logs(request: HttpRequest, port: int) -> HttpResponse:
         return HttpResponse(str(exc), status=502, content_type="text/plain")
 
 
+def _sam_restart_required(running: ServiceStatus | None, checkpoint: str, device: str) -> bool:
+    """Compare the host's saved SAM3 settings with its running process settings."""
+    return bool(
+        running
+        and (
+            str(running.settings.get("checkpoint", "")) != checkpoint
+            or str(running.settings.get("device", "auto")) != device
+        )
+    )
+
+
 @require_GET
 def nodes(request: HttpRequest) -> HttpResponse:
     runtime = get_runtime()
@@ -459,16 +472,26 @@ def nodes(request: HttpRequest) -> HttpResponse:
         if checkpoint_path.is_file() and checkpoint_path.suffix.lower() == ".pt"
         else "Configured checkpoint is missing or is not a .pt file."
     )
+    services = runtime.controller.list_services()
+    running_sam = next((service for service in services if service.service_type == "sam3" and service.running), None)
+    loaded_checkpoint = str(running_sam.settings.get("checkpoint", "")) if running_sam else ""
+    applied_device = str(running_sam.settings.get("device", "auto")) if running_sam else ""
+    restart_required = _sam_restart_required(running_sam, checkpoint, config.host_listener.sam3_device)
     return render(
         request,
         "web/nodes.html",
         {
             "form": HostListenerForm(initial=config.host_listener.to_dict()),
-            "sam_checkpoint_form": HostSAMCheckpointForm(initial={"checkpoint": checkpoint}),
+            "sam_checkpoint_form": HostSAMCheckpointForm(
+                initial={"checkpoint": checkpoint, "device": config.host_listener.sam3_device}
+            ),
             "sam_checkpoint_status": checkpoint_status,
             "sam_checkpoint_ready": checkpoint_path is not None
             and checkpoint_path.is_file()
             and checkpoint_path.suffix.lower() == ".pt",
+            "sam_loaded_checkpoint": loaded_checkpoint,
+            "sam_applied_device": applied_device,
+            "sam_restart_required": restart_required,
             "listener": runtime.host_listener.status(),
         },
     )
@@ -485,6 +508,7 @@ def save_host_listener(request: HttpRequest) -> HttpResponse:
         previous = config.host_listener
         replacement = form.to_config()
         replacement.sam3_checkpoint = previous.sam3_checkpoint
+        replacement.sam3_device = previous.sam3_device
         replacement.extra = copy.deepcopy(previous.extra)
         try:
             runtime.host_listener.restart(replacement, rollback_config=previous)
@@ -520,6 +544,7 @@ def save_host_sam3_checkpoint(request: HttpRequest) -> HttpResponse:
     with runtime.config_lock:
         config = runtime.config_store.load()
         config.host_listener.sam3_checkpoint = form.cleaned_data["checkpoint"]
+        config.host_listener.sam3_device = form.cleaned_data["device"] or config.host_listener.sam3_device
         runtime.config_store.save(config)
     messages.success(request, "SAM3 checkpoint configuration saved.")
     return redirect("host")

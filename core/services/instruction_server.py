@@ -16,7 +16,7 @@ from core.storage import state_child
 
 
 def _validate_remote_sam_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"checkpoint", "bind_host", "confidence", "extra_args", "startup_timeout"}
+    allowed = {"checkpoint", "bind_host", "confidence", "device", "extra_args", "startup_timeout"}
     unknown = set(settings) - allowed
     if unknown:
         raise ValueError(f"Unknown remote SAM3 settings: {', '.join(sorted(unknown))}.")
@@ -27,11 +27,15 @@ def _validate_remote_sam_settings(settings: dict[str, Any]) -> dict[str, Any]:
     confidence = float(settings.get("confidence", 0.25))
     if not 0 <= confidence <= 1:
         raise ValueError("SAM3 confidence must be between 0 and 1.")
+    from core.services.sam_runtime import resolve_sam_device
+
+    device = resolve_sam_device(str(settings.get("device", "auto")))
     return {
         "checkpoint": checkpoint,
         "bind_host": validate_ipv4(str(settings.get("bind_host", "127.0.0.1")), label="SAM3 bind host"),
         "confidence": confidence,
         "extra_args": validate_additional_server_arguments(settings.get("extra_args", [])),
+        "device": device,
         **({"startup_timeout": float(settings["startup_timeout"])} if "startup_timeout" in settings else {}),
     }
 

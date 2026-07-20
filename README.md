@@ -164,12 +164,13 @@ Configure a real SAM3 checkpoint in the SAM3 card. The card now includes **Test 
 ### Manual SAM3 integration procedure
 
 1. On the compute host, activate `almost-arcadia`, run migrations if needed, then start the Host Django app with `python manage.py runserver <host-ip>:8000`.
-2. Open **Host**, use **Browse or upload** to stream `sam3.pt` to that host, then click **Save checkpoint**. Confirm the status is **Ready**.
-3. Open **Model Settings**, select that host, save the SAM3 configuration using the uploaded checkpoint, then run **Test SAM3**. This starts the service if necessary.
-4. Confirm `GET http://<host-ip>:8090/health` returns `{"status":"ready","service_type":"sam3"}`.
-5. Upload a JPEG, PNG, or WebP test image, enter a non-empty search term, and confirm the segmented PNG is displayed and downloadable.
-6. From a remote client, configure the remote node, upload `sam3.pt` through Model Settings, save SAM3 settings, and repeat the image test.
-7. On the selected host, confirm the checkpoint is in `huggingface/models/` and that neither project-level `workspace/` nor `uploads/` was created.
+2. Open **Host**, use **Browse or upload** to stream `sam3.pt` to that host, choose `auto` (or a verified `cuda` device), and click **Save checkpoint**. Confirm the checkpoint is **Ready**.
+3. Open **Model Settings**, select that host, save the SAM3 configuration using the uploaded checkpoint and device, then run **Test SAM3**. This loads one warm semantic predictor and starts the service if necessary.
+4. Confirm `GET http://<host-ip>:8090/health` reports `status: ready`, the applied checkpoint, and the applied device.
+5. Upload a JPEG, PNG, or WebP photo, search for `person`, and confirm one inference pass produces a displayed, downloadable overlay PNG.
+6. Stop SAM3 from Model Settings and confirm the Host page reports no loaded predictor.
+7. From a remote client, configure the remote node, upload `sam3.pt` through Model Settings, save SAM3 settings, and repeat the photo test.
+8. On the selected host, confirm the checkpoint is in `huggingface/models/` and that neither project-level `workspace/` nor `uploads/` was created.
 
 ## Run an analysis
 

@@ -88,6 +88,8 @@ class SAMCheckpointStore:
                     if total > cls.max_bytes():
                         raise ValueError(f"Checkpoint exceeds the {cls.max_bytes()}-byte upload limit.")
                     handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
             if expected_size is not None and total != expected_size:
                 raise ValueError(f"Checkpoint upload was incomplete: expected {expected_size} bytes, received {total}.")
             os.replace(temporary, target)
@@ -116,6 +118,8 @@ class SAMCheckpointStore:
                     if total > cls.max_bytes():
                         raise ValueError(f"Checkpoint exceeds the {cls.max_bytes()}-byte upload limit.")
                     handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
             if expected_size is not None and total != expected_size:
                 raise ValueError(f"Checkpoint upload was incomplete: expected {expected_size} bytes, received {total}.")
             os.replace(temporary, target)

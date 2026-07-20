@@ -20,6 +20,7 @@ class HostListenerConfig:
     host: str = "127.0.0.1"
     port: int = 9000
     sam3_checkpoint: str = ""
+    sam3_device: str = "auto"
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -31,9 +32,20 @@ class HostListenerConfig:
             raise ConfigurationError("Host listener port must be an integer between 1 and 65535.")
         self.sam3_checkpoint = str(self.sam3_checkpoint).strip()
 
+        self.sam3_device = str(self.sam3_device).strip().lower()
+        if self.sam3_device not in {"auto", "cuda", "mps", "cpu"}:
+            raise ConfigurationError("Host SAM3 device must be auto, cuda, mps, or cpu.")
+
     def to_dict(self) -> dict[str, Any]:
         result = copy.deepcopy(self.extra)
-        result.update({"host": self.host, "port": self.port, "sam3_checkpoint": self.sam3_checkpoint})
+        result.update(
+            {
+                "host": self.host,
+                "port": self.port,
+                "sam3_checkpoint": self.sam3_checkpoint,
+                "sam3_device": self.sam3_device,
+            }
+        )
         return result
 
     @classmethod
@@ -42,11 +54,12 @@ class HostListenerConfig:
             return cls()
         if not isinstance(data, dict):
             raise ConfigurationError("Host listener configuration must be an object.")
-        known = {"host", "port", "sam3_checkpoint"}
+        known = {"host", "port", "sam3_checkpoint", "sam3_device"}
         return cls(
             host=data.get("host", "127.0.0.1"),
             port=data.get("port", 9000),
             sam3_checkpoint=data.get("sam3_checkpoint", ""),
+            sam3_device=data.get("sam3_device", "auto"),
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 

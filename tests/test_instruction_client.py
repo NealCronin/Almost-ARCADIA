@@ -76,7 +76,7 @@ def test_upload_sam_checkpoint_streams_raw_file(monkeypatch):
             return None
 
         def json(self):
-            return {"path": "C:/arcadia/workspace/huggingface/models/sam3.pt", "size_bytes": 4}
+            return {"path": "C:/arcadia/huggingface/models/sam3.pt", "size_bytes": 4}
 
     def fake_post(url: str, **kwargs: Any):
         observed["url"] = url

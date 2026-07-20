@@ -40,3 +40,18 @@ def test_checkpoint_upload_enforces_size_limit(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="upload limit"):
         SAMCheckpointStore.save_chunks([b"four"], "sam3.pt")
+
+
+def test_checkpoint_partial_file_is_removed_when_stream_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCADIA_HUGGINGFACE_DIR", str(tmp_path / "huggingface"))
+
+    def failing_chunks():
+        yield b"partial"
+        raise OSError("stream failed")
+
+    with pytest.raises(OSError, match="stream failed"):
+        SAMCheckpointStore.save_chunks(failing_chunks(), "sam3.pt")
+
+    directory = tmp_path / "huggingface" / "models"
+    assert not list(directory.glob("*.part"))
+    assert not (directory / "sam3.pt").exists()

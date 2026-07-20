@@ -59,6 +59,12 @@ class HostSAMCheckpointForm(forms.Form):
         required=False,
         widget=forms.TextInput(attrs={"readonly": "readonly", "placeholder": "Upload a .pt checkpoint"}),
     )
+    device = forms.ChoiceField(
+        label="Preferred SAM3 device",
+        choices=(("auto", "Automatic"), ("cuda", "CUDA"), ("mps", "Apple MPS"), ("cpu", "CPU")),
+        initial="auto",
+        required=False,
+    )
 
     def clean_checkpoint(self) -> str:
         value = self.cleaned_data["checkpoint"].strip()
@@ -313,6 +319,13 @@ class SAMServiceForm(NodeServiceForm):
         widget=forms.TextInput(attrs={"placeholder": ".../huggingface/models/sam3.pt"}),
     )
     confidence = forms.FloatField(label="Default confidence", min_value=0, max_value=1, initial=0.25)
+    device = forms.ChoiceField(
+        label="Inference device",
+        choices=(("auto", "Automatic"), ("cuda", "CUDA"), ("mps", "Apple MPS"), ("cpu", "CPU")),
+        initial="auto",
+        required=False,
+        help_text="Automatic prefers CUDA, then Apple MPS, then CPU on the selected compute host.",
+    )
     additional_arguments = forms.CharField(
         label="Additional SAM arguments",
         required=False,
@@ -334,6 +347,7 @@ class SAMServiceForm(NodeServiceForm):
                 "bind_host": self.cleaned_data["bind_host"],
                 "checkpoint": self.cleaned_data["checkpoint"].strip(),
                 "confidence": self.cleaned_data["confidence"],
+                "device": self.cleaned_data["device"] or "auto",
                 "extra_args": list(self.cleaned_data.get("additional_arguments", [])),
             },
         )
@@ -351,6 +365,7 @@ class SAMServiceForm(NodeServiceForm):
                 ),
                 "checkpoint": settings.get("checkpoint", ""),
                 "confidence": settings.get("confidence", 0.25),
+                "device": settings.get("device", "auto"),
                 "additional_arguments": shlex.join(settings.get("extra_args", []))
                 if isinstance(settings.get("extra_args"), list)
                 else "",
