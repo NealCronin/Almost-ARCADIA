@@ -1,39 +1,11 @@
 {% extends 'web/base.html' %}
 {% block title %}Almost ARCADIA{% endblock %}
-{% block navigation %}{% endblock %}
-{% block page_class %}landing-page{% endblock %}
 {% block content %}
-<section class="landing" aria-labelledby="landing-title">
-  <div class="landing__brand">
-    <span class="landing__eyebrow">Distributed visual intelligence</span>
-    <h1 id="landing-title">Almost ARCADIA</h1>
-    <p>Choose how this computer will participate. Run tools from the Client portal or configure trusted compute hosts.</p>
-  </div>
-
-  <div class="portal-grid">
-    <a class="portal-card portal-card--client" href="{% url 'client' %}">
-      <span class="portal-card__icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="3"/></svg>
-      </span>
-      <span class="portal-card__copy">
-        <strong>Client</strong>
-        <span>Upload or select source data, configure Priority Map, follow live processing, and review outputs.</span>
-      </span>
-      <span class="portal-card__arrow" aria-hidden="true">→</span>
-    </a>
-
-    <a class="portal-card portal-card--host" href="{% url 'host' %}">
-      <span class="portal-card__icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg>
-      </span>
-      <span class="portal-card__copy">
-        <strong>Host</strong>
-        <span>Configure this computer and trusted LAN or VPN machines that provide model inference.</span>
-      </span>
-      <span class="portal-card__arrow" aria-hidden="true">→</span>
-    </a>
-  </div>
-
-  <p class="landing__footnote">Single-user research prototype · trusted networks only</p>
-</section>
+<header class="page-heading">
+  <div><p class="eyebrow">Research pipeline</p><h1>Almost ARCADIA</h1><p class="page-heading__copy">Configure local or remote model services, run Priority Map on the client, and keep outputs and logs local.</p></div>
+</header>
+<div class="portal-grid">
+  <a class="portal-card portal-card--client" href="{% url 'client' %}"><div><p class="eyebrow">Presentation plane</p><h2>Client</h2><p>Configure models, stage media, run analysis, and inspect artifacts.</p></div><span class="portal-card__arrow">→</span></a>
+  <a class="portal-card portal-card--host" href="{% url 'host' %}"><div><p class="eyebrow">Control plane</p><h2>Host</h2><p>Expose this computer's instruction server to a trusted LAN or VPN.</p></div><span class="portal-card__arrow">→</span></a>
+</div>
 {% endblock %}

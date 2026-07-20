@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Sequence
+from typing import Any
 
 import cv2
 import numpy as np
@@ -13,59 +13,77 @@ from core.services.specs import ServiceEndpoint
 
 
 class SAMClient:
-    """Call an already-running serialized SAM3 HTTP service."""
-
-    def __init__(self, endpoint: ServiceEndpoint, timeout: float = 120.0) -> None:
-        if endpoint.service_type != "sam3":
-            raise ValueError("SAMClient requires a sam3 endpoint.")
+    def __init__(self, endpoint: ServiceEndpoint, timeout: float = 180.0) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
 
     def segment(
         self,
         frame: np.ndarray,
-        prompts: Sequence[str],
-        confidence: float = 0.25,
+        prompts: list[str],
         *,
+        confidence: float = 0.25,
         resize: tuple[int, int] | None = None,
     ) -> SegmentationResult:
-        normalized_prompts = [str(prompt).strip() for prompt in prompts if str(prompt).strip()]
-        if not normalized_prompts:
-            raise ValueError("at least one SAM prompt is required")
         if not 0 <= confidence <= 1:
-            raise ValueError("confidence must be between 0 and 1")
+            raise InferenceError("SAM3 confidence must be between 0.0 and 1.0.", service_type="sam3")
+        search_terms = list(
+            dict.fromkeys(prompt.strip() for prompt in prompts if isinstance(prompt, str) and prompt.strip())
+        )
+        if not search_terms:
+            raise InferenceError("SAM3 requires at least one non-empty search term.", service_type="sam3")
         image = frame
         if resize is not None:
-            width, height = resize
-            if width < 1 or height < 1:
-                raise ValueError("SAM resize dimensions must be positive")
-            image = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            image = cv2.resize(frame, resize, interpolation=cv2.INTER_AREA)
         success, encoded = cv2.imencode(".jpg", image)
         if not success:
-            raise InferenceError("Failed to encode frame for SAM inference.", service_type="sam3")
+            raise InferenceError("Could not encode a frame for SAM3.", service_type="sam3")
         image_base64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+        masks: list[Any] = []
+        labels: list[str] = []
+        confidences: list[float] = []
+        bounding_boxes: list[Any] = []
         try:
-            response = requests.post(
-                f"{self.endpoint.base_url}/v1/predict",
-                json={"image": image_base64, "prompts": normalized_prompts, "confidence": confidence},
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            raise InferenceError(f"SAM request failed: {exc}", service_type="sam3") from exc
-        if not isinstance(payload, dict):
-            raise InferenceError("SAM response must be a JSON object.", service_type="sam3")
-        try:
-            confidences = [float(value) for value in (payload.get("confidences") or payload.get("scores") or [])]
-            labels = [str(value) for value in (payload.get("labels") or [])]
-            masks = list(payload.get("masks") or [])
-            boxes = list(payload.get("bounding_boxes") or payload.get("boxes") or payload.get("bbox") or [])
-        except (TypeError, ValueError) as exc:
-            raise InferenceError("SAM response contains invalid result arrays.", service_type="sam3") from exc
+            for text in search_terms:
+                response = requests.post(
+                    f"{self.endpoint.base_url}/v1/predict",
+                    json={"image_base64": image_base64, "text": text, "confidence": confidence},
+                    timeout=self.timeout,
+                )
+                if not response.ok:
+                    raise InferenceError(
+                        f"SAM3 inference failed at {self.endpoint.base_url}: "
+                        f"HTTP {response.status_code}: {response.text}",
+                        service_type="sam3",
+                    )
+                payload: dict[str, Any] = response.json()
+                detections = payload.get("detections")
+                if not isinstance(detections, list):
+                    raise ValueError("SAM3 response did not contain a detections list.")
+                for detection in detections:
+                    if not isinstance(detection, dict):
+                        continue
+                    encoded_mask = detection.get("mask_png_base64")
+                    if not isinstance(encoded_mask, str):
+                        continue
+                    raw_mask = base64.b64decode(encoded_mask, validate=True)
+                    mask = cv2.imdecode(np.frombuffer(raw_mask, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                    if mask is None:
+                        raise ValueError("SAM3 response contained an invalid mask PNG.")
+                    masks.append((mask > 0).astype(np.uint8))
+                    labels.append(str(detection.get("label", text)))
+                    confidences.append(float(detection.get("confidence", confidence)))
+                    box = detection.get("box")
+                    bounding_boxes.append(box if isinstance(box, list) else [])
+        except InferenceError:
+            raise
+        except (requests.RequestException, TypeError, ValueError) as exc:
+            raise InferenceError(
+                f"SAM3 inference failed at {self.endpoint.base_url}: {exc}", service_type="sam3"
+            ) from exc
         return SegmentationResult(
             masks=masks,
             labels=labels,
             confidences=confidences,
-            bounding_boxes=boxes,
+            bounding_boxes=bounding_boxes,
         )

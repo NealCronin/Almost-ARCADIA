@@ -4,11 +4,14 @@ import json
 import shutil
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MethodType
 from typing import Any, Callable
 
 import cv2
+import networkx as nx
 import numpy as np
 
 from core.errors import AnalysisError
@@ -24,12 +27,18 @@ class PipelineResult:
     frames_processed: int = 0
 
 
+@dataclass(slots=True)
+class _SceneResult:
+    labels: dict[str, dict[str, Any]]
+    edge_intents: list[dict[str, str]]
+
+
 class _RemoteSceneUnderstanding:
     def __init__(
         self,
         llm_client: LLMClient,
         configured_prompts: list[str] | None = None,
-        model: str = "local-model",
+        model: str | None = None,
         llm_generation: dict[str, float | int] | None = None,
         debug: bool = False,
         **_: Any,
@@ -37,75 +46,61 @@ class _RemoteSceneUnderstanding:
         self.llm_client = llm_client
         self.configured_prompts = configured_prompts or []
         self.model = model
-        self.debug = debug
         self.llm_generation = llm_generation or {}
-        self.vocabulary: dict[str, float] = {}
+        self.debug = debug
 
     def get_labels(self, image: np.ndarray, task: str, recent_graph_context: dict[str, Any] | None = None):
         success, encoded = cv2.imencode(".jpg", image)
         if not success:
             raise AnalysisError("Could not encode a frame for LLM scene understanding.")
         prompt = (
-            "Return only JSON with this shape: "
+            "Return only JSON with shape "
             '{"labels":{"label":{"reasoning":"short reason","score":0,"edges":[]}}}. '
-            "For every label, score must be a numeric 0–100 mission-relevance score for the task, "
-            "not SAM, detection, or visual confidence. "
+            "Scores are numeric 0-100 mission relevance scores, not detector confidence. "
             f"Task: {task}. Recent graph context: {json.dumps(recent_graph_context or {})}"
         )
         response = self.llm_client.chat(
             prompt,
             images=[("image/jpeg", encoded.tobytes())],
             model=self.model,
-            temperature=float(self.llm_generation["temperature"]) if "temperature" in self.llm_generation else None,
-            top_k=int(self.llm_generation["top_k"]) if "top_k" in self.llm_generation else None,
-            min_p=float(self.llm_generation["min_p"]) if "min_p" in self.llm_generation else None,
-            top_p=float(self.llm_generation["top_p"]) if "top_p" in self.llm_generation else None,
+            temperature=float(self.llm_generation.get("temperature", 0.1)),
+            max_tokens=int(self.llm_generation.get("max_tokens", 1024)),
         )
+        text = response.text.strip().replace("```json", "").replace("```", "").strip()
         try:
-            payload = json.loads(response.text.strip().replace("```json", "").replace("```", "").strip())
+            payload = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise AnalysisError(f"LLM scene response was not JSON: {exc}") from exc
+            raise AnalysisError(f"Visual LLM scene response was not JSON: {exc}") from exc
         labels = payload.get("labels", payload)
         if not isinstance(labels, dict):
-            raise AnalysisError("LLM scene response must contain a labels object.")
+            raise AnalysisError("Visual LLM scene response must contain a labels object.")
+        allowed = {item.casefold() for item in self.configured_prompts}
         normalized: dict[str, dict[str, Any]] = {}
         edge_intents: list[dict[str, str]] = []
-        allowed = {prompt.lower() for prompt in self.configured_prompts}
         for raw_label, raw_info in labels.items():
             label = str(raw_label).strip()
-            if not label or not isinstance(raw_info, dict):
-                continue
-            if allowed and label.lower() not in allowed:
+            if not label or not isinstance(raw_info, dict) or (allowed and label.casefold() not in allowed):
                 continue
             try:
                 score = float(raw_info.get("score", 0))
             except (TypeError, ValueError):
                 score = 0.0
-            normalized[label] = {
-                "reasoning": str(raw_info.get("reasoning", "")),
-                "score": score,
-            }
+            normalized[label] = {"reasoning": str(raw_info.get("reasoning", "")), "score": score}
             for edge in raw_info.get("edges", []) or []:
-                if isinstance(edge, dict) and edge.get("text") and (edge.get("to_label") or edge.get("to_node_id")):
-                    item = {"source_label": label, "text": str(edge["text"])[:80]}
-                    if edge.get("to_label"):
-                        item["to_label"] = str(edge["to_label"])
-                    if edge.get("to_node_id"):
-                        item["to_node_id"] = str(edge["to_node_id"])
+                if not isinstance(edge, dict) or not edge.get("text"):
+                    continue
+                item = {"source_label": label, "text": str(edge["text"])[:80]}
+                if edge.get("to_label"):
+                    item["to_label"] = str(edge["to_label"])
+                if edge.get("to_node_id"):
+                    item["to_node_id"] = str(edge["to_node_id"])
+                if len(item) > 2:
                     edge_intents.append(item)
-        if not normalized:
-            return None
-        return _SceneResult(normalized, edge_intents)
-
-
-@dataclass(slots=True)
-class _SceneResult:
-    labels: dict[str, dict[str, Any]]
-    edge_intents: list[dict[str, str]]
+        return _SceneResult(normalized, edge_intents) if normalized else None
 
 
 class _RemoteSegment:
-    """Priority Map-compatible segmenter using remote SAM and local optical flow."""
+    """Priority Map-compatible segmenter using direct SAM3 and local optical flow."""
 
     FLOW_SCALE = 0.05
 
@@ -126,59 +121,47 @@ class _RemoteSegment:
         self.transform_dy = 0.0
 
     def close(self) -> None:
-        """Match Priority Map's segmenter lifecycle without a local predictor."""
+        return None
 
     def _get_flow_map(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if self.prev_gray is None:
             raise RuntimeError("Cannot calculate optical flow without a previous frame.")
-        current_gray_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        height, width = current_gray_full.shape[:2]
-        flow_size = (
-            max(1, int(width * self.FLOW_SCALE)),
-            max(1, int(height * self.FLOW_SCALE)),
-        )
-        current_gray = cv2.resize(current_gray_full, flow_size, interpolation=cv2.INTER_AREA)
-        previous_gray = cv2.resize(self.prev_gray, flow_size, interpolation=cv2.INTER_AREA)
-        initial_flow = np.zeros((*current_gray.shape, 2), dtype=np.float32)
-        flow = self.dis.calc(current_gray, previous_gray, initial_flow)
+        current_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        height, width = current_full.shape[:2]
+        flow_size = (max(1, int(width * self.FLOW_SCALE)), max(1, int(height * self.FLOW_SCALE)))
+        current = cv2.resize(current_full, flow_size, interpolation=cv2.INTER_AREA)
+        previous = cv2.resize(self.prev_gray, flow_size, interpolation=cv2.INTER_AREA)
+        flow = self.dis.calc(current, previous, np.zeros((*current.shape, 2), dtype=np.float32))
         flow = cv2.resize(flow, (width, height), interpolation=cv2.INTER_LINEAR)
         flow_x = np.asarray(flow[..., 0], dtype=np.float32) / self.FLOW_SCALE
         flow_y = np.asarray(flow[..., 1], dtype=np.float32) / self.FLOW_SCALE
         self.transform_dx = float(np.median(flow_x))
         self.transform_dy = float(np.median(flow_y))
-        x_coordinates, y_coordinates = np.meshgrid(np.arange(width), np.arange(height))
-        return (
-            (x_coordinates + flow_x).astype(np.float32),
-            (y_coordinates + flow_y).astype(np.float32),
-        )
+        x: Any
+        y: Any
+        x, y = np.meshgrid(np.arange(width), np.arange(height))
+        return (x + flow_x).astype(np.float32), (y + flow_y).astype(np.float32)
 
     @staticmethod
-    def _remap_centroid(
-        centroid: tuple[int, int] | None,
-        map_x: np.ndarray,
-        map_y: np.ndarray,
-    ) -> tuple[int, int] | None:
+    def _remap_centroid(centroid: tuple[int, int] | None, map_x: np.ndarray, map_y: np.ndarray):
         if centroid is None:
             return None
-        height, width = map_x.shape[:2]  # type: ignore[index]
+        height, width = map_x.shape[:2]
         x = max(0, min(width - 1, int(round(centroid[0]))))
         y = max(0, min(height - 1, int(round(centroid[1]))))
         new_x = int(round(x - (map_x[y, x] - x)))
         new_y = int(round(y - (map_y[y, x] - y)))
-        return (
-            max(0, min(width - 1, new_x)),
-            max(0, min(height - 1, new_y)),
-        )
+        return max(0, min(width - 1, new_x)), max(0, min(height - 1, new_y))
 
     def _propagate(self, image: np.ndarray) -> None:
         if self.prev_gray is None:
             return
         map_x, map_y = self._get_flow_map(image)
-        height, width = image.shape[:2]  # type: ignore[index]
+        height, width = image.shape[:2]
         for segmentation in self.segmentations:
             mask = np.asarray(segmentation.mask, dtype=np.uint8)
             if mask.shape[:2] != (height, width):
-                mask = np.asarray(cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8)
+                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
             segmentation.mask = cv2.remap(
                 mask,
                 map_x,
@@ -192,55 +175,44 @@ class _RemoteSegment:
     @staticmethod
     def _score_for(label: str, scene_dict: dict[str, Any]) -> float:
         value = scene_dict.get(label, {})
-        if isinstance(value, dict):
-            try:
-                return float(value.get("score", 0.0))
-            except (TypeError, ValueError):
-                return 0.0
-        return 0.0
+        try:
+            return float(value.get("score", 0.0)) if isinstance(value, dict) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
 
     def _replace_with_remote_results(self, image: np.ndarray, scene_dict: dict[str, Any]) -> float:
         from priority_map.modules.Segment import Segmentation
 
         prompts = [str(label).strip() for label in scene_dict if str(label).strip()]
         if not prompts:
+            self.segmentations = []
             return 0.0
         started = time.perf_counter()
-        result = self.sam_client.segment(
-            image,
-            prompts,
-            confidence=self.sam_thresh,
-            resize=self.sam_resize,
-        )
+        result = self.sam_client.segment(image, prompts, confidence=self.sam_thresh, resize=self.sam_resize)
         elapsed = time.perf_counter() - started
-        height, width = image.shape[:2]  # type: ignore[index]
+        height, width = image.shape[:2]
         replacement: list[Any] = []
         for index, raw_mask in enumerate(result.masks):
-            mask = np.asarray(raw_mask, dtype=np.uint8)
-            if mask.ndim > 2:
-                mask = np.squeeze(mask)
+            mask = np.asarray(raw_mask, dtype=np.uint8).squeeze()
             if mask.shape[:2] != (height, width):
-                mask = np.asarray(cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8)
+                mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
             label = result.labels[index] if index < len(result.labels) else prompts[min(index, len(prompts) - 1)]
             if label not in scene_dict:
                 label = prompts[min(index, len(prompts) - 1)]
             centroid = None
-            if index < len(result.bounding_boxes):
+            if index < len(result.bounding_boxes) and len(result.bounding_boxes[index]) >= 4:
                 box = result.bounding_boxes[index]
-                if len(box) >= 4:
-                    x_scale = width / self.sam_resize[0] if self.sam_resize else 1.0
-                    y_scale = height / self.sam_resize[1] if self.sam_resize else 1.0
-                    centroid = (
-                        max(0, min(width - 1, int(round((float(box[0]) + float(box[2])) * x_scale / 2)))),
-                        max(0, min(height - 1, int(round((float(box[1]) + float(box[3])) * y_scale / 2)))),
-                    )
+                x_scale = width / self.sam_resize[0] if self.sam_resize else 1.0
+                y_scale = height / self.sam_resize[1] if self.sam_resize else 1.0
+                centroid = (
+                    max(0, min(width - 1, int(round((float(box[0]) + float(box[2])) * x_scale / 2)))),
+                    max(0, min(height - 1, int(round((float(box[1]) + float(box[3])) * y_scale / 2)))),
+                )
             replacement.append(
                 Segmentation(
                     mask=mask,
                     label=label,
                     id="",
-                    # Priority Map defines this as scene_dict[label]["score"], a semantic priority score,
-                    # not SAM confidence.
                     score=self._score_for(label, scene_dict),
                     centroid=centroid,
                     geo_pos=None,
@@ -253,147 +225,184 @@ class _RemoteSegment:
         from priority_map.modules.Segment import SegmentationResult
 
         self._propagate(image)
-        sam3_seconds = self._replace_with_remote_results(image, scene_dict) if scene_dict is not None else 0.0
+        sam_seconds = self._replace_with_remote_results(image, scene_dict) if scene_dict is not None else 0.0
         self.prev_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         return SegmentationResult(
             segmentations=self.segmentations,
-            sam3_seconds=sam3_seconds,
+            sam3_seconds=sam_seconds,
             flow_transform=(self.transform_dx, self.transform_dy),
         )
 
 
 class _GraphAgent:
-    """Priority Map-compatible graph agent using Logical LLM client.
-
-    Accepts the full constructor signature the pinned runner supplies,
-    retaining graph_builder, task_description, node-growth threshold,
-    and review-hop cutoff for future use. LLM work is dispatched to the
-    Logical LLM client.
-    """
+    """Pinned Priority Map GraphAgent contract backed by the Logical LLM."""
 
     def __init__(
         self,
+        graph_builder: Any,
+        task_description: str,
+        node_growth_threshold: int = 30,
+        review_hop_cutoff: int = 1,
+        model: str | None = None,
+        debug: bool = False,
+        *,
         llm_client: LLMClient,
         llm_generation: dict[str, float | int] | None = None,
-        model: str = "",
-        graph_builder: Any = None,
-        task_description: str = "",
-        threshold: float = 0.5,
-        cutoff: int = 5,
-        graph_context_window: int = 10,
     ) -> None:
-        self.llm_client = llm_client
-        self.llm_generation = llm_generation or {}
-        self.model = model
         self.graph_builder = graph_builder
         self.task_description = task_description
-        self.threshold = threshold
-        self.cutoff = cutoff
-        self.graph_context_window = graph_context_window
-        self._history: list[dict[str, Any]] = []
-        self._finished = False
-        self._context: dict[str, Any] = {}
-        self._executor: object | None = None
+        self.node_growth_threshold = node_growth_threshold
+        self.review_hop_cutoff = review_hop_cutoff
+        self.model = model
+        self.debug = debug
+        self.llm_client = llm_client
+        self.llm_generation = llm_generation or {}
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arcadia-graph-agent")
+        self.future: Future[dict[str, Any]] | None = None
+
+    def _debug(self, message: str) -> None:
+        if self.debug:
+            print(message)
 
     def should_run(self) -> bool:
-        return bool(self._context)
+        return self.graph_builder.count_unreviewed_nodes() >= self.node_growth_threshold
+
+    def _get_context(self):
+        rows, edges, view = self.graph_builder.get_agent_graph_data()
+        all_nodes = {row[0]: row[1] for row in rows}
+        unreviewed = {row[0] for row in rows if row[2] == 0}
+        if not all_nodes or not unreviewed:
+            return None, None, view
+        graph = nx.Graph()
+        graph.add_nodes_from(all_nodes)
+        graph.add_weighted_edges_from(edges)
+        eligible = set(unreviewed)
+        for node_id in unreviewed:
+            eligible.update(nx.single_source_shortest_path_length(graph, node_id, cutoff=self.review_hop_cutoff))
+        eligible_nodes = {node_id: all_nodes[node_id] for node_id in sorted(eligible, key=str) if node_id in all_nodes}
+        subgraph = graph.subgraph(eligible_nodes).copy()
+        mst_edges: list[tuple[Any, Any, float]] = []
+        if subgraph.number_of_edges():
+            mst = nx.minimum_spanning_tree(subgraph, weight="weight")
+            mst_edges = [(source, target, float(data["weight"])) for source, target, data in mst.edges(data=True)]
+        return eligible_nodes, mst_edges, view
+
+    def _prepare_run(self):
+        nodes, edges, view = self._get_context()
+        if nodes is None:
+            return None
+        graph_json = json.dumps(
+            {
+                "nodes": [{"id": node_id, "score": round(score)} for node_id, score in sorted(nodes.items())],
+                "edges": [
+                    {
+                        "from": source,
+                        "from_score": round(nodes[source]),
+                        "to": target,
+                        "to_score": round(nodes[target]),
+                        "dist": round(weight),
+                    }
+                    for source, target, weight in edges
+                    if source in nodes and target in nodes
+                ],
+            },
+            indent=2,
+        )
+        prompt = (
+            "You are reviewing a mission-priority scene graph. Return only JSON with shape "
+            '{"reasoning":"...","updates":[{"node_id":"...","delta":0}]}. '
+            "Each delta is a bounded score adjustment from -100 to 100. Do not invent node IDs. "
+            f"Mission: {self.task_description}\nGraph:\n{graph_json}"
+        )
+        return {"prompt": prompt, "node_ids": list(nodes), "view": view}
 
     def is_running(self) -> bool:
-        return not self._finished and self._executor is not None
+        return self.future is not None and not self.future.done()
+
+    def _call_model(self, prompt: str) -> tuple[dict[str, Any], str]:
+        result = self.llm_client.chat(
+            prompt,
+            model=self.model,
+            temperature=float(self.llm_generation.get("temperature", 0.1)),
+            max_tokens=int(self.llm_generation.get("max_tokens", 1024)),
+        )
+        raw = result.text.strip().replace("```json", "").replace("```", "").strip()
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start < 0 or end <= start:
+            raise AnalysisError(f"Graph Agent response did not contain JSON: {raw}")
+        try:
+            payload = json.loads(raw[start:end])
+        except json.JSONDecodeError as exc:
+            raise AnalysisError(f"Graph Agent response was not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise AnalysisError("Graph Agent response must be a JSON object.")
+        return payload, raw
+
+    def _run_model(self, prompt: str, node_ids: list[Any], view: str):
+        started = time.time()
+        response, raw = self._call_model(prompt)
+        return {"response": response, "raw": raw, "elapsed": time.time() - started, "node_ids": node_ids, "view": view}
 
     def start_async_if_ready(self) -> bool:
-        """Synchronous compatibility stub — the runner calls this during construction.
-
-        We defer actual LLM work to update_priorities.
-        """
+        if self.is_running() or not self.should_run():
+            return False
+        run = self._prepare_run()
+        if run is None:
+            return False
+        self.future = self.executor.submit(self._run_model, run["prompt"], run["node_ids"], run["view"])
         return True
 
-    def poll_finished(self) -> bool:
-        return self._finished
-
-    def update_priorities(self, scores: dict[str, float]) -> None:
-        """Call Logical LLM to update graph context and adjust scores.
-
-        Applies results through graph-builder score-update methods and
-        marks prompted nodes reviewed.
-        """
-        import json
-
-        self._history.append({"scores": dict(scores), "context": dict(self._context)})
-        if len(self._history) > self.graph_context_window:
-            self._history.pop(0)
-
-        generation_settings = dict(self.llm_generation)
-
-        try:
-            prompt = (
-                "Analyze the scene graph context and priority scores. "
-                "Return ONLY a JSON object with shape: "
-                '{"context_update":{},"score_adjustments":{},"reasoning":"..."}. '
-                "Score adjustments are offset values (-100 to +100) per label. "
-                "Context: " + json.dumps(self._context) + " "
-                "History: " + json.dumps(self._history[-self.graph_context_window :])
-            )
-            response = self.llm_client.chat(
-                prompt,
-                model=self.model or None,
-                **{k: v for k, v in generation_settings.items() if v is not None},
-            )
-            text = response.text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1]
-                if text.endswith("```"):
-                    text = text[:-3]
-            payload = json.loads(text.strip())
-        except (json.JSONDecodeError, Exception) as exc:
-            self._finished = True
-            raise AnalysisError(f"Graph Agent LLM response was not valid JSON: {exc}") from exc
-
-        if isinstance(payload.get("context_update"), dict):
-            self._context.update(payload["context_update"])
-        if isinstance(payload.get("score_adjustments"), dict):
-            for label, offset in payload["score_adjustments"].items():
-                label_str = str(label)
-                if label_str in scores:
-                    try:
-                        scores[label_str] += float(offset)
-                    except (TypeError, ValueError):
-                        pass
-
-        # Update graph scores through graph-builder if available
-        if self.graph_builder is not None:
+    def _handle_result(self, result: dict[str, Any]) -> None:
+        response = result["response"]
+        changes = []
+        for update in response.get("updates", []) or []:
+            if not isinstance(update, dict) or not update.get("node_id") or update.get("delta") is None:
+                continue
             try:
-                if hasattr(self.graph_builder, "update_scores"):
-                    self.graph_builder.update_scores(scores)
-                # Mark prompted nodes as reviewed
-                if hasattr(self.graph_builder, "mark_reviewed"):
-                    self.graph_builder.mark_reviewed(list(scores.keys()))
-            except Exception:
-                pass
-        self._finished = True
+                delta = max(-100.0, min(100.0, float(update["delta"])))
+            except (TypeError, ValueError):
+                continue
+            changed = self.graph_builder.apply_score_delta(update["node_id"], delta, view=result["view"])
+            if changed is not None:
+                changes.append(changed)
+        self.graph_builder.mark_agent_reviewed(result["node_ids"], view=result["view"])
+        self._debug(f"Graph Agent reviewed {len(result['node_ids'])} nodes and applied {len(changes)} updates.")
 
-    def get_context(self) -> dict[str, Any]:
-        return dict(self._context)
+    def poll_finished(self) -> bool:
+        if self.future is None or not self.future.done():
+            return False
+        future = self.future
+        self.future = None
+        try:
+            result = future.result()
+        except Exception as exc:
+            raise AnalysisError(f"Graph Agent inference failed: {exc}") from exc
+        self._handle_result(result)
+        return True
+
+    def update_priorities(self) -> None:
+        run = self._prepare_run()
+        if run is None:
+            return
+        self._handle_result(self._run_model(run["prompt"], run["node_ids"], run["view"]))
 
     def close(self) -> None:
-        self._history.clear()
-        self._finished = True
+        if self.future is not None:
+            try:
+                result = self.future.result()
+                self.future = None
+                self._handle_result(result)
+            except Exception as exc:
+                self._debug(f"Graph Agent shutdown discarded a failed pending result: {exc}")
+                self.future = None
+        self.executor.shutdown(wait=True, cancel_futures=False)
 
 
 class PriorityMapAdapter:
-    """The only Almost ARCADIA integration boundary for external Priority Map."""
-
     PRIORITY_MAP_API_COMMIT = "ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"
 
-    def __init__(
-        self,
-        runner_factory: Callable[..., Any] | None = None,
-        visual_llm_client: LLMClient | None = None,
-        graph_agent: _GraphAgent | None = None,
-    ) -> None:
+    def __init__(self, runner_factory: Callable[..., Any] | None = None) -> None:
         self.runner_factory = runner_factory
-        self.visual_llm_client = visual_llm_client
-        self.graph_agent = graph_agent
 
     def run(
         self,
@@ -403,7 +412,6 @@ class PriorityMapAdapter:
         llm_client: LLMClient,
         sam_client: SAMClient,
         visual_llm_client: LLMClient | None = None,
-        graph_agent: _GraphAgent | None = None,
         pipeline_settings: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
@@ -414,21 +422,14 @@ class PriorityMapAdapter:
         settings = dict(pipeline_settings or {})
         input_source = Path(input_path)
         image_folder = self._prepare_input(input_source, output_path, cancel_event=cancel_event)
-        if image_folder is None or (cancel_event is not None and cancel_event.is_set()):
-            return PipelineResult(
-                str(output_path),
-                None,
-                [str(path) for path in output_path.rglob("*") if path.is_file()],
-                0,
-            )
-        source_fps = self._source_fps(input_source)
+        if image_folder is None:
+            return PipelineResult(str(output_path), None, [], 0)
         runner = self._make_runner(
             image_folder=image_folder,
             output_directory=output_path,
             llm_client=llm_client,
+            visual_llm_client=visual_llm_client or llm_client,
             sam_client=sam_client,
-            visual_llm_client=visual_llm_client,
-            graph_agent=graph_agent,
             settings=settings,
         )
         try:
@@ -438,15 +439,14 @@ class PriorityMapAdapter:
                 cancel_event=cancel_event,
                 preview_callback=preview_callback,
                 run_at_source_fps=bool(settings.get("run_at_source_fps", False)),
-                source_fps=source_fps,
+                source_fps=self._source_fps(input_source),
             )
         finally:
             close = getattr(runner, "close", None)
             if callable(close):
                 close()
-        output_paths = [str(path) for path in output_path.rglob("*") if path.is_file()]
-        frames_processed = int(getattr(result, "frames_processed", 0) or 0)
-        return PipelineResult(str(output_path), result, output_paths, frames_processed)
+        paths = [str(path) for path in output_path.rglob("*") if path.is_file()]
+        return PipelineResult(str(output_path), result, paths, int(getattr(result, "frames_processed", 0) or 0))
 
     def _make_runner(
         self,
@@ -454,9 +454,8 @@ class PriorityMapAdapter:
         image_folder: Path,
         output_directory: Path,
         llm_client: LLMClient,
+        visual_llm_client: LLMClient,
         sam_client: SAMClient,
-        visual_llm_client: LLMClient | None = None,
-        graph_agent: _GraphAgent | None = None,
         settings: dict[str, Any],
     ):
         if self.runner_factory is not None:
@@ -464,46 +463,54 @@ class PriorityMapAdapter:
                 input_path=str(image_folder),
                 output_directory=str(output_directory),
                 llm_client=llm_client,
-                sam_client=sam_client,
                 visual_llm_client=visual_llm_client,
-                graph_agent=graph_agent,
+                sam_client=sam_client,
                 settings=settings,
             )
         try:
             import priority_map.runner as priority_runner
         except ImportError as exc:
+            raise AnalysisError("Priority Map is not installed. Install the pipeline extra.") from exc
+        required = ("PriorityMapRunner", "SceneUnderstanding", "Segment", "GraphAgent")
+        missing = [name for name in required if not hasattr(priority_runner, name)]
+        if missing:
             raise AnalysisError(
-                "Priority Map is not installed. Install it from https://github.com/josephletobar/priority_map."
-            ) from exc
-
-        required_symbols = ("PriorityMapRunner", "SceneUnderstanding", "Segment")
-        missing_symbols = [name for name in required_symbols if not hasattr(priority_runner, name)]
-        if missing_symbols:
-            raise AnalysisError(
-                "Priority Map API is incompatible with this adapter "
-                f"(tested commit {self.PRIORITY_MAP_API_COMMIT}; missing {', '.join(missing_symbols)})."
-            )
-        runner_class = priority_runner.PriorityMapRunner
-        if not callable(runner_class):
-            raise AnalysisError(
-                "Priority Map API is incompatible with this adapter "
-                f"(tested commit {self.PRIORITY_MAP_API_COMMIT}; PriorityMapRunner is not callable)."
+                f"Priority Map is incompatible with the adapter tested at {self.PRIORITY_MAP_API_COMMIT}; "
+                f"missing {', '.join(missing)}."
             )
         original_scene = priority_runner.SceneUnderstanding
         original_segment = priority_runner.Segment
-        original_graph = getattr(priority_runner, "GraphAgent", None)
+        original_graph = priority_runner.GraphAgent
         sam_resize = settings.get("sam_resize")
         if isinstance(sam_resize, int):
             sam_resize = (sam_resize, sam_resize)
+
+        def graph_factory(
+            graph_builder: Any,
+            task_description: str,
+            node_growth_threshold: int = 30,
+            review_hop_cutoff: int = 1,
+            model: str | None = None,
+            debug: bool = False,
+        ) -> _GraphAgent:
+            del model
+            return _GraphAgent(
+                graph_builder,
+                task_description,
+                node_growth_threshold=node_growth_threshold,
+                review_hop_cutoff=review_hop_cutoff,
+                model=None,
+                debug=debug,
+                llm_client=llm_client,
+                llm_generation=settings.get("llm_generation") or {},
+            )
+
         try:
-            # Scene understanding uses the Visual LLM and its generation settings
-            visual_gen = settings.get("visual_llm_generation") or settings.get("llm_generation") or {}
-            visual_alias = str(settings.get("visual_model_alias") or "visual-model")
             priority_runner.SceneUnderstanding = lambda **kwargs: _RemoteSceneUnderstanding(
-                visual_llm_client or llm_client,
+                visual_llm_client,
                 configured_prompts=settings.get("prompts", []),
-                model=visual_alias,
-                llm_generation=visual_gen,
+                model=None,
+                llm_generation=settings.get("visual_llm_generation") or settings.get("llm_generation") or {},
                 debug=bool(settings.get("debug", False)),
             )
             priority_runner.Segment = lambda **kwargs: _RemoteSegment(
@@ -511,19 +518,8 @@ class PriorityMapAdapter:
                 sam_thresh=float(settings.get("sam_confidence", 0.25)),
                 sam_resize=sam_resize,
             )
-            # Substitute GraphAgent if the module exposes it
-            if original_graph is not None:
-                logical_gen = settings.get("llm_generation") or {}
-                logical_alias = str(settings.get("logical_model_alias") or "")
-                # Pass the runner's constructor kwargs through to _GraphAgent
-                priority_runner.GraphAgent = lambda **kwargs: _GraphAgent(
-                    llm_client,
-                    model=logical_alias,
-                    llm_generation=logical_gen,
-                    **kwargs,
-                )
-            graph_agent_arg = graph_agent if graph_agent is not None else bool(settings.get("graph_agent", False))
-            return runner_class(
+            priority_runner.GraphAgent = graph_factory
+            runner = priority_runner.PriorityMapRunner(
                 image_folder=image_folder,
                 output_dir=output_directory,
                 task=settings.get("task", "Find cars"),
@@ -535,7 +531,7 @@ class PriorityMapAdapter:
                 debug=bool(settings.get("debug", False)),
                 record=bool(settings.get("record", True)),
                 panoramic=bool(settings.get("panoramic", False)),
-                graph_agent=graph_agent_arg,
+                graph_agent=bool(settings.get("graph_agent", False)),
                 gps_csv=settings.get("gps_csv"),
                 camera_intrinsics=settings.get("camera_intrinsics"),
                 scene_model=settings.get("scene_model"),
@@ -543,8 +539,40 @@ class PriorityMapAdapter:
         finally:
             priority_runner.SceneUnderstanding = original_scene
             priority_runner.Segment = original_segment
-            if original_graph is not None:
-                priority_runner.GraphAgent = original_graph
+            priority_runner.GraphAgent = original_graph
+        self._install_safe_close(runner)
+        return runner
+
+    @staticmethod
+    def _install_safe_close(runner: Any) -> None:
+        """Pinned runner closes GraphBuilder before GraphAgent; reverse that order."""
+        if not all(
+            hasattr(runner, name) for name in ("video_output", "heatmap_video_output", "segmentation", "graph_builder")
+        ):
+            return
+
+        def safe_close(self: Any) -> None:
+            if getattr(self, "_closed", False):
+                return
+            self._closed = True
+            steps = [
+                self.video_output.close,
+                self.heatmap_video_output.close,
+                self.segmentation.close,
+            ]
+            if getattr(self, "graph_agent", None) is not None:
+                steps.append(self.graph_agent.close)
+            steps.append(self.graph_builder.close)
+            errors: list[Exception] = []
+            for close in steps:
+                try:
+                    close()
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                raise AnalysisError(f"Priority Map cleanup failed: {errors[0]}")
+
+        runner.close = MethodType(safe_close, runner)
 
     @staticmethod
     def _run_runner(
@@ -557,9 +585,9 @@ class PriorityMapAdapter:
         source_fps: float | None,
     ):
         if hasattr(runner, "has_next") and hasattr(runner, "run_frame"):
-            frame_delay = 1.0 / source_fps if run_at_source_fps and source_fps and source_fps > 0 else 0.0
+            delay = 1.0 / source_fps if run_at_source_fps and source_fps and source_fps > 0 else 0.0
             while runner.has_next():
-                frame_started = time.monotonic()
+                started = time.monotonic()
                 frame_result = runner.run_frame()
                 if progress_callback:
                     progress_callback(
@@ -569,23 +597,18 @@ class PriorityMapAdapter:
                             "image_name": getattr(frame_result, "image_name", None),
                         }
                     )
-                if preview_callback:
-                    output_frame = getattr(frame_result, "output_frame", None)
-                    if output_frame is not None:
-                        ok, encoded = cv2.imencode(".jpg", output_frame)
-                        if ok:
-                            preview_callback(encoded.tobytes())
+                if preview_callback and getattr(frame_result, "output_frame", None) is not None:
+                    ok, encoded = cv2.imencode(".jpg", frame_result.output_frame)
+                    if ok:
+                        preview_callback(encoded.tobytes())
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 if not getattr(frame_result, "keep_running", True):
                     break
-                if frame_delay:
-                    time.sleep(max(0.0, frame_delay - (time.monotonic() - frame_started)))
+                if delay:
+                    time.sleep(max(0.0, delay - (time.monotonic() - started)))
             return runner.result()
-        result = runner.run()
-        if progress_callback:
-            progress_callback({"frames_processed": getattr(result, "frames_processed", 0)})
-        return result
+        return runner.run()
 
     @staticmethod
     def _source_fps(input_path: Path) -> float | None:
@@ -607,9 +630,7 @@ class PriorityMapAdapter:
         return fps if fps > 0 else None
 
     @staticmethod
-    def _prepare_input(
-        input_path: Path, output_path: Path, *, cancel_event: threading.Event | None = None
-    ) -> Path | None:
+    def _prepare_input(input_path: Path, output_path: Path, *, cancel_event: threading.Event | None = None):
         if cancel_event is not None and cancel_event.is_set():
             return None
         if input_path.is_dir():
@@ -619,8 +640,6 @@ class PriorityMapAdapter:
         frames_dir = output_path / "input_frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         if input_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}:
-            if cancel_event is not None and cancel_event.is_set():
-                return None
             shutil.copy2(input_path, frames_dir / input_path.name)
             return frames_dir
         capture = cv2.VideoCapture(str(input_path))
@@ -637,8 +656,6 @@ class PriorityMapAdapter:
                 if not cv2.imwrite(str(frames_dir / f"frame_{index:06d}.jpg"), frame):
                     raise AnalysisError(f"Could not write extracted frame {index}")
                 index += 1
-                if cancel_event is not None and cancel_event.is_set():
-                    return None
         finally:
             capture.release()
         if index == 0:

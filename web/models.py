@@ -1,1 +1,1 @@
-"""Almost ARCADIA keeps service and analysis state in process memory, not ORM models."""
+# Almost ARCADIA stores prototype configuration in JSON rather than database models.

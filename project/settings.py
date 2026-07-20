@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "development-only-change-me")
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") != "0"
-ALLOWED_HOSTS = [host for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if host]
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "almost-arcadia-development-only")
+DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+ALLOWED_HOSTS = [
+    item.strip() for item in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if item.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -15,6 +19,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "web.apps.WebConfig",
 ]
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -24,6 +29,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
 ROOT_URLCONF = "project.urls"
 TEMPLATES = [
     {
@@ -44,7 +50,7 @@ ASGI_APPLICATION = "project.asgi.application"
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 AUTH_PASSWORD_VALIDATORS: list[dict[str, str]] = []
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = os.environ.get("TZ", "UTC")
+TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"

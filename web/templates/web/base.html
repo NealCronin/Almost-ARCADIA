@@ -4,39 +4,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
   <title>{% block title %}Almost ARCADIA{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'web/app.css' %}">
-  {% block extra_head %}{% endblock %}
+  <script src="{% static 'web/app.js' %}" defer></script>
 </head>
-<body class="app-shell">
-  {% block navigation %}
+<body>
   <header class="site-header">
     <div class="site-header__inner">
-      <a class="brand" href="{% url 'home' %}" aria-label="Almost ARCADIA home">
-        <span class="brand__mark" aria-hidden="true">A</span>
-        <span>Almost ARCADIA</span>
-      </a>
+      <a class="brand" href="{% url 'home' %}"><span class="brand__mark">A</span><span>Almost ARCADIA</span></a>
       <nav class="site-nav" aria-label="Primary navigation">
-        <a href="{% url 'client' %}" {% if request.path|slice:':8' == '/client/' %}aria-current="page"{% endif %}>Client</a>
-        <a href="{% url 'host' %}" {% if request.path|slice:':6' == '/host/' %}aria-current="page"{% endif %}>Host</a>
-        <a href="{% url 'results' %}" {% if request.path|slice:':9' == '/results/' %}aria-current="page"{% endif %}>Results</a>
+        <a href="{% url 'client' %}">Client</a>
+        <a href="{% url 'priority_map_models' %}">Models</a>
+        <a href="{% url 'analysis' %}">Analysis</a>
+        <a href="{% url 'results' %}">Results</a>
+        <a href="{% url 'host' %}">Host</a>
       </nav>
     </div>
   </header>
-  {% endblock %}
-
-  <main class="page-shell {% block page_class %}{% endblock %}">
+  <main class="page-shell">
     {% if messages %}
-      <section class="message-stack" aria-label="Notifications">
-        {% for message in messages %}
-          <p class="message message--{{ message.tags|default:'info' }}">{{ message }}</p>
-        {% endfor %}
-      </section>
+      <div class="message-stack" aria-live="polite">
+        {% for message in messages %}<p class="message message--{{ message.tags|default:'info' }}">{{ message }}</p>{% endfor %}
+      </div>
     {% endif %}
     {% block content %}{% endblock %}
   </main>
-  <script src="{% static 'web/app.js' %}" defer></script>
-  {% block extra_js %}{% endblock %}
 </body>
 </html>

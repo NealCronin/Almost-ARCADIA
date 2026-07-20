@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import subprocess
@@ -8,9 +10,46 @@ from pathlib import Path
 from typing import IO, Any
 
 import requests
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.errors import ServiceStartupError
+from core.networking import validate_ipv4
+from core.services.sam_checkpoint import SAMCheckpointStore
 from core.services.specs import ServiceEndpoint, ServiceSpec
+
+
+class SAM3PredictRequest(BaseModel):
+    """Canonical request: image_base64, text, and confidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image_base64: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=200)
+    confidence: float = Field(default=0.25, ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "image_base64" not in normalized and "image" in normalized:
+            normalized["image_base64"] = normalized["image"]
+        if "text" not in normalized:
+            prompt = normalized.get("prompt", normalized.get("prompts", ""))
+            if isinstance(prompt, list):
+                prompt = next((item.strip() for item in prompt if isinstance(item, str) and item.strip()), "")
+            normalized["text"] = prompt
+        for legacy in ("image", "prompt", "prompts"):
+            normalized.pop(legacy, None)
+        return normalized
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("text must be a string")
+        return value.strip()
 
 
 def _decode_image(encoded: str):
@@ -31,8 +70,10 @@ def _load_predictor(checkpoint: Path, confidence: float = 0.25) -> Any:
     try:
         from ultralytics.models.sam import SAM3SemanticPredictor
     except ImportError as exc:
-        raise RuntimeError("SAM3 requires the project's ultralytics/SAM3 installation.") from exc
-    if not checkpoint.exists():
+        raise RuntimeError("SAM3 requires the project's Ultralytics/SAM3 installation.") from exc
+    if checkpoint.suffix.lower() != ".pt":
+        raise ValueError("SAM3 checkpoint must be a .pt file.")
+    if not checkpoint.is_file():
         raise FileNotFoundError(f"SAM3 checkpoint does not exist: {checkpoint}")
     overrides = {
         "conf": confidence,
@@ -50,63 +91,72 @@ class _UltralyticsPredictor:
     def __init__(self, predictor: Any) -> None:
         self.predictor = predictor
 
-    def predict(self, image: Any, prompts: list[str], confidence: float) -> dict[str, Any]:
+    def predict(self, image: Any, text: str, confidence: float) -> list[dict[str, Any]]:
         import numpy as np
 
         if getattr(self.predictor, "model", None) is None:
             self.predictor.setup_model(verbose=False)
-        results = self.predictor(image, text=prompts)
+        if hasattr(self.predictor, "args"):
+            self.predictor.args.conf = confidence
+
+        # Ultralytics 8.4 SAM3 semantic inference requires set_image() before
+        # calling the predictor with its text keyword.
+        self.predictor.set_image(image)
+        try:
+            results = self.predictor(text=[text])
+        finally:
+            reset_image = getattr(self.predictor, "reset_image", None)
+            if callable(reset_image):
+                reset_image()
+
         if not results:
-            return {"masks": [], "labels": [], "confidences": [], "bounding_boxes": []}
+            return []
         result = results[0]
-        masks: list[Any] = []
-        labels: list[str] = []
-        confidences: list[float] = []
-        boxes: list[Any] = []
         mask_data = result.masks.data.cpu().numpy() if result.masks is not None else []
         xyxy = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else []
         scores = result.boxes.conf.cpu().numpy() if result.boxes is not None else []
         classes = result.boxes.cls.cpu().numpy().astype(int) if result.boxes is not None else []
         names = getattr(result, "names", {})
-        for index, class_index in enumerate(classes):
+        detections: list[dict[str, Any]] = []
+        count = max(len(mask_data), len(xyxy), len(scores), len(classes))
+        for index in range(count):
             score = float(scores[index]) if index < len(scores) else confidence
             if score < confidence:
                 continue
-            labels.append(str(names.get(int(class_index), prompts[0] if prompts else "object")))
-            confidences.append(score)
-            boxes.append(np.asarray(xyxy[index]).tolist())
-            masks.append(np.asarray(mask_data[index], dtype=np.uint8).tolist())
-        return {"masks": masks, "labels": labels, "confidences": confidences, "bounding_boxes": boxes}
+            class_index = int(classes[index]) if index < len(classes) else index
+            label = names.get(class_index, text) if isinstance(names, dict) else text
+            box = [float(value) for value in np.asarray(xyxy[index]).ravel()[:4]] if index < len(xyxy) else None
+            mask = np.asarray(mask_data[index], dtype=np.uint8) if index < len(mask_data) else None
+            detections.append({"label": str(label), "confidence": score, "box": box, "mask": mask})
+        return detections
 
 
 class SAMRuntime:
-    """Launch and serve one real, serialized SAM3 predictor."""
-
     @staticmethod
     def build_command(spec: ServiceSpec, *, allow_test_command: bool = False) -> list[str]:
         settings = spec.settings
         raw_command = settings.get("command")
         if raw_command is not None:
-            if not allow_test_command:
+            if (
+                not allow_test_command
+                or not isinstance(raw_command, list)
+                or not all(isinstance(item, str) for item in raw_command)
+            ):
                 raise ValueError("command is available only to unit tests.")
-            if not isinstance(raw_command, list) or not all(isinstance(item, str) for item in raw_command):
-                raise ValueError("command must be a list of strings.")
             return list(raw_command)
         checkpoint = settings.get("checkpoint")
         if not checkpoint:
             raise ValueError("SAM3 service requires a checkpoint setting.")
-        checkpoint_path = Path(str(checkpoint)).expanduser()
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"SAM3 checkpoint does not exist: {checkpoint_path}")
+        checkpoint_path = SAMCheckpointStore.validate_checkpoint_path(str(checkpoint))
         extra_args = settings.get("extra_args", [])
         if not isinstance(extra_args, list) or not all(isinstance(item, str) for item in extra_args):
-            raise ValueError("extra_args must be a list of strings.")
+            raise ValueError("SAM3 extra_args must be a list of strings.")
         return [
             str(settings.get("python_executable", sys.executable)),
             "-m",
             "core.services.sam_runtime",
             "--host",
-            str(settings.get("bind_host", "0.0.0.0")),
+            validate_ipv4(str(settings.get("bind_host", "127.0.0.1")), label="SAM3 bind host"),
             "--port",
             str(spec.port),
             "--checkpoint",
@@ -117,15 +167,11 @@ class SAMRuntime:
 
     @staticmethod
     def endpoint(spec: ServiceSpec, public_host: str) -> ServiceEndpoint:
-        return ServiceEndpoint(host=public_host, port=spec.port, service_type="sam3")
+        return ServiceEndpoint(str(spec.settings.get("bind_host", public_host)), spec.port, "sam3")
 
     @staticmethod
     def readiness_url(endpoint: ServiceEndpoint) -> str:
         return f"{endpoint.base_url}/health"
-
-    @staticmethod
-    def probe(endpoint: ServiceEndpoint, timeout: float) -> requests.Response:
-        return requests.get(SAMRuntime.readiness_url(endpoint), timeout=timeout)
 
     @classmethod
     def wait_ready(
@@ -145,29 +191,29 @@ class SAMRuntime:
             if process.poll() is not None:
                 raise ServiceStartupError(f"SAM3 process exited during startup with code {process.returncode}.")
             try:
-                response = cls.probe(endpoint, timeout=min(2.0, poll_interval + 0.5))
-                if response.status_code == 200:
+                response = requests.get(cls.readiness_url(endpoint), timeout=2)
+                if response.ok:
                     return
                 last_error = f"readiness returned HTTP {response.status_code}"
             except requests.RequestException as exc:
                 last_error = str(exc)
-            remaining = deadline - time.monotonic()
-            if cancel_event is not None:
-                if cancel_event.wait(min(poll_interval, max(0.0, remaining))):
-                    raise ServiceStartupError("SAM3 startup cancelled.")
-            else:
-                time.sleep(poll_interval)
+            time.sleep(poll_interval)
         raise ServiceStartupError(f"SAM3 readiness timed out: {last_error}")
 
     @classmethod
     def launch(
-        cls, spec: ServiceSpec, *, public_host: str, log_path: Path, allow_test_command: bool = False
+        cls,
+        spec: ServiceSpec,
+        *,
+        public_host: str,
+        log_path: Path,
+        allow_test_command: bool = False,
     ) -> tuple[subprocess.Popen[str], IO[str], ServiceEndpoint]:
         command = cls.build_command(spec, allow_test_command=allow_test_command)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = log_path.open("a", encoding="utf-8")
         try:
-            process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
+            process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True, shell=False)
         except Exception:
             log_handle.close()
             raise
@@ -175,57 +221,88 @@ class SAMRuntime:
 
 
 def create_app(checkpoint: str | Path, predictor: Any | None = None, confidence: float = 0.25):
-    """Create the app; predictor injection is intentionally test-only."""
-    try:
-        from fastapi import FastAPI, HTTPException
-        from pydantic import BaseModel, Field
-    except ImportError as exc:
-        raise RuntimeError("SAM HTTP serving requires fastapi and pydantic.") from exc
+    from fastapi import FastAPI, HTTPException
+
+    if not 0 <= confidence <= 1:
+        raise ValueError("SAM3 confidence must be between 0.0 and 1.0.")
     checkpoint_path = Path(checkpoint).expanduser()
     if predictor is None:
         predictor = _load_predictor(checkpoint_path, confidence=confidence)
     lock = threading.Lock()
     app = FastAPI(title="Almost ARCADIA SAM3 service")
 
-    class PredictRequest(BaseModel):
-        image: str
-        prompts: list[str] = Field(default_factory=list)
-        confidence: float = Field(default=0.25, ge=0, le=1)
+    def encode_mask(mask: Any) -> str | None:
+        import cv2
+        import numpy as np
+
+        array = np.asarray(mask, dtype=np.uint8).squeeze()
+        if array.ndim != 2 or array.size == 0:
+            return None
+        success, encoded = cv2.imencode(".png", (array > 0).astype(np.uint8) * 255)
+        if not success:
+            raise ValueError("SAM3 mask could not be encoded.")
+        return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+    def render_overlay(image: Any, detections: list[dict[str, Any]]) -> str:
+        import cv2
+        import numpy as np
+
+        rendered = image.copy()
+        colors = ((44, 200, 255), (255, 168, 71), (120, 220, 120), (220, 120, 220))
+        height, width = rendered.shape[:2]
+        for index, detection in enumerate(detections):
+            mask = detection.get("mask")
+            if mask is None:
+                continue
+            array = np.asarray(mask, dtype=np.uint8).squeeze()
+            if array.ndim != 2 or array.size == 0:
+                continue
+            if array.shape != (height, width):
+                array = cv2.resize(array, (width, height), interpolation=cv2.INTER_NEAREST)
+            selected = array > 0
+            if not np.any(selected):
+                continue
+            color: Any = np.asarray(colors[index % len(colors)], dtype=np.float32)
+            rendered[selected] = np.clip(rendered[selected] * 0.52 + color * 0.48, 0, 255).astype(np.uint8)
+        success, encoded = cv2.imencode(".png", rendered)
+        if not success:
+            raise ValueError("SAM3 overlay could not be encoded.")
+        return base64.b64encode(encoded.tobytes()).decode("ascii")
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ready", "service_type": "sam3"}
 
     @app.post("/v1/predict")
-    def predict(request: PredictRequest) -> dict[str, Any]:
-        prompts = [prompt.strip() for prompt in request.prompts if prompt.strip()]
-        if not prompts:
-            raise HTTPException(status_code=422, detail="at least one text prompt is required")
-        if predictor is None:
-            raise HTTPException(status_code=503, detail="SAM predictor is unavailable")
+    def predict(request: SAM3PredictRequest) -> dict[str, Any]:
         try:
-            image = _decode_image(request.image)
+            image = _decode_image(request.image_base64)
             with lock:
-                result = predictor.predict(image, prompts, request.confidence)
+                raw_detections = predictor.predict(image, request.text, request.confidence)
+            if not isinstance(raw_detections, list):
+                raise RuntimeError("SAM predictor returned an invalid result.")
+            detections = [
+                {
+                    "label": str(detection.get("label", request.text)),
+                    "confidence": float(detection.get("confidence", request.confidence)),
+                    "box": detection.get("box"),
+                    "mask_png_base64": encode_mask(detection.get("mask")),
+                }
+                for detection in raw_detections
+                if isinstance(detection, dict)
+            ]
+            return {"detections": detections, "overlay_png_base64": render_overlay(image, raw_detections)}
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not isinstance(result, dict):
-            raise HTTPException(status_code=500, detail="SAM predictor returned an invalid result")
-        confidences = result.get("confidences") or result.get("scores") or []
-        boxes = result.get("bounding_boxes") or result.get("boxes") or []
-        return {
-            "masks": result.get("masks") or [],
-            "labels": [str(label) for label in (result.get("labels") or [])],
-            "confidences": [float(score) for score in confidences],
-            "bounding_boxes": boxes,
-        }
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"SAM3 inference failed: {exc}") from exc
 
     return app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Almost ARCADIA SAM3 inference service")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--confidence", type=float, default=0.25)

@@ -1,29 +1,36 @@
 from __future__ import annotations
 
-import re
-import shutil
-import subprocess
+import ipaddress
+import socket
 
 
 def local_ipv4_addresses() -> set[str]:
-    """Return IPv4 addresses assigned to local network interfaces."""
+    """Best-effort set of IPv4 addresses assigned to this computer."""
     addresses = {"127.0.0.1"}
-    if shutil.which("ifconfig"):
+    names = {socket.gethostname(), socket.getfqdn(), "localhost"}
+    for name in names:
         try:
-            result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=False)
-        except OSError:
-            return addresses
-        addresses.update(re.findall(r"^\s*inet\s+(\d+\.\d+\.\d+\.\d+)", result.stdout, flags=re.MULTILINE))
-    elif shutil.which("ip"):
-        try:
-            result = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=False)
-        except OSError:
-            return addresses
-        addresses.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", result.stdout))
-    elif shutil.which("ipconfig"):
-        try:
-            result = subprocess.run(["ipconfig"], capture_output=True, text=True, check=False)
-        except OSError:
-            return addresses
-        addresses.update(re.findall(r"^\s*IPv4 [^:\r\n]*:\s*(\d+\.\d+\.\d+\.\d+)", result.stdout, flags=re.MULTILINE))
+            for result in socket.getaddrinfo(name, None, socket.AF_INET):
+                addresses.add(str(ipaddress.IPv4Address(result[4][0])))
+        except (OSError, ValueError):
+            continue
+    try:
+        import psutil
+
+        for interface in psutil.net_if_addrs().values():
+            for address in interface:
+                if address.family == socket.AF_INET:
+                    addresses.add(str(ipaddress.IPv4Address(address.address)))
+    except (ImportError, OSError, ValueError):
+        pass
     return addresses
+
+
+def validate_ipv4(value: str, *, label: str = "IP address", allow_unspecified: bool = False) -> str:
+    try:
+        address = ipaddress.IPv4Address(value.strip())
+    except (ipaddress.AddressValueError, AttributeError) as exc:
+        raise ValueError(f"{label} must be a valid IPv4 address.") from exc
+    if address.is_unspecified and not allow_unspecified:
+        raise ValueError(f"{label} cannot be 0.0.0.0.")
+    return str(address)

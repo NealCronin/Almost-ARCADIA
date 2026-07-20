@@ -1,54 +1,57 @@
+from __future__ import annotations
+
 from fastapi.testclient import TestClient
 
+from core.errors import ServiceStartupError
 from core.services.instruction_server import create_app
-from core.services.specs import ServiceEndpoint, ServiceStatus
 
 
-class FakeController:
-    public_host = "100.96.40.81"
-
-    def __init__(self) -> None:
-        self.started = []
-        self.stopped = []
+class Controller:
+    def list_services(self):
+        return []
 
     def start(self, spec):
-        self.started.append(spec)
-        return ServiceEndpoint(self.public_host, spec.port, spec.service_type)
-
-    def stop(self, port):
-        self.stopped.append(port)
-
-    def stop_all(self):
-        return None
-
-    def list_services(self):
-        return [ServiceStatus(8081, "llm", True, {}, "llm.log")]
-
-    def get_logs(self, port, tail=200):
-        return f"port={port} tail={tail}"
+        raise ServiceStartupError("llama-server binary is missing")
 
 
-def valid_settings() -> dict[str, object]:
-    return {"hf_repo": "org/model", "bind_host": "100.96.40.81", "models_cache_subdir": "huggingface"}
+def test_remote_startup_error_is_returned_as_detail_not_internal_server_error():
+    client = TestClient(create_app(Controller(), public_host="10.0.0.20"), raise_server_exceptions=False)
+    response = client.post(
+        "/services/start",
+        json={
+            "service_type": "llm",
+            "port": 8081,
+            "settings": {
+                "hf_repo": "owner/repo",
+                "hf_revision": "main",
+                "hf_file": "model.gguf",
+                "bind_host": "10.0.0.20",
+                "n_ctx": 4096,
+                "vision_enabled": False,
+                "temperature": 0.1,
+                "max_tokens": 256,
+                "extra_args": [],
+            },
+        },
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "llama-server binary is missing"
 
 
-def test_instruction_server_accepts_declarative_matching_llm() -> None:
-    controller = FakeController()
-    client = TestClient(create_app(controller))
-    started = client.post("/services/start", json={"service_type": "llm", "port": 8081, "settings": valid_settings()})
-    assert started.status_code == 200
-    assert controller.started[0].settings["bind_host"] == "100.96.40.81"
-    assert client.post("/services/stop", json={"port": 8081}).json()["stopped"] is True
+def test_instruction_server_streams_sam_checkpoint_into_models_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "huggingface"))
+    client = TestClient(create_app(Controller(), public_host="10.0.0.20"), raise_server_exceptions=False)
 
+    response = client.post(
+        "/artifacts/sam3/checkpoint",
+        content=b"checkpoint-bytes",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Arcadia-Filename": "sam3.pt",
+        },
+    )
 
-def test_instruction_server_rejects_command_cache_and_bind_mismatch() -> None:
-    client = TestClient(create_app(FakeController()))
-    for settings in (
-        {"command": ["cmd.exe"]},
-        {**valid_settings(), "bind_host": "127.0.0.1"},
-        {**valid_settings(), "hf_cache_dir": "/tmp/cache"},
-    ):
-        assert (
-            client.post("/services/start", json={"service_type": "llm", "port": 8081, "settings": settings}).status_code
-            == 422
-        )
+    assert response.status_code == 200
+    saved = tmp_path / "huggingface" / "models" / "sam3.pt"
+    assert saved.read_bytes() == b"checkpoint-bytes"
+    assert response.json()["path"] == str(saved.resolve())

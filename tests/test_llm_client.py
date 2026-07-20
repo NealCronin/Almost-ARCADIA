@@ -1,52 +1,40 @@
-from unittest.mock import Mock, patch
+from __future__ import annotations
 
-import pytest
+from typing import Any
 
-from core.errors import InferenceError
 from core.inference.llm_client import LLMClient
 from core.services.specs import ServiceEndpoint
 
 
-@patch("core.inference.llm_client.requests.post")
-def test_chat_returns_typed_message(mock_post: Mock) -> None:
-    response = Mock()
-    response.json.return_value = {"choices": [{"message": {"content": "hello"}}]}
-    mock_post.return_value = response
-    result = LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi")
-    assert result.text == "hello"
-    assert mock_post.call_args.kwargs["json"]["messages"][0]["content"][0]["text"] == "Hi"
+class Response:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self.payload
 
 
-@patch("core.inference.llm_client.requests.post")
-def test_chat_encodes_image_bytes(mock_post: Mock) -> None:
-    response = Mock()
-    response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
-    mock_post.return_value = response
-    LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("describe", images=[("image/png", b"abc")])
-    image_item = mock_post.call_args.kwargs["json"]["messages"][0]["content"][1]
-    assert image_item["image_url"]["url"].startswith("data:image/png;base64,")
+def test_client_discovers_and_preserves_server_model_id(monkeypatch):
+    calls: list[tuple[str, str, dict[str, Any] | None]] = []
 
+    def fake_get(url: str, **kwargs: Any) -> Response:
+        calls.append(("GET", url, None))
+        return Response({"data": [{"id": "Qwen3.5-0.8B-IQ4_NL.gguf"}]})
 
-@patch("core.inference.llm_client.requests.post")
-def test_chat_rejects_malformed_response(mock_post: Mock) -> None:
-    response = Mock()
-    response.json.return_value = {"choices": []}
-    mock_post.return_value = response
-    with pytest.raises(InferenceError) as exc_info:
-        LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi")
-    assert exc_info.value.service_type == "llm"
+    def fake_post(url: str, *, json: dict[str, Any], **kwargs: Any) -> Response:
+        calls.append(("POST", url, json))
+        return Response({"choices": [{"message": {"content": "ok"}}]})
 
+    monkeypatch.setattr("core.inference.llm_client.requests.get", fake_get)
+    monkeypatch.setattr("core.inference.llm_client.requests.post", fake_post)
 
-@patch("core.inference.llm_client.requests.post")
-def test_chat_sends_generation_controls(mock_post: Mock) -> None:
-    response = Mock()
-    response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
-    mock_post.return_value = response
-    LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm")).chat("Hi", temperature=0.3, top_k=12, min_p=0.1, top_p=0.8)
-    body = mock_post.call_args.kwargs["json"]
-    assert {key: body[key] for key in ("temperature", "top_k", "min_p", "top_p")} == {
-        "temperature": 0.3,
-        "top_k": 12,
-        "min_p": 0.1,
-        "top_p": 0.8,
-    }
+    client = LLMClient(ServiceEndpoint("127.0.0.1", 8081, "llm"))
+    assert client.chat("hello").text == "ok"
+    assert calls[1][2]["model"] == "Qwen3.5-0.8B-IQ4_NL.gguf"  # type: ignore[index]
+
+    # The discovered ID is cached and no second /v1/models call is required.
+    client.chat("again")
+    assert sum(1 for method, _url, _payload in calls if method == "GET") == 1

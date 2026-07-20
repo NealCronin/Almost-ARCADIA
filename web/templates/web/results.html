@@ -1,21 +1,10 @@
 {% extends 'web/base.html' %}
 {% block title %}Results | Almost ARCADIA{% endblock %}
 {% block content %}
-<header class="page-heading">
-  <div><p class="eyebrow">Priority Map run</p><h1>Current run</h1><p class="page-heading__copy">View the live in-memory preview for this Django process and open generated artifacts.</p></div>
-  <a class="button button--ghost" href="{% url 'priority_map' %}">New run</a>
-</header>
-<div class="results-grid" data-analysis-status-url="{% url 'analysis_status' %}">
-  <section class="panel viewer-panel">
-    <div class="panel__header"><div><p class="eyebrow">Live preview</p><h2>Priority Map stream</h2></div><span id="analysis-state" class="status-pill status-pill--{{ analysis.state }}">{{ analysis.state|title }}</span></div>
-    <div class="stream-frame" data-stream-frame></div>
-    <div class="viewer-toolbar"><span id="analysis-message">{{ analysis.error|default:analysis.message|default:'No active run' }}</span><span><strong id="analysis-frames">{{ analysis.frames_processed }}</strong> frames processed</span></div>
-    <div class="button-row">
-      <button class="button button--danger" type="button" data-cancel-run disabled>Cancel after current frame</button>
-      {% if analysis.output_directory %}<button class="button button--ghost" type="button" data-copy-text="{{ analysis.output_directory }}">Copy output path</button>{% endif %}
-    </div>
-  </section>
-  <aside class="stack"><section class="panel compact-panel"><p class="eyebrow">Run summary</p><dl class="definition-list"><div><dt>State</dt><dd>{{ analysis.state|title }}</dd></div><div><dt>Started</dt><dd>{{ analysis.started_at|default:'—' }}</dd></div><div><dt>Finished</dt><dd>{{ analysis.finished_at|default:'—' }}</dd></div><div><dt>Output</dt><dd><code>{{ analysis.output_directory|default:'Not allocated' }}</code></dd></div></dl></section>{% if analysis.error %}<section class="panel error-panel"><p class="eyebrow">Failure</p><h2>Run ended with an error</h2><pre>{{ analysis.error }}</pre></section>{% endif %}</aside>
-</div>
-<section class="panel artifacts-panel" data-artifacts-panel><div class="panel__header"><div><p class="eyebrow">Outputs</p><h2>Generated artifacts</h2><p>Artifacts remain available after the live preview ends.</p></div></div><div class="artifact-list" data-artifact-list></div></section>
+<header class="page-heading"><div><p class="eyebrow">Priority Map</p><h1>Results</h1><p class="page-heading__copy">Live preview and retained artifacts for the current process.</p></div><a class="button button--ghost" href="{% url 'analysis' %}">Analysis</a></header>
+<section class="panel" data-analysis-state data-status-url="{% url 'analysis_status' %}">
+  <div class="panel__header"><div><p class="eyebrow">Run</p><h2 data-run-state>{{ analysis.state|title }}</h2></div><span class="status-pill" data-run-id>{{ analysis.run_id|default:'No run' }}</span></div>
+  <div class="results-grid"><div class="stream-frame" data-stream-frame>{% if analysis.run_id %}<img src="{% url 'run_stream' analysis.run_id %}" alt="Live analysis preview">{% else %}<div class="stream-frame__empty"><strong>No preview</strong><span>Start an analysis to stream output.</span></div>{% endif %}</div><div class="stack"><dl class="definition-list"><div><dt>Frames</dt><dd data-frames>{{ analysis.frames_processed }}</dd></div><div><dt>Input</dt><dd data-input>{{ analysis.input_path|default:'—' }}</dd></div><div><dt>Error</dt><dd data-error>{{ analysis.error|default:'—' }}</dd></div></dl>{% if analysis.run_id and analysis.state == 'running' %}<button class="button button--danger" data-cancel-url="{% url 'cancel_run' analysis.run_id %}">Cancel after frame</button>{% endif %}</div></div>
+</section>
+<section class="panel artifacts-panel" data-artifacts-panel {% if analysis.run_id %}data-artifacts-url="{% url 'run_artifacts' analysis.run_id %}"{% endif %}><div class="panel__header"><div><p class="eyebrow">Files</p><h2>Artifacts</h2></div></div><div class="artifact-list" data-artifact-list><p class="muted">Artifacts appear after a run creates files.</p></div></section>
 {% endblock %}

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import mimetypes
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.errors import AnalysisError
-
-_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+from core.errors import ArcadiaError
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,53 +15,28 @@ class ArtifactRecord:
 
 
 class ArtifactStore:
-    """Resolve only regular non-symlink artifacts below one run directory."""
-
-    def __init__(self, output_root: Path, run_id: str) -> None:
-        if not _RUN_ID.fullmatch(run_id):
-            raise AnalysisError("Invalid run ID.")
-        self.output_root = Path(output_root).resolve()
-        self.run_id = run_id
-        requested_directory = self.output_root / run_id
-        if requested_directory.is_symlink():
-            raise AnalysisError("Run artifacts are unavailable.")
-        self.run_directory = requested_directory.resolve(strict=True)
-        if not self.run_directory.is_relative_to(self.output_root) or not self.run_directory.is_dir():
-            raise AnalysisError("Run artifacts are unavailable.")
+    def __init__(self, root: str | Path, run_id: str) -> None:
+        if not run_id or "/" in run_id or "\\" in run_id or run_id in (".", ".."):
+            raise ArcadiaError("Invalid run identifier.")
+        self.root = Path(root).resolve()
+        self.run_directory = (self.root / run_id).resolve()
+        if self.root not in self.run_directory.parents:
+            raise ArcadiaError("Invalid run directory.")
 
     def list(self) -> list[ArtifactRecord]:
+        if not self.run_directory.is_dir():
+            raise ArcadiaError("Run output was not found.")
         records: list[ArtifactRecord] = []
-        for candidate in self.run_directory.rglob("*"):
-            if candidate.is_symlink() or not candidate.is_file():
+        for path in sorted(self.run_directory.rglob("*")):
+            if not path.is_file():
                 continue
-            resolved = candidate.resolve(strict=True)
-            if not resolved.is_relative_to(self.run_directory):
-                continue
-            relative = candidate.relative_to(self.run_directory).as_posix()
-            records.append(
-                ArtifactRecord(
-                    path=relative,
-                    size_bytes=candidate.stat().st_size,
-                    content_type=mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
-                )
-            )
-        return sorted(records, key=lambda record: record.path)
+            relative = path.relative_to(self.run_directory).as_posix()
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            records.append(ArtifactRecord(relative, path.stat().st_size, content_type))
+        return records
 
-    def resolve(self, relative_path: str) -> Path:
-        if not isinstance(relative_path, str) or "\x00" in relative_path:
-            raise AnalysisError("Invalid artifact path.")
-        normalized = relative_path.replace("\\", "/")
-        parts = normalized.split("/")
-        if not normalized or normalized.startswith("/") or any(part in ("", ".", "..") for part in parts):
-            raise AnalysisError("Invalid artifact path.")
-        candidate = self.run_directory.joinpath(*parts)
-        relative_candidate = candidate.relative_to(self.run_directory)
-        for index in range(1, len(relative_candidate.parts) + 1):
-            if (self.run_directory / Path(*relative_candidate.parts[:index])).is_symlink():
-                raise AnalysisError("Artifact is unavailable.")
-        if not candidate.is_file():
-            raise AnalysisError("Artifact is unavailable.")
-        resolved = candidate.resolve(strict=True)
-        if not resolved.is_relative_to(self.run_directory) or not resolved.is_file():
-            raise AnalysisError("Artifact is unavailable.")
-        return resolved
+    def resolve(self, artifact_path: str) -> Path:
+        candidate = (self.run_directory / artifact_path).resolve()
+        if self.run_directory not in candidate.parents or not candidate.is_file():
+            raise ArcadiaError("Artifact was not found.")
+        return candidate

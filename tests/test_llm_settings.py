@@ -2,109 +2,100 @@ from __future__ import annotations
 
 import pytest
 
-from core.services.llm_settings import generation_settings
-
-# ── Seed handling ────────────────────────────────────────────────────
-
-
-def test_blank_seed_absent() -> None:
-    result = generation_settings({"temperature": 0.5})
-    assert "seed" not in result
-
-
-def test_explicit_seed_zero_retained() -> None:
-    result = generation_settings({"seed": 0})
-    assert result["seed"] == 0
+from core.services.llm_settings import (
+    format_hf_source,
+    parse_additional_server_arguments,
+    parse_hf_source,
+    validate_additional_server_arguments,
+    validate_llm_settings,
+)
 
 
-def test_explicit_seed_retained() -> None:
-    result = generation_settings({"seed": 42})
-    assert result["seed"] == 42
+def valid_settings(**updates):
+    values = {
+        "hf_repo": "unsloth/Qwen3.5-2B-GGUF",
+        "hf_revision": "main",
+        "hf_file": "Qwen3.5-2B-IQ4_XS.gguf",
+        "bind_host": "127.0.0.1",
+        "n_ctx": 32768,
+        "vision_enabled": False,
+        "temperature": 0.1,
+        "max_tokens": 1024,
+        "model_alias": "logical-model",
+        "extra_args": ["--flash-attn", "on"],
+    }
+    values.update(updates)
+    return values
 
 
-def test_seed_none_absent() -> None:
-    result = generation_settings({"seed": None, "temperature": 0.5})
-    assert "seed" not in result
+def test_parse_repository_source():
+    source = parse_hf_source("unsloth/Qwen3.5-2B-GGUF")
+    assert source.repo_id == "unsloth/Qwen3.5-2B-GGUF"
+    assert source.filename is None
 
 
-# ── Range validation ──────────────────────────────────────────────────
+def test_parse_exact_blob_source_with_nested_path():
+    source = parse_hf_source("https://huggingface.co/owner/repo/blob/revision-name/quants/model-00001-of-00002.gguf")
+    assert source.repo_id == "owner/repo"
+    assert source.revision == "revision-name"
+    assert source.filename == "quants/model-00001-of-00002.gguf"
 
 
-def test_max_tokens_must_be_positive() -> None:
-    with pytest.raises(ValueError, match="Max tokens must be positive"):
-        generation_settings({"max_tokens": 0})
+def test_format_source_uses_exact_file_link():
+    assert format_hf_source("owner/repo", "main", "a.gguf") == "https://huggingface.co/owner/repo/blob/main/a.gguf"
 
 
-def test_repeat_penalty_must_be_positive() -> None:
-    with pytest.raises(ValueError, match="Repeat penalty must be positive"):
-        generation_settings({"repeat_penalty": 0})
+def test_argument_parser_accepts_space_comma_and_lines():
+    assert parse_additional_server_arguments("--flash-attn on, --batch-size 2048\n--ubatch-size 512") == [
+        "--flash-attn",
+        "on",
+        "--batch-size",
+        "2048",
+        "--ubatch-size",
+        "512",
+    ]
 
 
-def test_temperature_must_be_nonnegative() -> None:
-    with pytest.raises(ValueError, match="Temperature must be >= 0"):
-        generation_settings({"temperature": -1})
+def test_argument_parser_preserves_quoted_commas_and_json():
+    assert parse_additional_server_arguments('--tensor-split "1,1" --chat-template-kwargs \'{"a":1,"b":2}\'') == [
+        "--tensor-split",
+        "1,1",
+        "--chat-template-kwargs",
+        '{"a":1,"b":2}',
+    ]
 
 
-def test_top_p_zero_allowed() -> None:
-    result = generation_settings({"top_p": 0})
-    assert result["top_p"] == 0.0
+@pytest.mark.parametrize("flag", ["--model", "-m", "--host=1.2.3.4", "--ctx-size", "--temp", "--api-key"])
+def test_owned_or_unsafe_flags_are_rejected(flag):
+    with pytest.raises(ValueError):
+        validate_additional_server_arguments([flag])
 
 
-def test_top_p_one_allowed() -> None:
-    result = generation_settings({"top_p": 1})
-    assert result["top_p"] == 1.0
+def test_normal_native_flags_are_passed_through():
+    assert validate_additional_server_arguments(["-ngl", "all", "-fa", "on", "--mlock"]) == [
+        "-ngl",
+        "all",
+        "-fa",
+        "on",
+        "--mlock",
+    ]
 
 
-def test_top_p_above_one_rejected() -> None:
-    with pytest.raises(ValueError, match="Top P must be between 0 and 1"):
-        generation_settings({"top_p": 1.1})
+def test_validate_settings_keeps_only_quick_values_and_drops_old_forced_alias():
+    values = validate_llm_settings(valid_settings())
+    assert values["temperature"] == 0.1
+    assert values["max_tokens"] == 1024
+    assert values["extra_args"] == ["--flash-attn", "on"]
+    assert "model_alias" not in values
 
 
-def test_min_p_range() -> None:
-    result = generation_settings({"min_p": 0})
-    assert result["min_p"] == 0.0
-    result = generation_settings({"min_p": 1})
-    assert result["min_p"] == 1.0
-    with pytest.raises(ValueError, match="Min P must be between 0 and 1"):
-        generation_settings({"min_p": -0.1})
+def test_native_alias_is_allowed_in_additional_arguments():
+    assert validate_additional_server_arguments(["--alias", "native-name"]) == [
+        "--alias",
+        "native-name",
+    ]
 
 
-# ── Defaults ──────────────────────────────────────────────────────────
-
-
-def test_defaults_are_consistent() -> None:
-    result = generation_settings({})
-    assert result["temperature"] == 0.1
-    assert result["top_k"] == 20
-    assert result["top_p"] == 0.9
-    assert result["min_p"] == 0.05
-    assert result["max_tokens"] == 1024
-    assert result["repeat_penalty"] == 1.0
-    assert result["presence_penalty"] == 0.0
-    assert result["frequency_penalty"] == 0.0
-
-
-def test_penalties_must_be_finite() -> None:
-    with pytest.raises(ValueError, match="must be a finite number"):
-        generation_settings({"presence_penalty": float("inf")})
-    with pytest.raises(ValueError, match="must be a finite number"):
-        generation_settings({"frequency_penalty": float("nan")})
-
-
-def test_default_overrides_apply() -> None:
-    result = generation_settings(
-        {
-            "temperature": 0.7,
-            "top_k": 40,
-            "top_p": 0.95,
-            "min_p": 0.01,
-            "max_tokens": 2048,
-            "repeat_penalty": 1.2,
-        }
-    )
-    assert result["temperature"] == 0.7
-    assert result["top_k"] == 40
-    assert result["top_p"] == 0.95
-    assert result["min_p"] == 0.01
-    assert result["max_tokens"] == 2048
-    assert result["repeat_penalty"] == 1.2
+def test_vision_requires_projector_repository():
+    with pytest.raises(ValueError):
+        validate_llm_settings(valid_settings(vision_enabled=True))

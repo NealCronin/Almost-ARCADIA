@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import ipaddress
 import json
 import os
 import tempfile
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from core.errors import ConfigurationError
+from core.networking import validate_ipv4
 from core.services.specs import ServiceSpec
 
 NodeMode = Literal["local", "remote"]
@@ -19,36 +19,34 @@ NodeMode = Literal["local", "remote"]
 class HostListenerConfig:
     host: str = "127.0.0.1"
     port: int = 9000
+    sam3_checkpoint: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.host, str) or not self.host.strip():
-            raise ConfigurationError("Host listener IP address must be a valid IPv4 address.")
         try:
-            address = ipaddress.ip_address(self.host.strip())
+            self.host = validate_ipv4(self.host, label="Host listener IP address")
         except ValueError as exc:
-            raise ConfigurationError("Host listener IP address must be a valid IPv4 address.") from exc
-        if address.version != 4:
-            raise ConfigurationError("Host listener currently supports IPv4 addresses only.")
+            raise ConfigurationError(str(exc)) from exc
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
             raise ConfigurationError("Host listener port must be an integer between 1 and 65535.")
-        self.host = str(address)
+        self.sam3_checkpoint = str(self.sam3_checkpoint).strip()
 
     def to_dict(self) -> dict[str, Any]:
         result = copy.deepcopy(self.extra)
-        result.update({"host": self.host, "port": self.port})
+        result.update({"host": self.host, "port": self.port, "sam3_checkpoint": self.sam3_checkpoint})
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> HostListenerConfig:
+    def from_dict(cls, data: dict[str, Any] | None) -> "HostListenerConfig":
         if data is None:
             return cls()
         if not isinstance(data, dict):
             raise ConfigurationError("Host listener configuration must be an object.")
-        known = {"host", "port"}
+        known = {"host", "port", "sam3_checkpoint"}
         return cls(
             host=data.get("host", "127.0.0.1"),
             port=data.get("port", 9000),
+            sam3_checkpoint=data.get("sam3_checkpoint", ""),
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
@@ -63,11 +61,10 @@ class NodeConfig:
     def __post_init__(self) -> None:
         if self.mode not in ("local", "remote"):
             raise ConfigurationError("Node mode must be 'local' or 'remote'.")
-        if not isinstance(self.host, str):
-            raise ConfigurationError("Node host cannot be empty.")
-        self.host = self.host.strip()
-        if not self.host:
-            raise ConfigurationError("Node host cannot be empty.")
+        try:
+            self.host = validate_ipv4(self.host, label="Node host")
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
         if self.instruction_port is not None and (
             isinstance(self.instruction_port, bool)
             or not isinstance(self.instruction_port, int)
@@ -75,34 +72,30 @@ class NodeConfig:
         ):
             raise ConfigurationError("Instruction port must be an integer between 1 and 65535.")
         if self.mode == "remote" and self.instruction_port is None:
-            raise ConfigurationError("Remote nodes require instruction_port.")
+            raise ConfigurationError("Remote nodes require an instruction port.")
 
     def to_dict(self) -> dict[str, Any]:
         result = copy.deepcopy(self.extra)
         result.update({"mode": self.mode, "host": self.host})
         if self.instruction_port is not None:
             result["instruction_port"] = self.instruction_port
-        else:
-            result.pop("instruction_port", None)
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> NodeConfig:
+    def from_dict(cls, data: dict[str, Any]) -> "NodeConfig":
         if not isinstance(data, dict):
             raise ConfigurationError("Node configuration must be an object.")
         known = {"mode", "host", "instruction_port"}
         return cls(
-            data.get("mode", "local"),
-            data.get("host", "127.0.0.1"),
-            data.get("instruction_port"),
-            copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+            mode=data.get("mode", "local"),
+            host=data.get("host", "127.0.0.1"),
+            instruction_port=data.get("instruction_port"),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
 
 @dataclass(slots=True)
 class ConfiguredService:
-    """A desired service plus the node where it should run."""
-
     node: str
     spec: ServiceSpec
     extra: dict[str, Any] = field(default_factory=dict)
@@ -125,14 +118,14 @@ class ConfiguredService:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ConfiguredService:
+    def from_dict(cls, data: dict[str, Any]) -> "ConfiguredService":
         if not isinstance(data, dict):
             raise ConfigurationError("Service configuration must be an object.")
         known = {"node", "service_type", "port", "settings"}
         return cls(
-            str(data.get("node", "local")),
-            ServiceSpec.from_dict(data),
-            copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+            node=str(data.get("node", "local")),
+            spec=ServiceSpec.from_dict(data),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
 
@@ -156,21 +149,23 @@ class PipelineConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.sam_step < 1:
+        if isinstance(self.sam_step, bool) or self.sam_step < 1:
             raise ConfigurationError("sam_step must be at least 1.")
         if self.sam_resize is not None and self.sam_resize < 1:
             raise ConfigurationError("sam_resize must be positive or null.")
-        if not 0 <= self.sam_confidence <= 1:
+        if not 0 <= float(self.sam_confidence) <= 1:
             raise ConfigurationError("sam_confidence must be between 0 and 1.")
-        self.prompts = [str(prompt).strip() for prompt in self.prompts if str(prompt).strip()]
+        self.prompts = [str(item).strip() for item in self.prompts if str(item).strip()]
 
     def to_dict(self) -> dict[str, Any]:
         result = copy.deepcopy(self.extra)
-        result.update({name: getattr(self, name) for name in self.__dataclass_fields__ if name != "extra"})
+        for name in self.__dataclass_fields__:
+            if name != "extra":
+                result[name] = copy.deepcopy(getattr(self, name))
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> PipelineConfig:
+    def from_dict(cls, data: dict[str, Any] | None) -> "PipelineConfig":
         if data is None:
             return cls()
         if not isinstance(data, dict):
@@ -190,7 +185,7 @@ class PriorityMapOutputConfig:
 
     def __post_init__(self) -> None:
         if not str(self.root).strip():
-            raise ConfigurationError("Priority Map output root must be a non-empty path.")
+            raise ConfigurationError("Priority Map output root cannot be empty.")
         if self.preview != "mjpeg":
             raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
 
@@ -200,19 +195,17 @@ class PriorityMapOutputConfig:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> PriorityMapOutputConfig:
+    def from_dict(cls, data: dict[str, Any] | None) -> "PriorityMapOutputConfig":
         if data is None:
             return cls()
         if not isinstance(data, dict):
             raise ConfigurationError("Priority Map output configuration must be an object.")
-        root = data.get("root", "outputs")
-        if not isinstance(root, str) or not root.strip():
-            raise ConfigurationError("Priority Map output root must be a non-empty path.")
-        preview = data.get("preview", "mjpeg")
-        if preview != "mjpeg":
-            raise ConfigurationError("Priority Map preview must be 'mjpeg'.")
         known = {"root", "preview"}
-        return cls(Path(root), preview, copy.deepcopy({key: value for key, value in data.items() if key not in known}))
+        return cls(
+            root=Path(str(data.get("root", "outputs"))),
+            preview=data.get("preview", "mjpeg"),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
+        )
 
 
 @dataclass(slots=True)
@@ -220,8 +213,12 @@ class PriorityMapToolConfig:
     services: dict[str, ConfiguredService] = field(default_factory=dict)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     output: PriorityMapOutputConfig = field(default_factory=PriorityMapOutputConfig)
-    visual_llm_mode: str = "same_as_logical"  # "same_as_logical" | "separate"
+    visual_llm_mode: str = "same_as_logical"
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.visual_llm_mode not in ("same_as_logical", "separate"):
+            raise ConfigurationError("visual_llm_mode must be 'same_as_logical' or 'separate'.")
 
     def to_dict(self) -> dict[str, Any]:
         result = copy.deepcopy(self.extra)
@@ -236,23 +233,18 @@ class PriorityMapToolConfig:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PriorityMapToolConfig:
+    def from_dict(cls, data: dict[str, Any]) -> "PriorityMapToolConfig":
         if not isinstance(data, dict):
             raise ConfigurationError("Priority Map tool configuration must be an object.")
-        services = data.get("services", {})
-        if not isinstance(services, dict):
+        raw_services = data.get("services", {})
+        if not isinstance(raw_services, dict):
             raise ConfigurationError("Priority Map services must be an object.")
         known = {"services", "pipeline", "output", "visual_llm_mode"}
-        visual_llm_mode = data.get("visual_llm_mode", "same_as_logical")
-        if visual_llm_mode not in ("same_as_logical", "separate"):
-            raise ConfigurationError(
-                f"visual_llm_mode must be 'same_as_logical' or 'separate', got {visual_llm_mode!r}"
-            )
         return cls(
-            services={str(name): ConfiguredService.from_dict(value) for name, value in services.items()},
+            services={str(name): ConfiguredService.from_dict(value) for name, value in raw_services.items()},
             pipeline=PipelineConfig.from_dict(data.get("pipeline")),
             output=PriorityMapOutputConfig.from_dict(data.get("output")),
-            visual_llm_mode=visual_llm_mode,
+            visual_llm_mode=str(data.get("visual_llm_mode", "same_as_logical")),
             extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
@@ -265,114 +257,93 @@ class AppConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if "local" not in self.nodes:
-            self.nodes["local"] = NodeConfig(mode="local", host="127.0.0.1")
-        if "priority-map" not in self.tools:
-            self.tools["priority-map"] = PriorityMapToolConfig()
-        priority_map = self.tools["priority-map"]
-        if not isinstance(priority_map, PriorityMapToolConfig):
+        self.nodes.setdefault("local", NodeConfig("local", "127.0.0.1"))
+        self.tools.setdefault("priority-map", PriorityMapToolConfig())
+        if not isinstance(self.tools["priority-map"], PriorityMapToolConfig):
             raise ConfigurationError("Priority Map tool configuration must be an object.")
-        for name, service in priority_map.services.items():
-            if service.node not in self.nodes:
-                raise ConfigurationError(f"Service {name!r} references unknown node {service.node!r}.")
+        for name, configured in self.priority_map.services.items():
+            if configured.node not in self.nodes:
+                raise ConfigurationError(f"Service {name!r} references unknown node {configured.node!r}.")
 
     @property
     def priority_map(self) -> PriorityMapToolConfig:
         return self.tools["priority-map"]
 
     def to_dict(self) -> dict[str, Any]:
-        tools = copy.deepcopy({name: value for name, value in self.tools.items() if name != "priority-map"})
-        tools["priority-map"] = self.priority_map.to_dict()
+        other_tools = copy.deepcopy({name: value for name, value in self.tools.items() if name != "priority-map"})
+        other_tools["priority-map"] = self.priority_map.to_dict()
         result = copy.deepcopy(self.extra)
         result.update(
             {
                 "nodes": {name: node.to_dict() for name, node in self.nodes.items()},
-                "tools": tools,
+                "tools": other_tools,
                 "host_listener": self.host_listener.to_dict(),
             }
         )
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AppConfig:
+    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         if not isinstance(data, dict):
             raise ConfigurationError("Configuration root must be a JSON object.")
         raw_nodes = data.get("nodes", {})
         if not isinstance(raw_nodes, dict):
             raise ConfigurationError("Nodes configuration must be an object.")
         nodes = {str(name): NodeConfig.from_dict(value) for name, value in raw_nodes.items()}
-        known_root = {"nodes", "tools", "services", "pipeline", "output_root", "host_listener"}
         if "tools" in data:
             raw_tools = data["tools"]
             if not isinstance(raw_tools, dict):
                 raise ConfigurationError("Tools configuration must be an object.")
-            raw_priority_map = raw_tools.get("priority-map")
-            if not isinstance(raw_priority_map, dict):
-                raise ConfigurationError("tools.priority-map must be an object.")
+            raw_priority = raw_tools.get("priority-map", {})
             tools = {name: copy.deepcopy(value) for name, value in raw_tools.items() if name != "priority-map"}
-            tools["priority-map"] = PriorityMapToolConfig.from_dict(raw_priority_map)
+            tools["priority-map"] = PriorityMapToolConfig.from_dict(raw_priority)
         else:
-            output_root = data.get("output_root", "outputs")
-            if not isinstance(output_root, str) or not output_root.strip():
-                raise ConfigurationError("output_root must be a non-empty path.")
-            raw_services = data.get("services", {})
-            if not isinstance(raw_services, dict):
-                raise ConfigurationError("Services configuration must be an object.")
+            # Legacy flat format migration.
+            services = data.get("services", {})
+            pipeline = data.get("pipeline", {})
             tools = {
                 "priority-map": PriorityMapToolConfig(
-                    services={str(name): ConfiguredService.from_dict(value) for name, value in raw_services.items()},
-                    pipeline=PipelineConfig.from_dict(data.get("pipeline")),
-                    output=PriorityMapOutputConfig(Path(output_root)),
+                    services={str(name): ConfiguredService.from_dict(value) for name, value in services.items()},
+                    pipeline=PipelineConfig.from_dict(pipeline),
+                    output=PriorityMapOutputConfig(Path(str(data.get("output_root", "outputs")))),
                 )
             }
+        known = {"nodes", "tools", "services", "pipeline", "output_root", "host_listener"}
         return cls(
             nodes=nodes,
             tools=tools,
             host_listener=HostListenerConfig.from_dict(data.get("host_listener")),
-            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known_root}),
+            extra=copy.deepcopy({key: value for key, value in data.items() if key not in known}),
         )
 
 
 class ConfigStore:
-    """Load and atomically save one JSON configuration file."""
-
-    def __init__(self, path: str | Path = "config.json", default_path: str | Path | None = None) -> None:
-        self.path = Path(path)
-        self.default_path = (
-            Path(default_path) if default_path is not None else self.path.with_name("default_config.json")
-        )
+    def __init__(self, path: str | Path | None = None) -> None:
+        default_path = Path(__file__).resolve().parents[1] / "config.json"
+        selected_path: str | Path = path or os.environ.get("ARCADIA_CONFIG") or default_path
+        self.path = Path(selected_path)
+        self.default_path = Path(__file__).resolve().parents[1] / "default_config.json"
 
     def load(self) -> AppConfig:
-        if not self.path.exists():
-            if not self.default_path.exists():
-                return AppConfig()
-            try:
-                payload = self.default_path.read_text(encoding="utf-8")
-                config = AppConfig.from_dict(json.loads(payload))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ConfigurationError(f"Could not read default configuration {self.default_path}: {exc}") from exc
-            self._write_payload(payload)
-            return config
+        source = self.path if self.path.exists() else self.default_path
         try:
-            return AppConfig.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
+            data = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ConfigurationError(f"Could not read configuration {self.path}: {exc}") from exc
+            raise ConfigurationError(f"Could not load configuration from {source}: {exc}") from exc
+        return AppConfig.from_dict(data)
 
     def save(self, config: AppConfig) -> None:
-        self._write_payload(json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n")
-
-    def _write_payload(self, payload: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+        payload = json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n"
+        fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary_name, self.path)
-        except Exception:
+            os.replace(temporary, self.path)
+        finally:
             try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
                 pass
-            raise

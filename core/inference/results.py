@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class LLMResult:
     text: str
-    raw_response: dict[str, Any] | None = None
+    raw: dict[str, Any]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SegmentationResult:
     masks: list[Any]
     labels: list[str]

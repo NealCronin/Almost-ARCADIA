@@ -1,283 +1,120 @@
-from pathlib import Path
-from unittest.mock import Mock, patch
+from __future__ import annotations
 
 import pytest
 
-from core.errors import ServiceStartupError
 from core.services.llm_runtime import LLMRuntime
-from core.services.specs import ServiceEndpoint, ServiceSpec
+from core.services.specs import ServiceSpec
 
 
-def test_build_command_resolves_repository_and_runtime_flags(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.Q4.gguf", "mmproj.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda repo, filename, cache: f"/{cache}/{filename}")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/usr/local/bin/llama-server")
-    command = LLMRuntime.build_command(
-        ServiceSpec(
-            "llm",
-            8081,
-            {
-                "hf_repo": "org/model",
-                "bind_host": "127.0.0.1",
-                "n_ctx": 4096,
-                "n_batch": 512,
-                "vision_enabled": True,
-                "model_file_pattern": "*Q4.gguf",
-                "mmproj_file_pattern": "mmproj.gguf",
-            },
-        )
-    )
-    assert command[:8] == [
-        "/usr/local/bin/llama-server",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8081",
-        "--model",
-        "/huggingface/model.Q4.gguf",
-        "--mmproj",
-    ]
-    assert "/mmproj/mmproj.gguf" in command
-    assert "--ctx-size" in command and "4096" in command
+def settings(**updates):
+    values = {
+        "hf_repo": "owner/repo",
+        "hf_revision": "main",
+        "hf_file": "model.gguf",
+        "bind_host": "127.0.0.1",
+        "n_ctx": 8192,
+        "vision_enabled": False,
+        "temperature": 0.1,
+        "max_tokens": 256,
+        "extra_args": ["--flash-attn", "on", "--mlock"],
+    }
+    values.update(updates)
+    return values
 
 
-def test_ambiguous_and_split_models_require_safe_selection(monkeypatch) -> None:
+def test_select_unique_unsplit_model():
+    assert LLMRuntime._select_file(["README.md", "model.gguf"], None, projector=False) == "model.gguf"
+
+
+def test_select_repo_requires_exact_when_ambiguous():
+    with pytest.raises(ValueError, match="multiple usable"):
+        LLMRuntime._select_file(["q4.gguf", "q8.gguf"], None, projector=False)
+
+
+def test_split_selection_requires_first_shard():
+    with pytest.raises(ValueError, match="first split shard"):
+        LLMRuntime._select_file(["model-00002-of-00002.gguf"], "model-00002-of-00002.gguf", projector=False)
+
+
+def test_build_command_has_only_quick_owned_flags(monkeypatch, tmp_path):
+    monkeypatch.setattr(LLMRuntime, "_find_executable", classmethod(lambda cls: "/bin/llama-server"))
+    monkeypatch.setattr(LLMRuntime, "_resolve_model_path", classmethod(lambda cls, value: str(tmp_path / "model.gguf")))
+    spec = ServiceSpec("llm", 8081, settings())
+    command = LLMRuntime.build_command(spec)
+    assert command[:3] == ["/bin/llama-server", "--host", "127.0.0.1"]
+    assert "--model" in command
+    assert "--ctx-size" in command
+    assert "--alias" not in command
+    assert "--temperature" not in command
+    assert "--predict" not in command
+    assert command[-3:] == ["on", "--mlock"] or command[-3:] == ["--flash-attn", "on", "--mlock"]
+
+
+def test_build_command_adds_projector(monkeypatch, tmp_path):
+    monkeypatch.setattr(LLMRuntime, "_find_executable", classmethod(lambda cls: "/bin/llama-server"))
+    monkeypatch.setattr(LLMRuntime, "_resolve_model_path", classmethod(lambda cls, value: str(tmp_path / "model.gguf")))
     monkeypatch.setattr(
-        LLMRuntime, "list_repository_files", lambda _: ["a.Q4.gguf", "b.Q8.gguf", "split-00001-of-00002.gguf"]
+        LLMRuntime, "_resolve_projector_path", classmethod(lambda cls, value: str(tmp_path / "mmproj.gguf"))
     )
-    with pytest.raises(ValueError, match="select one"):
-        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["split-00001-of-00002.gguf"])
-    with pytest.raises(ValueError, match="Only split GGUF"):
-        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
-
-
-def test_models_directory_honors_environment(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
-    assert LLMRuntime.models_directory() == tmp_path / "models"
-
-
-@patch("core.services.llm_runtime.hf_hub_download", create=True)
-def test_download_uses_per_machine_cache(mock_download: Mock, monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(tmp_path / "models"))
-    mock_download.return_value = tmp_path / "model.gguf"
-    with patch.dict("sys.modules", {}):
-        pass
-    with patch("huggingface_hub.hf_hub_download", mock_download):
-        LLMRuntime._download_hf_model("org/model", "model.gguf", "huggingface")
-    assert (tmp_path / "models" / "huggingface").is_dir()
-    assert mock_download.call_args.kwargs["token"] is None
-
-
-@patch("core.services.llm_runtime.requests.get")
-def test_repository_metadata_is_bounded_and_uses_hub_auth_headers(mock_get: Mock) -> None:
-    response = Mock()
-    response.json.return_value = [{"path": "model.gguf"}]
-    mock_get.return_value = response
-    assert LLMRuntime.list_repository_files("org/model") == ["model.gguf"]
-    assert mock_get.call_args.kwargs["timeout"] == (5, 15)
-    assert mock_get.call_args.kwargs["params"]["limit"] == 500
-
-
-def test_legacy_local_path_is_rejected() -> None:
-    with pytest.raises(ValueError, match="retired"):
-        LLMRuntime.build_command(ServiceSpec("llm", 8081, {"model_path": "old.gguf"}))
-
-
-def test_readiness_targets_health_endpoint() -> None:
-    assert LLMRuntime.readiness_url(ServiceEndpoint("127.0.0.1", 8081, "llm")) == "http://127.0.0.1:8081/health"
-
-
-def test_wait_ready_reports_dead_child() -> None:
-    process = Mock()
-    process.poll.return_value = 1
-    with pytest.raises(ServiceStartupError):
-        LLMRuntime.wait_ready(process, ServiceEndpoint("127.0.0.1", 8081, "llm"), timeout=1, poll_interval=0)
-
-
-# ── Flash Attention tri-state ──────────────────────────────────────────
-
-
-def test_flash_attn_auto_emits_flag(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "auto"}))
-    assert "--flash-attn" in command
-    idx = command.index("--flash-attn")
-    assert command[idx + 1] == "auto"
-
-
-def test_flash_attn_on_emits_flag(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "on"}))
-    assert "--flash-attn" in command
-    idx = command.index("--flash-attn")
-    assert command[idx + 1] == "on"
-
-
-def test_flash_attn_off_emits_flag(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "off"}))
-    assert "--flash-attn" in command
-    idx = command.index("--flash-attn")
-    assert command[idx + 1] == "off"
-
-
-def test_flash_attn_no_numeric_one(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "on"}))
-    assert "1" not in [command[i + 1] for i, a in enumerate(command) if a == "--flash-attn"]
-
-
-def test_flash_attn_not_set_omits_flag(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
-    assert "--flash-attn" not in command
-
-
-# ── Nested paths ────────────────────────────────────────────────────────
-
-
-def test_nested_single_model_preserves_path(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["Q4_K/model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "*.gguf"}))
-    assert downloads[0] == "Q4_K/model.gguf"
-
-
-def test_nested_split_main_model(monkeypatch) -> None:
-    files = [
-        "Q6/model-00001-of-00003.gguf",
-        "Q6/model-00002-of-00003.gguf",
-        "Q6/model-00003-of-00003.gguf",
-    ]
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: list(files))
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00001*"}))
-    assert len(downloads) == 3
-    assert "Q6/model-00001-of-00003.gguf" in downloads
-    assert "Q6/model-00002-of-00003.gguf" in downloads
-    assert "Q6/model-00003-of-00003.gguf" in downloads
-
-
-def test_nested_split_draft_model(monkeypatch) -> None:
-    main_files = ["main.gguf"]
-    draft_files = [
-        "draft/draft-00001-of-00002.gguf",
-        "draft/draft-00002-of-00002.gguf",
-    ]
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-
-    def _list_files(repo):
-        return main_files if repo == "org/model" else draft_files
-
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", _list_files)
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(
-        ServiceSpec(
-            "llm",
-            8081,
-            {
-                "hf_repo": "org/model",
-                "draft_enabled": True,
-                "draft_repo": "org/draft-model",
-                "draft_file_pattern": "draft-00001*",
-            },
-        )
+    spec = ServiceSpec(
+        "visual_llm",
+        8082,
+        settings(
+            vision_enabled=True,
+            mmproj_repo="owner/projectors",
+            mmproj_revision="main",
+            mmproj_file="mmproj.gguf",
+        ),
     )
-    assert "draft/draft-00001-of-00002.gguf" in downloads
-    assert "draft/draft-00002-of-00002.gguf" in downloads
+    command = LLMRuntime.build_command(spec)
+    assert command[command.index("--mmproj") + 1].endswith("mmproj.gguf")
 
 
-def test_missing_shard_reports_error(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model-00001-of-00003.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: f"/cache/{f}")
-    with pytest.raises(ValueError, match="missing shard"):
-        LLMRuntime.build_command(
-            ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00001*"})
-        )
+def test_sam_endpoint_uses_configured_inference_ip():
+    from core.services.sam_runtime import SAMRuntime
+
+    spec = ServiceSpec("sam3", 8090, {"bind_host": "10.0.0.25"})
+    assert SAMRuntime.endpoint(spec, "192.168.1.20").host == "10.0.0.25"
 
 
-def test_first_shard_enforcement(monkeypatch) -> None:
+def test_user_can_set_native_alias_in_additional_arguments(monkeypatch, tmp_path):
+    monkeypatch.setattr(LLMRuntime, "_find_executable", classmethod(lambda cls: "/bin/llama-server"))
     monkeypatch.setattr(
         LLMRuntime,
-        "list_repository_files",
-        lambda _: ["model-00002-of-00003.gguf", "model-00003-of-00003.gguf"],
+        "_resolve_model_path",
+        classmethod(lambda cls, value: str(tmp_path / "model.gguf")),
     )
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: f"/cache/{f}")
-    with pytest.raises(ValueError, match="must start from shard 1"):
-        LLMRuntime.build_command(
-            ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "model-00002*"})
-        )
+    spec = ServiceSpec("llm", 8081, settings(extra_args=["--alias", "my-native-alias"]))
+    command = LLMRuntime.build_command(spec)
+    assert command[-2:] == ["--alias", "my-native-alias"]
 
 
-def test_nested_projector_path(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf", "mmproj/mmproj.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(
-        ServiceSpec(
-            "llm",
-            8081,
-            {
-                "hf_repo": "org/model",
-                "vision_enabled": True,
-                "model_file_pattern": "model.gguf",
-                "mmproj_file_pattern": "mmproj.gguf",
-            },
-        )
-    )
-    assert "mmproj/mmproj.gguf" in downloads
+def test_hugging_face_cache_layout(monkeypatch, tmp_path):
+    import core.services.llm_runtime as llm_runtime
+
+    monkeypatch.delenv("ARCADIA_HUGGINGFACE_DIR", raising=False)
+    monkeypatch.delenv("ARCADIA_MODELS_DIR", raising=False)
+    monkeypatch.setattr(llm_runtime, "BASE_DIR", tmp_path)
+
+    assert LLMRuntime.huggingface_directory() == tmp_path / "huggingface"
+    assert LLMRuntime.cache_directory("models") == tmp_path / "huggingface" / "models"
+    assert LLMRuntime.cache_directory("mmproj") == tmp_path / "huggingface" / "mmproj"
+    assert (tmp_path / "huggingface" / "models").is_dir()
+    assert (tmp_path / "huggingface" / "mmproj").is_dir()
 
 
-# ── Case-insensitive pattern ───────────────────────────────────────────
+def test_models_directory_override_is_hugging_face_root(monkeypatch, tmp_path):
+    custom = tmp_path / "shared-hf"
+    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(custom))
+
+    assert LLMRuntime.cache_directory("models") == custom / "models"
+    assert LLMRuntime.cache_directory("mmproj") == custom / "mmproj"
 
 
-def test_case_insensitive_pattern(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["MODEL-Q6_K.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "model_file_pattern": "*q6_k*.gguf"}))
-    assert downloads[0] == "MODEL-Q6_K.gguf"
+def test_huggingface_override_precedes_deprecated_models_override(monkeypatch, tmp_path):
+    preferred = tmp_path / "preferred"
+    legacy = tmp_path / "legacy"
+    monkeypatch.setenv("ARCADIA_HUGGINGFACE_DIR", str(preferred))
+    monkeypatch.setenv("ARCADIA_MODELS_DIR", str(legacy))
 
-
-# ── Projector excluded from main model ─────────────────────────────────
-
-
-def test_projector_not_selected_as_main_model(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf", "mmproj.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    downloads = []
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda r, f, c: downloads.append(f) or f"/cache/{f}")
-    LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model"}))
-    assert downloads[0] == "model.gguf"
-
-
-# ── Command is always an argument list ──────────────────────────────────
-
-
-def test_command_remains_argument_list(monkeypatch) -> None:
-    monkeypatch.setattr(LLMRuntime, "list_repository_files", lambda _: ["model.gguf"])
-    monkeypatch.setattr(LLMRuntime, "_download_hf_model", lambda *a: "/models/model.gguf")
-    monkeypatch.setattr(LLMRuntime, "_find_executable", lambda: "/bin/llama-server")
-    command = LLMRuntime.build_command(ServiceSpec("llm", 8081, {"hf_repo": "org/model", "flash_attn": "auto"}))
-    assert isinstance(command, list)
-    assert all(isinstance(arg, str) for arg in command)
+    assert LLMRuntime.huggingface_directory() == preferred

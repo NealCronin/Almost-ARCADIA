@@ -2,36 +2,34 @@ from __future__ import annotations
 
 
 class ArcadiaError(Exception):
-    """Base exception for expected Almost ARCADIA failures."""
+    """Base error surfaced by the application."""
 
 
 class ConfigurationError(ArcadiaError):
-    """The application configuration is missing or invalid."""
+    pass
 
 
 class ServiceError(ArcadiaError):
-    """A service could not be controlled or reached."""
+    pass
 
 
 class ServiceStartupError(ServiceError):
-    """A launched service did not become ready."""
+    pass
 
 
 class ServiceNotRunningError(ServiceError):
-    """A requested owned service is not running."""
+    pass
 
 
 class InstructionError(ServiceError):
-    """The remote instruction server rejected or could not process a request."""
+    pass
 
 
 class InferenceError(ArcadiaError):
-    """An inference request failed or returned an invalid response."""
-
-    def __init__(self, message: str, service_type: str | None = None) -> None:
+    def __init__(self, message: str, *, service_type: str | None = None) -> None:
         super().__init__(message)
         self.service_type = service_type
 
 
 class AnalysisError(ArcadiaError):
-    """An analysis could not complete."""
+    pass

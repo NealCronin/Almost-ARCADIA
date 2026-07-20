@@ -5,7 +5,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from core.errors import ServiceError, ServiceNotRunningError, ServiceStartupError
 from core.services.llm_runtime import LLMRuntime
@@ -22,7 +22,7 @@ class RunningService:
 
 
 class ServiceController:
-    """Own only subprocesses launched by this controller instance."""
+    """Own only child processes launched by this controller instance."""
 
     def __init__(
         self,
@@ -41,6 +41,24 @@ class ServiceController:
         self._lock = threading.RLock()
         atexit.register(self.stop_all)
 
+    def _runtime_for(self, spec: ServiceSpec) -> Any:
+        if spec.service_type in ("llm", "visual_llm"):
+            return LLMRuntime
+        if spec.service_type == "sam3":
+            from core.services.sam_runtime import SAMRuntime
+
+            return SAMRuntime
+        raise ValueError(f"Unsupported service type: {spec.service_type}")
+
+    @staticmethod
+    def _startup_log_tail(log_path: Path, limit: int = 40) -> str:
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return ""
+        tail = "\n".join(lines[-limit:]).strip()
+        return f"\n\nservice log tail:\n{tail}" if tail else ""
+
     def start(self, spec: ServiceSpec, *, cancel_event: threading.Event | None = None) -> ServiceEndpoint:
         with self._lock:
             if cancel_event is not None and cancel_event.is_set():
@@ -48,7 +66,7 @@ class ServiceController:
             self._reap_dead_locked()
             replacing = spec.port in self._services
             if replacing:
-                self.stop(spec.port)
+                self._stop_running_locked(spec.port)
             runtime = self._runtime_for(spec)
             log_path = self.log_dir / f"{spec.service_type}-{spec.port}.log"
             try:
@@ -58,27 +76,35 @@ class ServiceController:
                     log_path=log_path,
                     allow_test_command=self.allow_test_commands,
                 )
-                running = RunningService(spec, process, log_path, log_handle, endpoint)
-                self._services[spec.port] = running
-                startup_timeout = float(spec.settings.get("startup_timeout", self.startup_timeout))
-                runtime.wait_ready(process, endpoint, timeout=startup_timeout, cancel_event=cancel_event)
+                self._services[spec.port] = RunningService(spec, process, log_path, log_handle, endpoint)
+                runtime.wait_ready(
+                    process,
+                    endpoint,
+                    timeout=float(spec.settings.get("startup_timeout", self.startup_timeout)),
+                    cancel_event=cancel_event,
+                )
                 return endpoint
             except Exception as exc:
                 if spec.port in self._services:
                     self._stop_running_locked(spec.port)
+                log_tail = self._startup_log_tail(log_path)
                 if replacing:
                     raise ServiceStartupError(
                         f"Replacement failed for {spec.service_type} on port {spec.port}; "
-                        f"the previous owned service was stopped and was not restored: {exc}"
+                        f"the previous owned process was stopped and was not restored: {exc}{log_tail}"
                     ) from exc
-                if isinstance(exc, (ServiceError, ValueError, FileNotFoundError)):
+                if isinstance(exc, ServiceStartupError):
+                    raise ServiceStartupError(f"{exc}{log_tail}") from exc
+                if isinstance(exc, (ValueError, FileNotFoundError)):
                     raise
-                raise ServiceStartupError(f"Could not start {spec.service_type} on port {spec.port}: {exc}") from exc
+                if isinstance(exc, ServiceError):
+                    raise ServiceStartupError(f"{exc}{log_tail}") from exc
+                raise ServiceStartupError(
+                    f"Could not start {spec.service_type} on port {spec.port}: {exc}{log_tail}"
+                ) from exc
 
     def stop(self, port: int) -> None:
         with self._lock:
-            if port not in self._services:
-                return
             self._stop_running_locked(port)
 
     def stop_all(self) -> None:
@@ -96,18 +122,35 @@ class ServiceController:
                 return False
             return True
 
+    def matches(self, spec: ServiceSpec) -> bool:
+        with self._lock:
+            running = self._services.get(spec.port)
+            return bool(
+                running
+                and running.process.poll() is None
+                and running.spec.service_type == spec.service_type
+                and running.spec.settings == spec.settings
+            )
+
+    def endpoint_for(self, port: int) -> ServiceEndpoint:
+        with self._lock:
+            running = self._services.get(port)
+            if running is None or running.process.poll() is not None:
+                raise ServiceNotRunningError(f"No owned service is running on port {port}.")
+            return running.endpoint
+
     def list_services(self) -> list[ServiceStatus]:
         with self._lock:
             self._reap_dead_locked()
             return [
                 ServiceStatus(
-                    port=running.spec.port,
-                    service_type=running.spec.service_type,
-                    running=running.process.poll() is None,
-                    settings=dict(running.spec.settings),
-                    log_path=str(running.log_path),
+                    port=item.spec.port,
+                    service_type=item.spec.service_type,
+                    running=item.process.poll() is None,
+                    settings=dict(item.spec.settings),
+                    log_path=str(item.log_path),
                 )
-                for running in self._services.values()
+                for item in self._services.values()
             ]
 
     def get_logs(self, port: int, tail: int = 200) -> str:
@@ -120,15 +163,6 @@ class ServiceController:
             except OSError as exc:
                 raise ServiceError(f"Could not read service log: {exc}") from exc
             return "\n".join(lines[-max(1, min(tail, 5000)) :])
-
-    def _runtime_for(self, spec: ServiceSpec):
-        if spec.service_type in ("llm", "visual_llm"):
-            return LLMRuntime
-        if spec.service_type == "sam3":
-            from core.services.sam_runtime import SAMRuntime
-
-            return SAMRuntime
-        raise ValueError(f"Unsupported service type: {spec.service_type}")
 
     def _stop_running_locked(self, port: int) -> None:
         running = self._services.pop(port, None)

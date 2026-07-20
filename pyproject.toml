@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "almost-arcadia"
-version = "0.1.0"
+version = "0.4.0"
 description = "Trusted-network orchestration UI for direct LLM/SAM inference and Priority Map."
 requires-python = ">=3.11"
 dependencies = [
@@ -15,26 +15,31 @@ dependencies = [
     "numpy>=2.0,<3",
     "opencv-python>=4.10,<5",
     "huggingface-hub>=0.23,<2",
+    "networkx>=3.2,<4",
 ]
 
 [project.optional-dependencies]
 sam = ["ultralytics>=8.3"]
-pipeline = ["priority-map @ git+https://github.com/josephletobar/priority_map.git@ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"]
+pipeline = [
+    "priority-map @ git+https://github.com/josephletobar/priority_map.git@ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d"
+]
 dev = [
-    "pytest>=8.3,<9",
+    "pytest>=8.3,<10",
     "pytest-django>=4.9,<5",
-    "pytest-cov>=6,<7",
+    "pytest-cov>=6,<8",
     "ruff>=0.9,<1",
     "mypy>=1.14,<2",
+    "types-requests>=2.32",
 ]
 all = [
     "ultralytics>=8.3",
     "priority-map @ git+https://github.com/josephletobar/priority_map.git@ea6d1064175b20c1e90dd3f1ffb0b4173f68e03d",
-    "pytest>=8.3,<9",
+    "pytest>=8.3,<10",
     "pytest-django>=4.9,<5",
-    "pytest-cov>=6,<7",
+    "pytest-cov>=6,<8",
     "ruff>=0.9,<1",
     "mypy>=1.14,<2",
+    "types-requests>=2.32",
 ]
 
 [project.scripts]
@@ -48,13 +53,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["overlay"]
+extend-exclude = ["overlay", "vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
-
-[tool.ruff.lint.per-file-ignores]
-"apply_overlay.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -65,3 +67,6 @@ follow_imports = "skip"
 
 [tool.setuptools.packages.find]
 include = ["core*", "web*", "project*"]
+
+[tool.setuptools.package-data]
+web = ["templates/web/*.html", "templates/web/partials/*.html", "static/web/*"]
